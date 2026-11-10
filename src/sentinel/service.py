@@ -46,10 +46,10 @@ from .recorder.integrity import IntegrityWorker
 from .recorder.recovery import Recovery
 from .ledger_timing import insert_clock_observation
 from .recorder.supervisor import RecordingSupervisor
-from .recorder.timebase import ClockStepDetector
+from .recorder.timebase import ClockStepDetector, read_clock_pair
 from .status import Measurements, StatusDocument, apply_alerts, evaluate, write_status
 from .storage.monitor import DiskUsage, StorageMonitor
-from .timesync import query_os_time_sync
+from .timesync import query_os_time_sync, sntp_offset
 
 log = logging.getLogger("sentinel.service")
 
@@ -88,6 +88,7 @@ class RecorderService:
         self._next_clock_obs = 0.0
         self._clock_obs_thread: threading.Thread | None = None
         self.last_clock_observation: dict | None = None
+        self._closing = threading.Event()
 
     # ------------------------------------------------------------------
     def run(self) -> int:
@@ -150,7 +151,8 @@ class RecorderService:
         log.info("startup recovery: %s", report)
         self.finalizer.start()
         self.integrity.start()
-        self._host_clock = ClockStepDetector(self.clock.wall(), self.clock.mono(), cfg.recording.clock_step_tolerance_s)
+        w0, m0, _ = read_clock_pair(self.clock)
+        self._host_clock = ClockStepDetector(w0, m0, cfg.recording.clock_step_tolerance_s)
         self._next_clock_obs = self.clock.mono() + cfg.service.clock_observation_interval_s
         self._sample_clock("startup")
         self.supervisor = RecordingSupervisor(
@@ -180,8 +182,11 @@ class RecorderService:
             self._write_status(force=True, stopping=exit_code == EXIT_OK)
             if exit_code != EXIT_OK:
                 self._maybe_report()
+            # An observation still querying the OS must not write after the ledger is closed: it
+            # checks _closing before writing; the join covers its worst-case query time.
+            self._closing.set()
             if self._clock_obs_thread is not None:
-                self._clock_obs_thread.join(15)
+                self._clock_obs_thread.join(30)
             self.ledger.close()
         return exit_code
 
@@ -229,7 +234,8 @@ class RecorderService:
             self._sample_clock("clock_step")
         self._clock_offset = offset
         if self._host_clock is not None:
-            self._host_clock.update(offset + now, now)
+            w_pair, m_pair, spread = read_clock_pair(self.clock)   # tight pair, not ``now``
+            self._host_clock.update(w_pair, m_pair, spread)
         if now >= self._next_ntp:
             self._next_ntp = now + 300.0
             self._ntp = self.platform.clock_synchronized()
@@ -249,8 +255,10 @@ class RecorderService:
 
     def _observe_clock(self, reason: str) -> None:
         try:
-            wall, mono = self.clock.wall(), self.clock.mono()
-            osync = query_os_time_sync()
+            wall, mono, _ = read_clock_pair(self.clock)
+            svc = self.cfg.service
+            osync = query_os_time_sync(max_sync_age_s=svc.max_sync_age_s or None)
+            ref = sntp_offset(svc.time_reference_server, clock=self.clock.wall) if svc.time_reference_server else None
             host = self._host_clock
             cols: dict = {
                 "observed_utc": iso_utc(wall), "mono_s": mono, "reason": reason, "platform": self.platform.name,
@@ -263,6 +271,10 @@ class RecorderService:
                 "host_clock_drift_ppm": (round(host.drift_ppm, 3) if host and host.drift_ppm is not None else None),
                 "clock_steps_total_s": round(host.total_s, 6) if host else None,
             }
+            if ref is not None:
+                # Measured offset of this PC's clock from the configured reference (E1).
+                cols.update(ref_server=svc.time_reference_server, ref_offset_s=ref.offset_s,
+                            ref_delay_s=ref.delay_s, ref_detail=json.dumps(ref.detail, sort_keys=True))
             sup = self.supervisor
             if sup is not None:
                 with sup.live.lock:
@@ -271,12 +283,16 @@ class RecorderService:
                         cols.update(run_id=lv.run_id, stream_time_s=lv.last_out_time_s,
                                     camera_drift_ppm=lv.camera_drift_ppm, time_correction_s=lv.time_correction_s)
             assert self.ledger is not None
+            if self._closing.is_set():
+                log.info("clock observation (%s) discarded: service is stopping", reason)
+                return
             insert_clock_observation(self.ledger, cols)
             self.last_clock_observation = {k: cols.get(k) for k in (
                 "observed_utc", "reason", "sync_tool", "synchronized", "sync_source", "last_sync_utc", "os_offset_s",
-                "host_clock_drift_ppm")}
-            log.info("clock observation (%s): synchronized=%s source=%s offset=%s host drift=%s ppm",
-                     reason, osync.synchronized, osync.source, osync.offset_s, cols["host_clock_drift_ppm"])
+                "ref_server", "ref_offset_s", "host_clock_drift_ppm")}
+            log.info("clock observation (%s): synchronized=%s source=%s os offset=%s reference offset=%s "
+                     "host drift=%s ppm", reason, osync.synchronized, osync.source, osync.offset_s,
+                     cols.get("ref_offset_s"), cols["host_clock_drift_ppm"])
         except Exception:
             log.exception("could not record clock observation")
 
@@ -348,7 +364,7 @@ class RecorderService:
                 last_media = lv.last_media_mono_any
                 attempts, last_end = lv.attempts, lv.last_end_reason
                 unstable = sum(1 for t, media, _ in lv.recent_run_ends if now - t < 600 and media > 0)
-                if abs(lv.clock_step_s) > rec.clock_step_tolerance_s:
+                if abs(lv.clock_step_s) > rec.clock_step_tolerance_s or lv.clock_slew_run:
                     clock_anomaly = True
                 live_d = {"run_id": lv.run_id, "run_started_utc": lv.run_launched_utc,
                           "stream_time_s": lv.last_out_time_s, "fps": lv.fps, "attempts": lv.attempts,

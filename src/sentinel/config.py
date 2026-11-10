@@ -92,6 +92,11 @@ class ServiceConfig:
     janitor_interval_s: float = 60.0          # retry stuck segments, checkpoint ledger, tidy run dirs
     diagnostics_keep: int = 20
     clock_observation_interval_s: float = 900.0  # E1: OS time-sync + clock offset record (docs/03 §4.4)
+    # E1 measured offset: SNTP query (read-only) to the APPROVED time source, "host" or "host:port".
+    # Empty = not measured (no Internet default). Must be the local/approved NTP server (docs/07).
+    time_reference_server: str = ""
+    # A Windows Time sync older than this counts as not synchronised (0 = 2 x the reported poll interval).
+    max_sync_age_s: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -200,6 +205,11 @@ def _validate(cfg: AppConfig) -> None:
                             cfg.service.audit_interval_s, cfg.service.janitor_interval_s,
                             cfg.service.clock_observation_interval_s)):
         raise ConfigError("[service] intervals must be positive")
+    if cfg.service.max_sync_age_s < 0:
+        raise ConfigError("[service] max_sync_age_s must be 0 (automatic) or positive")
+    ref = cfg.service.time_reference_server
+    if ref and not re.fullmatch(r"[A-Za-z0-9.\-]{1,253}(:[0-9]{1,5})?|\[[0-9A-Fa-f:]+\](:[0-9]{1,5})?", ref):
+        raise ConfigError("[service] time_reference_server must be a host name or address, optionally :port")
     if cfg.service.log_level.upper() not in ("DEBUG", "INFO", "WARNING", "ERROR"):
         raise ConfigError("[service] log_level must be DEBUG, INFO, WARNING or ERROR")
 

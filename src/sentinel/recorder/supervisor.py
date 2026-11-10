@@ -45,11 +45,17 @@ from .ffmpeg_cmd import SEGMENT_LIST_NAME, build_record_argv, redacted_command
 from .finalizer import Finalizer, GapJob, SegmentJob
 from .progress import ProgressParser
 from .segment_list import SegmentEntry, SegmentListReader
-from .timebase import TIME_METHOD, ClockStepDetector, DriftTracker, RunTimebase, TimeKnot
+from .timebase import TIME_METHOD, ClockStepDetector, DriftTracker, RunTimebase, TimeKnot, read_clock_pair
 
 log = logging.getLogger(__name__)
 _SEG_RE = re.compile(r"^seg_(\d{6,})\.ts$")
 MAX_CONSECUTIVE_INTERNAL_ERRORS = 5
+
+
+def segment_ready(entry: SegmentEntry, newest_out_time_s: float | None) -> bool:
+    """A listed segment may be timed once a progress report beyond its end has been seen (and
+    passed through the lost-time check); see the supervisor loop."""
+    return newest_out_time_s is not None and newest_out_time_s > entry.end_s
 
 
 class Backoff:
@@ -96,6 +102,7 @@ class LiveState:
     camera_drift_ppm: float | None = None
     host_clock_drift_ppm: float | None = None
     time_correction_s: float | None = None
+    clock_slew_run: bool = False               # current run saw a faster-than-drift clock change
 
 
 @dataclass
@@ -181,8 +188,8 @@ class RecordingSupervisor:
     # ------------------------------------------------------------------ one FFmpeg lifetime
     def run_once(self) -> RunOutcome:
         rec = self.cfg.recording
-        wall0, mono0 = self.clock.wall(), self.clock.mono()
-        run_id = f"{compact_utc(wall0)}-{secrets.token_hex(4)}"
+        wall0, mono0, _ = read_clock_pair(self.clock)       # tight pair: reference for host drift
+        run_id =f"{compact_utc(wall0)}-{secrets.token_hex(4)}"
         run_dir = self.cam_dir / run_id
         argv = build_record_argv(self.cfg, self._input_url, run_dir)
         run_dir.mkdir(parents=True, exist_ok=False)
@@ -208,6 +215,7 @@ class RecordingSupervisor:
             lv.lag_s, lv.drift_since_mono, lv.drift_break_stream_s, lv.last_ok_out_time_s = 0.0, None, None, None
             lv.lag_baseline_s = None
             lv.camera_drift_ppm, lv.host_clock_drift_ppm, lv.time_correction_s = None, None, None
+            lv.clock_slew_run = False
             lv.attempts += 1
         log.info("run %s: launching FFmpeg: %s", run_id, redacted_command(argv))
 
@@ -233,7 +241,7 @@ class RecordingSupervisor:
 
         seglist = SegmentListReader(run_dir / SEGMENT_LIST_NAME)
         known: dict[str, str] = {}               # filename -> segment_id
-        pending: list[SegmentEntry] = []
+        pending: list[tuple[SegmentEntry, str]] = []   # (entry, wall time the close was seen)
         reason: RunEndReason | None = None
         clock_flagged = False
         last_persist = mono0
@@ -246,16 +254,21 @@ class RecordingSupervisor:
                 # Closed segments wait until the run's time anchor has been measured: after a
                 # (re)connect FFmpeg may flush buffered media and close a segment before its
                 # first progress report.
-                pending.extend(seglist.read_new())
+                seen = iso_utc(self.clock.wall())
+                pending.extend((e, seen) for e in seglist.read_new())
                 with self.live.lock:
                     anchored = timebase.has_anchor
                     drift_suspected = self.live.drift_since_mono is not None
+                    newest_t = self.live.last_out_time_s
                 # While stream time is suspected of having lost real time, hold closed segments:
-                # if confirmed, the break must be recorded before they are sealed.
+                # if confirmed, the break must be recorded before they are sealed. A segment is
+                # also held until a progress report *newer than its end* has been checked for
+                # lost time: FFmpeg can list a segment (closed by the first packet after a freeze)
+                # before reporting the stream time that reveals the freeze.
                 if anchored and not drift_suspected:
-                    for entry in pending:
-                        self._on_closed(run_id, run_dir, entry, known, timebase, drift, steps)
-                    pending.clear()
+                    while pending and segment_ready(pending[0][0], newest_t):
+                        entry, seen_at = pending.pop(0)
+                        self._on_closed(run_id, run_dir, entry, known, timebase, drift, steps, seen_at)
 
                 with self.live.lock:
                     lv = self.live
@@ -306,7 +319,10 @@ class RecordingSupervisor:
                     self._stop_ffmpeg(proc, graceful=True)
                     break
 
-                steps.update(self.clock.wall(), now)
+                # Wall and monotonic read back to back (``now`` is ~a whole loop iteration old):
+                # loop latency must not masquerade as clock drift.
+                w_pair, m_pair, spread = read_clock_pair(self.clock)
+                steps.update(w_pair, m_pair, spread)
                 step = steps.total_s
                 with self.live.lock:
                     self.live.clock_step_s = step
@@ -338,9 +354,10 @@ class RecordingSupervisor:
 
         # Final segment list entries (a graceful 'q' lists the last segment) and late files.
         self._register_new_files(run_id, run_dir, known)
-        pending.extend(seglist.read_new())
-        for entry in pending:  # without an anchor, the finaliser falls back to file times (flagged)
-            self._on_closed(run_id, run_dir, entry, known, timebase, drift, steps)
+        seen = iso_utc(self.clock.wall())
+        pending.extend((e, seen) for e in seglist.read_new())
+        for entry, seen_at in pending:  # without an anchor, the finaliser falls back to file times (flagged)
+            self._on_closed(run_id, run_dir, entry, known, timebase, drift, steps, seen_at)
         if seglist.bad_lines:
             log.error("run %s: unparseable segment list lines: %r", run_id, seglist.bad_lines[:5])
 
@@ -483,7 +500,8 @@ class RecordingSupervisor:
                 observed_first_utc=iso_utc(self.clock.wall()))
 
     def _on_closed(self, run_id: str, run_dir: Path, entry: SegmentEntry, known: dict[str, str],
-                   timebase: RunTimebase, drift: DriftTracker, steps: ClockStepDetector) -> None:
+                   timebase: RunTimebase, drift: DriftTracker, steps: ClockStepDetector,
+                   observed: str | None = None) -> None:
         if entry.filename not in known:
             self._register_new_files(run_id, run_dir, known)
         seg_id = known.get(entry.filename)
@@ -492,7 +510,7 @@ class RecordingSupervisor:
             self.ledger.add_event("error", "recorder", "segment_list_unknown_file",
                                   "FFmpeg listed a file that does not exist", {"file": entry.filename})
             return
-        observed = iso_utc(self.clock.wall())
+        observed = observed or iso_utc(self.clock.wall())   # when the close was seen, not processed
         with self.live.lock:
             first = not timebase.frozen and timebase.has_anchor
             if first:
@@ -546,6 +564,20 @@ class RecordingSupervisor:
             self.ledger.add_event("warning", "clock", "time_correction_limited",
                                   "Recording time correction was rate-limited: measured timing changed faster "
                                   "than clock drift can explain", {"run_id": run_id, **knot.detail()})
+        with self.live.lock:
+            host_limited = drift.host_limited_count
+        if knot.host_limited and host_limited == 1:
+            # The PC wall clock moved against the monotonic clock faster than drift (fast time-service
+            # slew or a step below clock_step_tolerance_s): not followed beyond the drift limit and
+            # treated like a clock step — the run's segments are flagged clock_anomaly (T-001).
+            log.error("run %s: system clock slewed faster than %.0f ppm (host drift %.3f s, applied %.3f s)",
+                      run_id, self.cfg.recording.max_clock_drift_ppm, knot.host_s, knot.host_applied_s)
+            self.ledger.mark_run_clock_anomaly(run_id)
+            self.ledger.add_event("warning", "clock", "clock_slew",
+                                  "System clock changed faster than normal drift during recording",
+                                  {"run_id": run_id, **knot.detail()})
+            with self.live.lock:
+                self.live.clock_slew_run = True                               # surfaces T-001 in status
 
     def _read_progress(self, proc: subprocess.Popen[bytes], timebase: RunTimebase, drift: DriftTracker) -> None:
         parser = ProgressParser()

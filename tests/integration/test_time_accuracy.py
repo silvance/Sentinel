@@ -153,3 +153,27 @@ def test_fast_camera_stays_on_reception_time(tmp_path: Path) -> None:
     run = h.runs()[0]
     assert run["camera_drift_ppm"] == pytest.approx(10000, abs=1500)        # camera fast
     assert abs(run["host_clock_drift_ppm"] or 0.0) < 300                    # real clocks: no exaggerated drift
+
+
+def test_first_video_pts_gives_one_constant_offset_per_run(tmp_path: Path) -> None:
+    """Basis of the segment-0 lead-in check (review finding 6): with -reset_timestamps 0 the first
+    packet PTS of every segment is its listed start plus one constant MPEG-TS offset."""
+    import subprocess
+
+    from sentinel.media.probe import first_video_pts
+    from sentinel.recorder.segment_list import SegmentListReader
+
+    src = tmp_path / "in.ts"
+    subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+                    "testsrc2=size=320x240:rate=15", "-t", "8", "-c:v", "libx264", "-g", "15", "-bf", "0",
+                    "-f", "mpegts", str(src)], check=True)
+    subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(src), "-c", "copy",
+                    "-f", "segment", "-segment_format", "mpegts", "-segment_time", "3", "-reset_timestamps", "0",
+                    "-segment_list", str(tmp_path / "l.csv"), "-segment_list_type", "csv",
+                    str(tmp_path / "s_%03d.ts")], check=True)
+    entries = SegmentListReader(tmp_path / "l.csv").read_all()
+    pts = [first_video_pts(tmp_path / e.filename) for e in entries]
+    assert len(entries) >= 3 and all(p is not None for p in pts)
+    offsets = [p - e.start_s for p, e in zip(pts, entries) if p is not None]
+    assert max(offsets) - min(offsets) < 1e-3, offsets
+    assert first_video_pts(tmp_path / "missing.ts") is None

@@ -46,3 +46,5 @@ ffprobe = "/usr/bin/ffprobe"
 [service]
 log_level = "INFO"
 clock_observation_interval_s = 900 # OS time-sync / clock-offset record for the evidence ledger (E1)
+time_reference_server = ""          # approved local NTP server, e.g. "192.0.2.1"; measures the PC clock offset (E1)
+max_sync_age_s = 0                  # Windows: older last sync = not synchronised (0 = 2 x poll interval)

@@ -113,32 +113,53 @@ camera-vs-PC clock drift and, on Windows, the monotonic-vs-wall drift. Since `re
 
 ```
 at each segment boundary b (stream time t_b, when FFmpeg closes the segment):
-  camera_b = min over reports with t in [t_b − 8 s, t_b + 2 s] of (m − t)  −  anchor_mono
-  host_b   = (wall − mono now) − (wall − mono at launch) − (sum of detected clock steps)
-  measured = camera_b + host_b
-  c_b      = c_prev + clamp(measured − c_prev, ± (max_clock_drift_ppm·1e-6·(t_b − t_prev) + 0.1 s))
+  points   = per bucket of stream time (30 s; t/10 but ≥ 2 s early in a run) over the last hour:
+             (t at the minimum, min (m − t))                     -- lower envelope: reports are late, never early
+  camera_b = TheilSen(points)(t_b) − anchor_mono                  -- median-of-slopes line, evaluated at t_b
+  host_b   = median of the last 15 tight (wall, mono) samples of (wall − mono − detected steps)
+             − (wall − mono at launch)                            -- tight: wall read between two mono reads ≤ 2 ms apart
+  allow    = max_clock_drift_ppm·1e-6·(t_b − t_prev) + 0.02 s
+  camera'_b = camera'_prev + clamp(camera_b − camera'_prev, ±allow)   -- clamped: segment flag time_correction_limited
+  host'_b   = host'_prev   + clamp(host_b   − host'_prev,   ±allow)   -- clamped: clock anomaly (clock_slew)
+  c_b      = camera'_b + host'_b
 utc(t)     = anchor_utc + t + c(t),  c linear between the segment's start and end boundaries
 segment.start_utc = utc(stream_start_s)      segment.end_utc = utc(stream_end_s)
 ```
+
+A closed segment is timed only after a progress report *newer than its end* has passed the
+lost-time check (so a segment closed by the first packet after a freeze cannot be sealed before
+the freeze is noticed).
 
 * **Contiguous.** A segment's start boundary *is* the previous segment's end boundary, and a
   boundary's correction is fixed once (write-once in the ledger), so `start_utc(N+1) ==
   end_utc(N)` exactly when FFmpeg reports no gap. `c = 0` at stream time 0, so the first segment
   starts at the anchor as before.
-* **Tracks drift without accumulating error.** `measured` is an absolute measurement against
-  reception, not a running sum, so after days the error is still the measurement noise (tens of
-  ms), not ppm × elapsed time.
+* **Tracks drift without accumulating error.** The estimate is an absolute measurement against
+  reception, not a running sum, so after days the error is still the measurement error, not
+  ppm × elapsed time. Measured bounds (see the tests listed in docs/05 row 30): synthetic 3 days
+  at ±50-80 ppm < 0.1 s; the reviewer's model (300 s segments, 20 ms reporting jitter) ≤ 2 ms at
+  0 and 50 ppm; synthetic 1 % drift ≤ 0.04 s; real FFmpeg + simulator at 1 % drift: segment ends
+  −0.05 … −0.28 s from `observed_closed_utc`, which itself lags reception by up to one poll
+  interval (so the true error is smaller than these figures but not separately measured).
+* **Stalls do not move boundaries.** A disk, antivirus or CPU stall delays progress reports
+  (raises `m − t`). A stall shorter than a bucket does not change that bucket's minimum; longer
+  ones raise a minority of points that the median-based fit ignores. Tested: 0.35 s, 3 s and 60 s
+  stalls at a boundary change it by ≤ 20 ms, with no flag. The PC-clock component uses only tight
+  wall/monotonic pairs and a median, so a delayed reading thread does not become "drift" (tested
+  with 0.25 s late reads: ≤ 20 ms).
 * **Steps are not followed.** `host_b` excludes wall-clock steps (`ClockStepDetector`: a jump
   > `clock_step_tolerance_s` between two 0.5 s samples), which are still recorded as `clock_step`
   events with `clock_anomaly = 1` on the run's segments, as before. A new run re-anchors to the
-  (stepped) wall clock. Gradual change (Windows monotonic drift, NTP slewing of the wall clock)
-  is followed.
-* **Jumps are not followed.** The rate limit (`max_clock_drift_ppm`, default 1000 ppm — ten
-  times worse than any working clock) plus a 0.1 s jitter allowance per boundary means a sudden
-  change in reception timing (lost real time, a sub-tolerance clock step) is never smeared into
-  the times. A boundary where the limit applied gets `time_correction_limited = 1`, the segment
-  the warning `time_correction_limited`, the run a counter and one `time_correction_limited`
-  event; if the change persists the correction catches up only at the limit rate.
+  (stepped) wall clock. Gradual change (Windows monotonic drift, slow NTP slewing) is followed.
+* **Nothing faster than drift is followed.** Each component may change per boundary by at most
+  `max_clock_drift_ppm` (default 1000 ppm — ten times worse than a working clock) × interval
+  + 20 ms. A camera-side change beyond that (e.g. real time lost below the 3 s lost-time
+  tolerance) sets `time_correction_limited` on the segment (warning), a run counter and one
+  event per run. A PC-clock change beyond it (a fast Windows Time slew, a step below
+  `clock_step_tolerance_s`) is treated as a **clock anomaly**: `clock_anomaly = 1` on the run's
+  segments, a `clock_slew` event and T-001. In both cases a change that persists is caught up
+  at the limit rate only, i.e. it *is* spread over the following boundaries (bounded and
+  flagged, never silent).
 * **Absorbed discontinuities** (real time FFmpeg removed from the timeline, docs/PHASE2_REPORT.md §2) are
   unchanged: the supervisor measures the lost time, ends the run, and the finaliser records a
   `source_discontinuity_absorbed` gap and shifts later footage. The drift tracker is told the
@@ -146,9 +167,16 @@ segment.start_utc = utc(stream_start_s)      segment.end_utc = utc(stream_end_s)
   never counted as drift. The lost time itself is now measured as min(m − t) after the break
   minus min(m − t) over the 4 s before it (`DriftTracker.measure_jump`); the previous
   lag-minus-slow-baseline figure (kept as fallback) overstated it by the baseline's lag behind
-  drift (~0.3 s at 1 % drift, ~1 ms at 50 ppm). The supervisor's lag baseline already followed slow drift; at 1 %
-  drift its excess stays < 0.3 s, far below the 3 s tolerance, so drift causes no false gaps
-  (tested).
+  drift (~0.3 s at 1 % drift, ~1 ms at 50 ppm). The supervisor's lag baseline already followed
+  slow drift; at 1 % drift its excess stays < 0.3 s, far below the 3 s tolerance, so drift
+  causes no false gaps (tested).
+* **Segment 0 lead-in is measured, not assumed.** FFmpeg starts segment 0 at stream time 0 even
+  when footage begins at the first keyframe later; a shortfall at segment 0 used to be assumed
+  to be that lead-in, which could hide a real timestamp jump at its end (pre-existing). Now
+  segment 1's first PTS calibrates the run's constant PTS offset (`-reset_timestamps 0`; measured
+  constant with FFmpeg 9.0.1), the lead-in is `first_pts(seg 0) − offset`, and any remaining
+  shortfall goes through the boundary-gap path. If segment 1 is not available (run ended) the
+  lead-in is still assumed but flagged `lead_in_unverified`.
 * **Interrupted segments** (no CSV entry) start at the previous segment's end (or 0 for the
   first); their end correction is measured at the run's last progress report. Segments closed by
   startup recovery after a crash (no in-memory reports) **hold** the run's last measured
@@ -172,7 +200,8 @@ number of reports). Drift figures are reported once measured over ≥ 60 s.
 |---|---|
 | Keep one anchor per run, restart FFmpeg every N hours to re-anchor | Each restart loses a GOP or more of footage and creates a gap; drift still accumulates within N hours. |
 | Re-anchor each segment independently (`start = reception estimate`) | Breaks contiguity: boundaries jump by the measurement noise, creating tiny fake gaps/overlaps and making a real gap indistinguishable from noise. |
-| Linear regression of `m − t` over the whole run (rate + offset) | Accurate for constant drift, but a regression over days reacts slowly to drift changes (temperature) and one bad interval (a lost-time event) bends the whole line; still needs a jump detector. The local minimum + rate limit is simpler and fails safe. |
+| Least-squares regression of `m − t` over the whole run | Pulled by every late report and by lost-time events; over days it reacts slowly to drift changes (temperature). Chosen instead: a robust (Theil-Sen) line through bucket minima over the last hour, plus the rate limit. |
+| Minimum over a short window at each boundary (this branch's first version) | Rejected after independent review: a stall covering the ~10 reports of the window moved the boundary by up to the 0.1 s + ppm allowance (0.4 s per 300 s), sometimes unflagged. |
 | Use wall-clock time of each progress report directly | Follows wall-clock steps and every scheduling delay; no immunity to steps. |
 | Use the camera's own timestamps (RTCP sender reports / OSD) | Camera clock facts are unknown (docs/02 A6); RTCP is not exposed by FFmpeg `-c copy` progress; OSD is burned into pixels. Kept as **corroboration** (§4.5), not as the time source. |
 | FFmpeg wall-clock timestamps (`-use_wallclock_as_timestamps`, `-copyts`) | Rewrites the evidential stream's timestamps or makes them depend on FFmpeg's internal clock handling; we keep the camera's stream untouched and record time alongside it. |
@@ -188,7 +217,7 @@ applied correction, and what the operating system reports about synchronisation
 
 | OS | Command | Recorded |
 |---|---|---|
-| Windows | `sc query w32time`, `w32tm /query /status /verbose` (fallback `/status`), registry `W32Time\Parameters` | service state, synchronised (leap indicator / stratum / source), source, last good sync (UTC, from "Time since Last Good Sync Time"), `Phase Offset` as raw text value (sign convention not documented clearly enough to normalise) |
+| Windows | `sc query w32time`, `w32tm /query /status /verbose` (fallback `/status`), registry `W32Time\Parameters` | service state, synchronised, source, last good sync (UTC, from "Time since Last Good Sync Time"), `Phase Offset` as raw value (sign convention not documented clearly enough to normalise). **Synchronised = yes** only with leap indicator 0-2, stratum 1-15, `Last Sync Error` 0 **and** a last good sync younger than `max_sync_age_s` (default 2 × the reported poll interval); a failing or stale sync is "no" with a reason; without the sync age (non-verbose output) it is "unknown" |
 | Linux | `chronyc tracking`, else `timedatectl show` + `show-timesync` | synchronised, source, offset (chrony: local minus NTP time, from the explicit fast/slow wording), frequency error |
 
 On the development PC (Windows 11 Home) the Windows Time service is demand-start and was
@@ -199,6 +228,22 @@ service to start automatically and point it at the approved time source** (docs/
 labels in `w32tm` output are localised; on non-English Windows the raw text is kept and
 `synchronized` is left unknown rather than guessed. Linux and successful-`w32tm` parsing are
 implemented from the documented formats and are **not verified on a live system**.
+
+**Measured offset from the reference (E1).** What the OS *reports* is not a measurement on
+Windows (`os_offset_s` stays NULL: w32tm's phase offset sign is not normalised), and
+`host_clock_drift_*` is the PC wall clock against its own monotonic clock, **not** an offset
+from UTC. The measured offset comes from an SNTP query (RFC 4330, stdlib UDP socket, read-only,
+one 48-byte request, nothing on the PC is changed) to `[service] time_reference_server` — the
+**approved local time source**, which the administrator must set; **there is no default and
+no Internet server is ever contacted unless configured**. Each observation records
+`ref_server`, `ref_offset_s` (this PC's clock minus the reference) and `ref_delay_s` (round
+trip; the offset's uncertainty is at most half of it). Replies are accepted only in server mode,
+echoing our request, stratum 1-15 and not "unsynchronised". Unreachable/invalid → `ref_offset_s`
+NULL with the error in `ref_detail`. **If `time_reference_server` is not set, E1's "measured
+clock offset" is not met by the recorder** and must be supplied by the deployment procedure
+(e.g. `w32tm /stripchart /computer:<approved source> /samples:1 /dataonly`, syntax checked
+against `w32tm /?` on Windows 11; or `chronyc tracking`). Verified only against a local fake SNTP
+responder in unit tests, not against a real NTP server.
 
 The diagnostic report includes `clock_observations.csv`, the drift/correction columns in
 `runs.csv`/`segments.csv`, and a "Time accuracy" section in `summary.txt`.
@@ -211,28 +256,38 @@ A defensible statement has four parts; the ledger and diagnostic report supply e
    synchronised to *source* (clock_observations.sync_source); synchronisation was reported
    *yes/no* at *times*." Quote the observations spanning the footage; a gap in synchronisation
    (e.g. `synchronized = 0`) must be stated.
-2. **Measured offset.** Where the OS reports it (`os_offset_s`, chrony), state the PC's offset
-   from its reference at the observations before and after the footage. On Windows, state the
-   last good synchronisation time and, if captured, the w32tm phase offset as reported.
+2. **Measured offset.** State `ref_offset_s` ± `ref_delay_s`/2 against `ref_server` at the
+   observations before and after the footage (and chrony's `os_offset_s` on Linux). If no
+   reference was configured, say that the recorder did not measure the offset and quote the
+   deployment's own measurement; on Windows also state the last good synchronisation time.
 3. **Drift and corrections.** From `recording_runs`: camera clock drift (`camera_drift_ppm`),
    PC monotonic drift (`host_clock_drift_ppm`) and from `segments`: the correction applied
    (`time_correction_end_s`). Any segment with `clock_anomaly = 1` (clock step), warning
-   `time_correction_limited` or `time_correction_held`, or an adjacent gap row must be listed
-   with its reason.
+   `time_correction_limited`, `time_correction_held` or `lead_in_unverified`, or an adjacent
+   gap row must be listed with its reason.
 4. **Residual uncertainty.** Receipt time ≈ capture time + camera-to-PC latency (measure it once
-   per installation with step 5 below; an unmeasured estimate for H.264 IP cameras is 0.2-1 s), plus the PC
-   clock's offset from UTC (step 2), plus measurement noise (< 0.1 s in tests; ±0.5 s is the
-   tested bound at 1 % drift). Express the result as e.g. "within ±1 s of UTC" only when steps
-   1-3 support it.
+   per installation with step 5 below; an unmeasured estimate for H.264 IP cameras is 0.2-1 s),
+   plus the PC clock's offset from UTC (step 2), plus the recorder's own estimation error. That
+   last term was measured in simulation only: ≤ 2 ms for a realistic model with stalls, ≤ 0.04 s
+   at 1 % drift synthetic, and in end-to-end tests with real FFmpeg segment ends −0.05 … −0.28 s
+   from the poll-delayed reference (the tests assert ±0.5 s). It has not been measured on the
+   real camera. Express the result as e.g. "within ±1 s of UTC" only when steps 1-3 and step 5
+   support it.
 
 **OSD comparison procedure (real camera; corroboration, not the time source).**
 
 5. *Installation / each drive swap:* hold a reference clock in view of the camera (a phone or
    GPS clock showing seconds, itself checked against an authoritative time source; note its
    offset). Record ≥ 30 s. On review, step frame by frame to a seconds rollover of the reference
-   clock; the frame's ledger time is `segment.start_utc + (frame pts − first frame pts)`
-   (the in-segment correction is linear and below the drift rate, i.e. negligible within a
-   segment). `ledger time − reference time` = capture-to-receipt latency + PC clock error.
+   clock; the frame's ledger time is `segment.start_utc + (frame pts − first frame pts)`,
+   **plus `recording_runs.timeline_shift_s` for frames after `timeline_break_stream_s`** if the
+   segment contains an absorbed discontinuity (its `source_discontinuity_absorbed` gap row
+   marks the place); internal timestamp gaps are already contained in the PTS difference. Within
+   a segment the drift correction changes linearly by at most `max_clock_drift_ppm` × segment
+   length + 20 ms (0.32 s for 300 s at the default; the real change is the measured drift, e.g.
+   15 ms at 50 ppm); for the most exact figure interpolate between `time_correction_start_s` and
+   `time_correction_end_s`. `ledger time − reference time` = capture-to-receipt latency + PC
+   clock error.
 6. *Camera OSD:* if the camera burns its own clock into the picture (OSD), note at ≥ 10 points
    spread over the recording (start, each day, either side of every gap and every
    `clock_anomaly` segment) `OSD time − ledger time`, converting the OSD to UTC (state the

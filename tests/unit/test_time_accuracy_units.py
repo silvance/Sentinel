@@ -15,7 +15,7 @@ from conftest import make_config
 from sentinel.db import Ledger
 from sentinel.ledger_timing import (RUN_COLUMNS, SEGMENT_COLUMNS, TIMING_SCHEMA_KEY, existing_columns,
                                     insert_clock_observation)
-from sentinel.recorder.timebase import (JITTER_ALLOWANCE_S, ClockStepDetector, DriftTracker,
+from sentinel.recorder.timebase import (NON_DRIFT_ALLOWANCE_S, ClockStepDetector, DriftTracker,
                                         interpolate_correction)
 from sentinel.timesync import (CommandResult, parse_chronyc_tracking, parse_sc_state, parse_timedatectl_show,
                                parse_w32tm_status, query_linux, query_windows)
@@ -78,7 +78,7 @@ def test_exaggerated_one_percent_drift_needs_matching_rate_limit() -> None:
     _, knots, truth = _simulate(0.1, -10000.0, 0.0, seg_s=300.0, max_ppm=1000.0)
     assert all(k.limited for k in knots)
     for a, b in zip(knots, knots[1:]):
-        assert b.correction_s - a.correction_s == pytest.approx(1000e-6 * 300 + JITTER_ALLOWANCE_S)
+        assert b.correction_s - a.correction_s == pytest.approx(1000e-6 * 300 + NON_DRIFT_ALLOWANCE_S)
     assert truth[-1] - knots[-1].correction_s > 10
 
 
@@ -86,12 +86,15 @@ def test_sudden_reception_jump_is_not_followed() -> None:
     # 12 s of real time vanish from the stream (absorbed discontinuity) after 2 hours.
     tr, knots, truth = _simulate(0.25, 30.0, 0.0, jump=(7200.0, 12.0))
     before = [k for k in knots if k.stream_s < 7200]
-    after = [k for k in knots if k.stream_s > 7200 + 300]
     assert not any(k.limited for k in before)
-    assert after[0].limited and after[0].measured_s is not None and after[0].measured_s > 11
-    # Never more than drift limit + jitter allowance per knot: a jump becomes a flagged slew.
+    # The robust fit over the last hour does not follow the jump at first (the supervisor's
+    # lost-time detector handles it); if it persists for most of the hour it is followed only at
+    # the limit rate and flagged. Never more than limit + allowance per knot.
+    first_after = [k for k in knots if 7200 < k.stream_s <= 7200 + 600]
+    assert all(abs(k.correction_s - before[-1].correction_s) < 0.05 for k in first_after)
+    assert any(k.limited for k in knots if k.stream_s > 7200)
     for a, b in zip(knots, knots[1:]):
-        assert abs(b.correction_s - a.correction_s) <= 1000e-6 * 300 + JITTER_ALLOWANCE_S + 1e-9
+        assert abs(b.correction_s - a.correction_s) <= 1000e-6 * 300 + NON_DRIFT_ALLOWANCE_S + 1e-9
 
 
 def test_break_registered_by_supervisor_keeps_drift_measurement_clean() -> None:

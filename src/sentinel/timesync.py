@@ -98,12 +98,17 @@ def _seconds(value: str | None) -> float | None:
     return float(m.group(1)) if m else None
 
 
-def parse_w32tm_status(text: str, now_epoch: float | None = None) -> dict[str, Any]:
+def parse_w32tm_status(text: str, now_epoch: float | None = None,
+                       max_sync_age_s: float | None = None) -> dict[str, Any]:
     """Parse ``w32tm /query /status [/verbose]`` (English labels).
 
-    Returns parsed fields plus ``synchronized``: False for Leap Indicator 3 ("not
-    synchronized") or a "Local CMOS Clock"/"Free-running System Clock" source, True for leap
-    indicator 0-2 with a stratum 1-15 source, otherwise None. ``Phase Offset`` (verbose only) is
+    Returns parsed fields plus ``synchronized`` and ``sync_reason``:
+    * False for Leap Indicator 3 ("not synchronized"), a "Local CMOS Clock"/"Free-running System
+      Clock" source, a non-zero ``Last Sync Error``, or a last good sync older than
+      ``max_sync_age_s`` (default: twice the reported poll interval);
+    * True only for leap indicator 0-2, stratum 1-15, last sync error 0 and a fresh last good sync;
+    * None when it cannot be decided (e.g. non-verbose output without the sync age, or
+      unrecognised/localised labels). ``Phase Offset`` (verbose only) is
     reported as ``phase_offset_s_raw`` with w32tm's own sign: its convention is not documented
     clearly enough to store as local-minus-reference. ``Last Successful Sync Time`` is local
     time in the user's locale format and is kept as text; ``Time since Last Good Sync Time``
@@ -129,16 +134,33 @@ def parse_w32tm_status(text: str, now_epoch: float | None = None) -> dict[str, A
                        ("Phase Offset", "phase_offset_s_raw"), ("Time since Last Good Sync Time", "since_last_good_sync_s")):
         if label in kv:
             out[key] = _seconds(kv[label])
-    if out.get("since_last_good_sync_s") is not None and now_epoch is not None:
-        out["last_good_sync_utc"] = iso_utc(now_epoch - out["since_last_good_sync_s"])
+    if "Poll Interval" in kv:
+        m = re.search(r"\((\d+(?:\.\d+)?)s\)", kv["Poll Interval"])
+        out["poll_interval_s"] = float(m.group(1)) if m else None
+    since = out.get("since_last_good_sync_s")
+    if since is not None and now_epoch is not None:
+        out["last_good_sync_utc"] = iso_utc(now_epoch - since)
     src = (out.get("source") or "").lower()
     leap_i, strat = out.get("leap_indicator"), out.get("stratum")
+    err = out.get("last_sync_error")
+    limit = max_sync_age_s if max_sync_age_s else (2 * out["poll_interval_s"] if out.get("poll_interval_s") else None)
+    out["max_sync_age_s"] = limit
+    sync: bool | None
     if leap_i == 3 or "local cmos clock" in src or "free-running" in src:
-        out["synchronized"] = False
-    elif leap_i is not None and leap_i in (0, 1, 2) and strat is not None and 1 <= strat <= 15:
-        out["synchronized"] = True
+        sync, reason = False, "not_synchronized"
+    elif leap_i is None or leap_i not in (0, 1, 2) or strat is None or not 1 <= strat <= 15:
+        sync, reason = None, "status_not_recognised"
+    elif err is not None and not re.match(r"^0\b", err):
+        sync, reason = False, "last_sync_error"
+    elif since is None:
+        sync, reason = None, "sync_age_not_reported"
+    elif limit is None:
+        sync, reason = None, "sync_age_limit_unknown"
+    elif since > limit:
+        sync, reason = False, "last_sync_too_old"
     else:
-        out["synchronized"] = None
+        sync, reason = True, "ok"
+    out["synchronized"], out["sync_reason"] = sync, reason
     return out
 
 
@@ -236,7 +258,8 @@ def _windows_time_config() -> dict[str, Any]:
     return out
 
 
-def query_windows(run: Runner = run_command, now: Callable[[], float] = time.time) -> OsTimeSync:
+def query_windows(run: Runner = run_command, now: Callable[[], float] = time.time,
+                  max_sync_age_s: float | None = None) -> OsTimeSync:
     res = OsTimeSync(tool="w32tm")
     detail: dict[str, Any] = {}
     sc = run(["sc", "query", "w32time"])
@@ -249,8 +272,9 @@ def query_windows(run: Runner = run_command, now: Callable[[], float] = time.tim
             cr = cr2
     detail["returncode"] = cr.returncode
     if cr.returncode == 0:
-        parsed = parse_w32tm_status(cr.stdout, now())
+        parsed = parse_w32tm_status(cr.stdout, now(), max_sync_age_s)
         detail["w32tm"] = parsed
+        detail["reason"] = parsed.get("sync_reason")
         if "leap_indicator" not in parsed and "source" not in parsed:
             detail["raw"] = _excerpt(cr.stdout)          # e.g. localised labels: keep, do not guess
         res.synchronized = parsed.get("synchronized")
@@ -301,10 +325,89 @@ def query_linux(run: Runner = run_command, which: Callable[[str], str | None] = 
     return OsTimeSync(tool=None, detail=detail)
 
 
-def query_os_time_sync(platform: str | None = None, run: Runner = run_command) -> OsTimeSync:
+def query_os_time_sync(platform: str | None = None, run: Runner = run_command,
+                       max_sync_age_s: float | None = None) -> OsTimeSync:
     """Best-effort OS time-sync status for this host; never raises."""
     plat = platform or sys.platform
     try:
-        return query_windows(run) if plat == "win32" else query_linux(run)
+        return query_windows(run, max_sync_age_s=max_sync_age_s) if plat == "win32" else query_linux(run)
     except Exception as exc:  # defensive: an observation must never break recording
         return OsTimeSync(detail={"error": f"{type(exc).__name__}: {exc}"})
+
+
+# ---------------------------------------------------------------------- SNTP offset measurement
+NTP_UNIX_OFFSET = 2208988800          # seconds from 1900-01-01 (NTP era 0) to 1970-01-01
+
+
+@dataclass
+class SntpResult:
+    offset_s: float | None            # this PC's clock minus the reference (s)
+    delay_s: float | None             # round-trip delay; the offset's uncertainty is at most delay/2
+    detail: dict[str, Any] = field(default_factory=dict)
+
+
+def _ntp_to_unix(b: bytes) -> float:
+    sec = int.from_bytes(b[:4], "big")
+    frac = int.from_bytes(b[4:8], "big")
+    return sec - NTP_UNIX_OFFSET + frac / 2**32
+
+
+def _unix_to_ntp(t: float) -> bytes:
+    sec = int(t) + NTP_UNIX_OFFSET
+    frac = int((t - int(t)) * 2**32) & 0xFFFFFFFF
+    return (sec & 0xFFFFFFFF).to_bytes(4, "big") + frac.to_bytes(4, "big")
+
+
+def _split_server(server: str) -> tuple[str, int]:
+    if server.startswith("["):                       # [IPv6]:port
+        host, _, rest = server[1:].partition("]")
+        return host, int(rest[1:]) if rest.startswith(":") else 123
+    if server.count(":") == 1:
+        host, _, port = server.partition(":")
+        return host, int(port)
+    return server, 123
+
+
+def sntp_offset(server: str, timeout_s: float = 2.0, clock: Callable[[], float] = time.time) -> SntpResult:
+    """One SNTP (RFC 4330) client query to ``server`` ("host" or "host:port"); never raises.
+
+    Read-only: it sends one 48-byte client request and changes nothing on this PC. The caller
+    chooses the server (the approved local time source); there is no default. The reply is
+    accepted only if it is a server-mode reply echoing our transmit timestamp, with stratum
+    1-15 and leap indicator != 3 (unsynchronised server).
+    """
+    import socket
+
+    detail: dict[str, Any] = {"server": server}
+    try:
+        host, port = _split_server(server)
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_DGRAM)
+        family, _, _, _, addr = infos[0]
+        with socket.socket(family, socket.SOCK_DGRAM) as sock:
+            sock.settimeout(timeout_s)
+            req = bytearray(48)
+            req[0] = (0 << 6) | (4 << 3) | 3          # LI 0, version 4, mode 3 (client)
+            t1 = clock()
+            tx = _unix_to_ntp(t1)
+            req[40:48] = tx
+            sock.sendto(bytes(req), addr)
+            data, _ = sock.recvfrom(512)
+            t4 = clock()
+    except (OSError, ValueError) as exc:          # unreachable, timeout, bad name
+        detail["error"] = f"{type(exc).__name__}: {exc}"
+        return SntpResult(None, None, detail)
+    if len(data) < 48:
+        detail["error"] = "short_reply"
+        return SntpResult(None, None, detail)
+    li, mode, stratum = data[0] >> 6, data[0] & 7, data[1]
+    detail.update(leap=li, version=(data[0] >> 3) & 7, stratum=stratum, reference_id=data[12:16].hex())
+    if mode != 4 or data[24:32] != tx:
+        detail["error"] = "not_a_reply_to_this_request"
+        return SntpResult(None, None, detail)
+    if li == 3 or not 1 <= stratum <= 15:
+        detail["error"] = "server_not_synchronised"
+        return SntpResult(None, None, detail)
+    t2, t3 = _ntp_to_unix(data[32:40]), _ntp_to_unix(data[40:48])
+    ref_minus_local = ((t2 - t1) + (t3 - t4)) / 2
+    delay = (t4 - t1) - (t3 - t2)
+    return SntpResult(round(-ref_minus_local, 6), round(delay, 6), detail)

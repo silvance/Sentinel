@@ -103,6 +103,23 @@ New tests (all passed in runs 2 and 5, and run 4 for the freeze test):
   (append-only, idempotent), finaliser legacy/held corrections, diagnostics contents,
   w32tm/sc/chronyc/timedatectl parsing incl. the real "service has not been started" output.
 
+## 4a. Review findings (independent QA review of @4af7b3b) — status
+Regression tests: `tests/unit/test_time_review_findings.py` (the reviewer's `drift_probe.py`
+ported as `_reviewer_probe`, and the `seg0_probe.py` shape) and
+`test_first_video_pts_gives_one_constant_offset_per_run` (real FFmpeg).
+
+| # | Finding | Status |
+|---|---|---|
+| 1 HIGH | Stall at a boundary moved times (+0.400 s with a false limited flag; 0.35 s unflagged) | **Fixed.** Estimator replaced: Theil-Sen line through per-bucket minima of `m − t` over the last hour (bucket 30 s; t/10 ≥ 2 s early in a run), evaluated at the boundary; non-drift allowance cut from 0.1 s to 20 ms per boundary. Reviewer's probe now: ≤ 1 ms error and no flag for 0.35 s, 3 s and 60 s stalls (tests: `test_stall_at_a_boundary_never_moves_it[3.0/0.35]`, `test_stall_of_a_whole_minute_is_not_followed`). I did not add an explicit "two consecutive knots agree" rule: the median-based fit over an hour already requires most buckets to agree. |
+| 2 HIGH | Late wall read (loop latency) entered host drift (+0.25 s) | **Fixed.** `read_clock_pair` (mono, wall, mono; spread ≤ 2 ms) in the supervisor loop, run start and service; `ClockStepDetector.drift_s` = median of the last 15 tight samples. Probe: ≤ 1 ms (`test_late_wall_clock_reads_do_not_become_drift`, `test_loose_clock_pairs_are_not_used_for_drift`). |
+| 3 MED | Docs overclaimed; per-frame formula wrong after a break | **Fixed** in docs/03 §4.2/§4.5: measured bounds stated with their source, "spread over following boundaries (bounded, flagged)" instead of "never smeared", frame formula adds `timeline_shift_s` after the break, within-segment correction bound stated. |
+| 4 MED | No measured offset on Windows | **Fixed, with a condition.** SNTP query (stdlib, read-only) to `[service] time_reference_server` → `clock_observations.ref_offset_s/ref_delay_s/ref_detail`, shown in the diagnostics summary. **No default server**: if it is not configured, the recorder does not meet E1's "measured offset" and docs/03 §4.4 says so. Tested only against a local fake SNTP responder (offset, bad replies, unreachable, end-to-end into the ledger). `w32tm /stripchart` syntax checked against `w32tm /?` and documented as the manual alternative. |
+| 5 MED | w32tm "synchronized" ignored Last Sync Error and sync age | **Fixed.** True only with Last Sync Error 0 and last good sync ≤ `max_sync_age_s` (default 2 × reported poll interval); otherwise False/None with `sync_reason` (`test_w32tm_week_old_or_failing_sync_is_not_synchronized`). Field names unchanged, compatible with the windows-service branch. |
+| 6 MED (pre-existing) | Seg-0 lead-in hid a timestamp jump | **Fixed.** Segment 1's first PTS (new `probe.first_video_pts`, reads one packet) calibrates the run's constant PTS offset; measured lead-in used, rest goes to the boundary-gap path; no segment 1 → `lead_in_unverified` warning (three unit tests incl. the reviewer's shape; the constant offset verified with real FFmpeg). |
+| 7 LOW | Fast wall-clock slew entered host_s | **Fixed.** Host and camera components are limited separately; a host change beyond drift sets `host_limited`, marks the run `clock_anomaly`, records a `clock_slew` event and raises T-001 (`test_fast_wall_clock_slew_is_flagged_as_clock_anomaly_not_followed`). A persisting change is still caught up at the limit rate (documented). |
+| 8 LOW (pre-existing) | Race between segment close and break detection | **Fixed.** Pending segments are timed only after a progress report newer than their end has passed the lost-time check (`segment_ready`); `observed_closed_utc` is now stamped when the close is *seen*, not when it is processed (the hold otherwise distorted it by up to 1 s; caught by the drift integration tests). |
+| 9 LOW | Observation thread could write after ledger close | **Fixed.** `_closing` event checked before writing; join 30 s (`test_clock_observation_is_not_written_once_stopping`). |
+
 ## 5. NOT executed / not verified
 * **Linux:** `chronyc tracking`, `timedatectl show`/`show-timesync` parsing is from documented
   formats only (unit-tested with hand-written fixtures); never run on Linux.

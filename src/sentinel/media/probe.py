@@ -59,6 +59,28 @@ def _run(argv: list[str], timeout: float) -> subprocess.CompletedProcess[bytes]:
         raise ProbeError(f"{Path(argv[0]).name} timed out after {timeout}s") from None
 
 
+def first_video_pts(path: Path, ffprobe: str = "ffprobe", timeout: float = 30.0) -> float | None:
+    """PTS (seconds) of the first video packet in ``path``, reading only that packet; None if it
+    cannot be read. Safe on a file that is still being written (read-only, first packet only).
+
+    Measured with FFmpeg 9.0.1: in segments written with ``-reset_timestamps 0`` the first packet
+    PTS of each segment equals its listed start plus one constant MPEG-TS offset (1.4 s in that
+    test), so a later segment's first PTS calibrates that offset for segment 0."""
+    try:
+        cp = _run([ffprobe, "-v", "error", "-select_streams", "v:0", "-read_intervals", "%+#1",
+                   "-show_entries", "packet=pts_time", "-of", "csv=p=0", str(path)], timeout)
+    except ProbeError:
+        return None
+    for line in cp.stdout.decode("utf-8", "replace").splitlines():
+        first = line.strip().split(",")[0]
+        if first and first != "N/A":
+            try:
+                return float(first)
+            except ValueError:
+                return None
+    return None
+
+
 def probe_segment(path: Path, ffprobe: str = "ffprobe", ffmpeg: str = "ffmpeg", level: str = "packets",
                   max_internal_gap_s: float = 2.0, timeout: float = 300.0) -> ProbeResult:
     if not path.exists() or path.stat().st_size == 0:

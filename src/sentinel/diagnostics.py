@@ -181,6 +181,16 @@ def _fmt(v: object, spec: str = "", unit: str = "") -> str:
     return f"{v:{spec}}{unit}" if isinstance(v, (int, float)) and not isinstance(v, bool) else f"{v}{unit}"
 
 
+def _ref_line(obs: object) -> str:
+    keys = obs.keys() if hasattr(obs, "keys") else []  # type: ignore[union-attr]
+    if "ref_server" not in keys or not obs["ref_server"]:  # type: ignore[index]
+        return "not measured (no time_reference_server configured)"
+    if obs["ref_offset_s"] is None:  # type: ignore[index]
+        return f"measurement FAILED against {obs['ref_server']}"  # type: ignore[index]
+    return (f"{obs['ref_offset_s']:+.6f} s (PC minus {obs['ref_server']}, "  # type: ignore[index]
+            f"+/- {(obs['ref_delay_s'] or 0) / 2:.6f} s)")  # type: ignore[index]
+
+
 def _time_summary(obs: object | None, led: Ledger) -> list[str]:
     """Plain-language time-accuracy section (requirement E1, docs/03 §4.4)."""
     lines = ["Time accuracy (latest clock observation):"]
@@ -193,6 +203,7 @@ def _time_summary(obs: object | None, led: Ledger) -> list[str]:
         f"  Time source:            {obs['sync_source'] or 'unknown'}",
         f"  Last synchronisation:   {obs['last_sync_utc'] or 'not reported'}",
         f"  OS-measured offset:     {_fmt(obs['os_offset_s'], '+.6f', ' s')}",
+        f"  Offset vs reference:    {_ref_line(obs)}",
         f"  PC clock vs monotonic:  {_fmt(obs['host_clock_drift_ppm'], '+.1f', ' ppm')} "
         f"(steps since start: {_fmt(obs['clock_steps_total_s'], '+.3f', ' s')})",
         f"  Camera clock vs PC:     {_fmt(obs['camera_drift_ppm'], '+.1f', ' ppm')} "

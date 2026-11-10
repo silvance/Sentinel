@@ -6,20 +6,22 @@ Three clocks are involved:
 * the camera's clock, which stamps the stream (stream time ``t``, from FFmpeg ``-progress``);
 * the host monotonic clock ``m`` (never steps; on Windows it is *not* disciplined by time
   synchronisation, so it drifts slowly against UTC);
-* the host wall clock ``w`` (UTC, disciplined by the OS time service; may step).
+* the host wall clock ``w`` (UTC, disciplined by the OS time service; may step or slew).
 
 ``RunTimebase`` fixes one anchor per run: the monotonic time at which stream time 0 was
-received. ``DriftTracker`` then measures, at every segment boundary, how far the
-anchor-plus-stream-time estimate has drifted from the actual reception time (camera clock
-rate vs host monotonic) and how far the monotonic clock has drifted from the wall clock
-(steps excluded), and turns that into a *rate-limited* correction. Corrections are fixed at
+received. ``DriftTracker`` estimates, at every segment boundary, how far the anchor-plus-
+stream-time estimate has drifted from actual reception (camera clock rate vs host monotonic),
+and ``ClockStepDetector`` how far the monotonic clock has drifted from the wall clock (steps
+excluded). Both components are *rate-limited* to what genuine clock drift can explain, fixed at
 segment boundaries ("knots") and interpolated linearly in between, so consecutive segments stay
-contiguous and a sudden jump (a wall-clock step, or real time FFmpeg removed from the stream)
-is never followed — it is left to the step and discontinuity detectors, which flag it.
+contiguous and nothing that is not drift — a wall-clock step or fast slew, real time FFmpeg
+removed from the stream, a disk/antivirus/CPU stall delaying progress reports — moves a
+boundary by more than ``NON_DRIFT_ALLOWANCE_S``. Such events are flagged instead.
 """
 
 from __future__ import annotations
 
+import statistics
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
@@ -27,13 +29,41 @@ from typing import Any
 from ..clock import iso_utc
 
 TIME_METHOD = "reception_tracking_v1"
-# Jitter allowance per knot: how much the measured correction may move between two knots on
-# top of the drift-rate limit, so measurement noise (scheduling, progress-report timing) does
-# not register as rate-limiting. Large jumps are still never followed.
-JITTER_ALLOWANCE_S = 0.1
+# Change of a correction component allowed per knot on top of max_clock_drift_ppm x interval:
+# rounding/measurement noise only. A stall or step can never move a boundary by more than this.
+NON_DRIFT_ALLOWANCE_S = 0.02
+# Reception-offset estimator: minimum of (m - t) per BUCKET_S of stream time (the lower envelope:
+# a report can be late, never early), then a Theil-Sen line (median of pairwise slopes, robust
+# to ~29 % outlier buckets) through the bucket minima of the last FIT_HISTORY_S. A stall shorter
+# than a bucket does not change that bucket's minimum at all; a longer one raises a few points
+# the median ignores.
+BUCKET_S = 30.0
+FIT_HISTORY_S = 3600.0
+MIN_FIT_POINTS = 3
 # Drift rates (ppm) are only reported once measured over at least this much time; over shorter
 # spans measurement noise of a few tens of milliseconds dominates.
 MIN_PPM_SPAN_S = 60.0
+# Wall/monotonic sample pairs read further apart than this are not used for drift (the reading
+# thread was delayed between the two reads).
+MAX_PAIR_SPREAD_S = 0.002
+HOST_MEDIAN_SAMPLES = 15
+
+
+def read_clock_pair(clock: Any, tries: int = 3) -> tuple[float, float, float]:
+    """(wall, mono, spread): wall read between two monotonic reads; mono is their midpoint and
+    spread their difference (the uncertainty of the pairing). Retries for a tight pair."""
+    best: tuple[float, float, float] | None = None
+    for _ in range(max(1, tries)):
+        m1 = clock.mono()
+        w = clock.wall()
+        m2 = clock.mono()
+        cand = (w, (m1 + m2) / 2, m2 - m1)
+        if best is None or cand[2] < best[2]:
+            best = cand
+        if cand[2] <= MAX_PAIR_SPREAD_S:
+            break
+    assert best is not None
+    return best
 
 
 @dataclass
@@ -79,19 +109,22 @@ class RunTimebase:
 class TimeKnot:
     """The correction fixed at one segment boundary (stream time ``stream_s``)."""
     stream_s: float
-    correction_s: float              # applied: rate-limited (camera + host components)
-    measured_s: float | None         # what the measurements alone said (None: no reports in window)
-    camera_s: float | None           # measured reception offset vs the run anchor (camera vs host mono)
+    correction_s: float              # applied = camera_applied_s + host_applied_s
+    measured_s: float | None         # camera_s + host_s (None: no reports to measure from)
+    camera_s: float | None           # estimated reception offset vs the run anchor (camera vs host mono)
     host_s: float                    # host wall-vs-monotonic gradual drift since run start (steps excluded)
-    limited: bool                    # True if the rate limit held the correction back
-    reports: int                     # progress reports in the measurement window
+    limited: bool                    # camera component held back by the drift-rate limit
+    reports: int                     # progress reports the estimate used
+    camera_applied_s: float = 0.0
+    host_applied_s: float = 0.0
+    host_limited: bool = False       # wall-vs-monotonic changed faster than drift: clock anomaly
 
     def detail(self) -> dict[str, Any]:
-        return {"method": TIME_METHOD, "stream_s": round(self.stream_s, 6),
-                "applied_s": round(self.correction_s, 6),
-                "measured_s": None if self.measured_s is None else round(self.measured_s, 6),
-                "camera_s": None if self.camera_s is None else round(self.camera_s, 6),
-                "host_s": round(self.host_s, 6), "limited": self.limited, "reports": self.reports}
+        r = (lambda v: None if v is None else round(v, 6))
+        return {"method": TIME_METHOD, "stream_s": r(self.stream_s), "applied_s": r(self.correction_s),
+                "measured_s": r(self.measured_s), "camera_s": r(self.camera_s), "host_s": r(self.host_s),
+                "camera_applied_s": r(self.camera_applied_s), "host_applied_s": r(self.host_applied_s),
+                "limited": self.limited, "host_limited": self.host_limited, "reports": self.reports}
 
 
 def interpolate_correction(stream_s: float, k0_s: float | None, c0: float, k1_s: float | None, c1: float) -> float:
@@ -110,30 +143,52 @@ def interpolate_correction(stream_s: float, k0_s: float | None, c0: float, k1_s:
     return c0 + (c1 - c0) * f
 
 
+def theil_sen(points: list[tuple[float, float]], min_dx: float) -> tuple[float, float] | None:
+    """Robust line (slope, intercept) through ``points``; None with fewer than MIN_FIT_POINTS.
+    Pairs closer than ``min_dx`` in x are skipped (noise amplification)."""
+    if len(points) < MIN_FIT_POINTS:
+        return None
+    slopes = [(y2 - y1) / (x2 - x1) for i, (x1, y1) in enumerate(points) for (x2, y2) in points[i + 1:]
+              if x2 - x1 >= min_dx]
+    slope = statistics.median(slopes) if slopes else 0.0
+    intercept = statistics.median(y - slope * x for x, y in points)
+    return slope, intercept
+
+
+def _clamp(prev: float, target: float, allow: float) -> tuple[float, bool]:
+    delta = target - prev
+    if delta > allow:
+        return prev + allow, True
+    if delta < -allow:
+        return prev - allow, True
+    return target, False
+
+
 @dataclass
 class DriftTracker:
     """Rate-limited per-segment correction of the run anchor toward actual reception time.
 
     ``observe`` is fed every advancing progress report ``(t, m)``. Because a packet with stream
     time ``t`` cannot be reported before it was received, ``m - t`` is an upper bound of the
-    reception offset; its minimum over a short window of reports around a segment boundary
-    filters scheduling and reporting jitter (the same estimator as the run anchor, applied
-    locally). The camera component of the correction is that local minimum minus the run
-    anchor; the host component is the gradual wall-vs-monotonic drift (steps excluded) supplied
-    by ``ClockStepDetector.drift_s``.
+    reception offset. The camera component at a boundary is a robust line through the per-bucket
+    minima of ``m - t`` (see ``BUCKET_S``), evaluated at the boundary, minus the run anchor. The
+    host component is the gradual wall-vs-monotonic drift (steps excluded) from
+    ``ClockStepDetector.drift_s``.
 
-    The applied correction may change between consecutive knots by at most
-    ``max_drift_ppm * Δt + JITTER_ALLOWANCE_S``. Anything faster is not drift and is not
-    followed: the knot is marked ``limited`` (a warning on the segment) and the remainder is
-    caught up at the limit rate only if it persists.
+    Each component may change between consecutive knots by at most
+    ``max_drift_ppm * Δt + NON_DRIFT_ALLOWANCE_S``. Anything faster is not drift and is not
+    followed: the knot is flagged (``limited`` for the camera component — a segment warning;
+    ``host_limited`` for the PC clock — a clock anomaly). If the difference persists it is
+    caught up at the limit rate only.
     """
     max_drift_ppm: float
-    window_before_s: float = 8.0
+    window_before_s: float = 8.0      # fallback estimator while there are too few buckets
     window_after_s: float = 2.0
-    history_s: float = 180.0
-    _reports: deque = field(default_factory=lambda: deque(maxlen=8192))   # (t, m)
+    history_s: float = FIT_HISTORY_S
+    _reports: deque = field(default_factory=lambda: deque(maxlen=16384))   # (t, m)
     knots: list[TimeKnot] = field(default_factory=list)
     limited_count: int = 0
+    host_limited_count: int = 0
     _break: tuple[float, float] | None = None                              # (stream_s, shift_s)
 
     def observe(self, out_time_s: float, mono: float) -> None:
@@ -148,9 +203,15 @@ class DriftTracker:
         by the finaliser as an explicit gap, never smeared into the drift correction."""
         self._break = (stream_s, shift_s)
 
+    def _value(self, t: float, m: float) -> float:
+        v = m - t
+        if self._break is not None and t > self._break[0]:
+            v -= self._break[1]
+        return v
+
     def measure_jump(self, break_stream_s: float) -> float | None:
         """Real time lost at ``break_stream_s``: min(m - t) over reports after the break minus
-        min(m - t) over the window before it. Unlike a slowly-following baseline this is not
+        min(m - t) over the 4 s before it. Unlike a slowly-following baseline this is not
         biased by clock drift (at 1 % drift an exponential baseline lags by ~0.2-0.3 s).
         None if either side has no reports."""
         pre = post = None
@@ -166,19 +227,50 @@ class DriftTracker:
         return post - pre
 
     def offset_at(self, stream_s: float) -> tuple[float | None, int]:
-        """min(m - t) over reports within the window around ``stream_s``; (None, 0) if none."""
+        """min(m - t) over reports within the short window around ``stream_s``; (None, 0) if none."""
         lo, hi = stream_s - self.window_before_s, stream_s + self.window_after_s
         best: float | None = None
         n = 0
         for t, m in self._reports:
             if lo <= t <= hi:
-                v = m - t
-                if self._break is not None and t > self._break[0]:
-                    v -= self._break[1]
+                v = self._value(t, m)
                 n += 1
                 if best is None or v < best:
                     best = v
         return best, n
+
+    @staticmethod
+    def bucket_width(upto_s: float) -> float:
+        """BUCKET_S once a run is long enough; shorter (>= 2 s, ~10 buckets) early in a run so the
+        same robust fit is used from the first boundaries (no switch between estimators)."""
+        return min(BUCKET_S, max(2.0, upto_s / 10.0))
+
+    def bucket_minima(self, upto_s: float) -> tuple[list[tuple[float, float]], int]:
+        """(t at the minimum, min(m - t)) per bucket of stream time, over reports up to
+        ``upto_s + window_after_s``; and the number of reports used."""
+        hi = upto_s + self.window_after_s
+        width = self.bucket_width(upto_s)
+        best: dict[int, tuple[float, float]] = {}
+        n = 0
+        for t, m in self._reports:
+            if t > hi or t < upto_s - self.history_s:
+                continue
+            n += 1
+            v = self._value(t, m)
+            b = int(t // width)
+            if b not in best or v < best[b][1]:
+                best[b] = (t, v)
+        return [best[k] for k in sorted(best)], n
+
+    def estimate_offset(self, stream_s: float) -> tuple[float | None, int]:
+        """Reception offset (m - t) at ``stream_s`` from the robust fit; falls back to the
+        short-window minimum while fewer than MIN_FIT_POINTS buckets exist."""
+        points, n = self.bucket_minima(stream_s)
+        fit = theil_sen(points, self.bucket_width(stream_s) / 2)
+        if fit is None:
+            return self.offset_at(stream_s)
+        slope, intercept = fit
+        return intercept + slope * stream_s, n
 
     @property
     def last(self) -> TimeKnot | None:
@@ -201,25 +293,21 @@ class DriftTracker:
         if last is not None and stream_s <= last.stream_s:
             return last
         prev_s = last.stream_s if last is not None else 0.0
-        prev_c = last.correction_s if last is not None else 0.0
-        offset, n = self.offset_at(stream_s)
+        prev_cam = last.camera_applied_s if last is not None else 0.0
+        prev_host = last.host_applied_s if last is not None else 0.0
+        offset, n = self.estimate_offset(stream_s)
         camera = None if offset is None else offset - anchor_mono
-        measured = None if camera is None else camera + host_drift_s
-        allow = self.max_drift_ppm * 1e-6 * (stream_s - prev_s) + JITTER_ALLOWANCE_S
-        limited = False
-        if measured is None:
-            applied = prev_c                     # no evidence: hold the last correction
+        allow = self.max_drift_ppm * 1e-6 * (stream_s - prev_s) + NON_DRIFT_ALLOWANCE_S
+        if camera is None:
+            cam_applied, limited = prev_cam, False          # no evidence: hold
         else:
-            delta = measured - prev_c
-            if delta > allow:
-                applied, limited = prev_c + allow, True
-            elif delta < -allow:
-                applied, limited = prev_c - allow, True
-            else:
-                applied = measured
-        k = TimeKnot(stream_s, applied, measured, camera, host_drift_s, limited, n)
-        if limited:
-            self.limited_count += 1
+            cam_applied, limited = _clamp(prev_cam, camera, allow)
+        host_applied, host_limited = _clamp(prev_host, host_drift_s, allow)
+        measured = None if camera is None else camera + host_drift_s
+        k = TimeKnot(stream_s, cam_applied + host_applied, measured, camera, host_drift_s, limited, n,
+                     cam_applied, host_applied, host_limited)
+        self.limited_count += int(limited)
+        self.host_limited_count += int(host_limited)
         self.knots.append(k)
         if len(self.knots) > 4096:
             del self.knots[:1024]
@@ -228,8 +316,8 @@ class DriftTracker:
     def camera_drift_ppm(self) -> tuple[float | None, float | None]:
         """(camera clock rate vs host monotonic in ppm, positive = camera fast; span in stream s).
 
-        Derived from the latest measured knot: the reception offset changes by ``-rate * t``.
-        None until measured over at least ``MIN_PPM_SPAN_S``."""
+        From the latest measured knot: the reception offset changes by ``-rate * t``. None
+        until measured over at least ``MIN_PPM_SPAN_S``."""
         for k in reversed(self.knots):
             if k.camera_s is not None:
                 if k.stream_s < MIN_PPM_SPAN_S:
@@ -239,13 +327,17 @@ class DriftTracker:
 
 
 class ClockStepDetector:
-    """Detects *sudden* changes of the wall clock relative to the monotonic clock.
+    """Detects *sudden* changes of the wall clock relative to the monotonic clock, and measures
+    the gradual drift between them.
 
     Compares consecutive samples (taken every poll interval). Gradual drift — e.g. Windows'
     monotonic clock is not disciplined by time synchronisation, so wall-minus-monotonic slowly
-    changes over days — is followed silently; only a jump larger than ``tolerance_s`` between
-    two samples counts as a step. ``total_s`` is the sum of detected steps; ``drift_s`` is the
-    gradual change since the first sample with the steps removed.
+    changes over days — is not a step; only a jump larger than ``tolerance_s`` between two
+    samples counts. ``total_s`` is the sum of detected steps. ``drift_s`` is the gradual change
+    since the first sample with the steps removed: the median of the last
+    ``HOST_MEDIAN_SAMPLES`` *tight* samples (wall read between two monotonic reads no more than
+    ``MAX_PAIR_SPREAD_S`` apart), so a sample taken while the reading thread was delayed does not
+    leak into segment times. The first sample must itself be tight (use ``read_clock_pair``).
     """
 
     def __init__(self, wall: float, mono: float, tolerance_s: float) -> None:
@@ -254,16 +346,20 @@ class ClockStepDetector:
         self._mono0 = self._mono_last = mono
         self.tolerance_s = tolerance_s
         self.total_s = 0.0
+        self._recent: deque[float] = deque([self._offset], maxlen=HOST_MEDIAN_SAMPLES)
 
-    def update(self, wall: float, mono: float) -> float:
+    def update(self, wall: float, mono: float, spread_s: float = 0.0) -> float:
         offset = wall - mono
         jump = offset - self._offset
         self._offset = offset
         self._mono_last = mono
+        step = 0.0
         if abs(jump) > self.tolerance_s:
             self.total_s += jump
-            return jump
-        return 0.0
+            step = jump
+        if spread_s <= MAX_PAIR_SPREAD_S:
+            self._recent.append(offset - self.total_s)
+        return step
 
     @property
     def offset_s(self) -> float:
@@ -272,8 +368,9 @@ class ClockStepDetector:
 
     @property
     def drift_s(self) -> float:
-        """Gradual wall-vs-monotonic change since the first sample, steps excluded."""
-        return (self._offset - self._initial) - self.total_s
+        """Gradual wall-vs-monotonic change since the first sample, steps excluded (median of
+        recent tight samples)."""
+        return statistics.median(self._recent) - self._initial
 
     @property
     def elapsed_s(self) -> float:
@@ -286,3 +383,5 @@ class ClockStepDetector:
         if self.elapsed_s < MIN_PPM_SPAN_S:
             return None
         return self.drift_s / self.elapsed_s * 1e6
+
+

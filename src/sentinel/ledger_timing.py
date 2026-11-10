@@ -36,7 +36,11 @@ CREATE TABLE IF NOT EXISTS clock_observations (
     run_id              TEXT,                 -- recording run active when sampled
     stream_time_s       REAL,
     camera_drift_ppm    REAL,                 -- camera stream clock vs host monotonic (positive = camera fast)
-    time_correction_s   REAL                  -- correction currently applied to that run's segment times
+    time_correction_s   REAL,                 -- correction currently applied to that run's segment times
+    ref_server          TEXT,                 -- configured reference time server queried by SNTP (E1)
+    ref_offset_s        REAL,                 -- measured: this PC's clock minus the reference (s)
+    ref_delay_s         REAL,                 -- round-trip delay of that measurement (uncertainty <= delay/2)
+    ref_detail          TEXT                  -- JSON: stratum, leap, errors
 );
 CREATE INDEX IF NOT EXISTS ix_clock_obs_utc ON clock_observations(observed_utc);
 """
@@ -56,6 +60,10 @@ SEGMENT_COLUMNS: dict[str, str] = {
     "time_correction_stream_s": "REAL",            # stream time of the end boundary's measurement
     "time_correction_limited": "INTEGER NOT NULL DEFAULT 0",
     "time_correction_detail": "TEXT",              # JSON of the end-boundary measurement
+}
+
+OBSERVATION_COLUMNS: dict[str, str] = {   # added after the table was first defined
+    "ref_server": "TEXT", "ref_offset_s": "REAL", "ref_delay_s": "REAL", "ref_detail": "TEXT",
 }
 
 # Write-once once a segment is sealed (same rule as its start/end times).
@@ -84,6 +92,7 @@ def apply_timing_schema(conn: sqlite3.Connection) -> None:
     try:
         ensure_columns(conn, "recording_runs", RUN_COLUMNS)
         ensure_columns(conn, "segments", SEGMENT_COLUMNS)
+        ensure_columns(conn, "clock_observations", OBSERVATION_COLUMNS)
         row = conn.execute("SELECT value FROM schema_meta WHERE key=?", (TIMING_SCHEMA_KEY,)).fetchone()
         if row is None:
             conn.execute("INSERT INTO schema_meta(key, value) VALUES (?, ?)",
@@ -101,7 +110,7 @@ OBSERVATION_FIELDS = (
     "observed_utc", "mono_s", "reason", "platform", "sync_tool", "synchronized", "sync_source",
     "last_sync_utc", "os_offset_s", "os_detail", "wall_minus_mono_s", "host_clock_drift_s",
     "host_clock_drift_ppm", "clock_steps_total_s", "run_id", "stream_time_s", "camera_drift_ppm",
-    "time_correction_s",
+    "time_correction_s", "ref_server", "ref_offset_s", "ref_delay_s", "ref_detail",
 )
 
 

@@ -26,7 +26,7 @@ from ..clock import iso_utc
 from ..config import AppConfig
 from ..db import EventSpec, InternalGap, Ledger
 from ..hashing import sha256_file
-from ..media.probe import ProbeResult, probe_segment
+from ..media.probe import ProbeResult, first_video_pts, probe_segment
 from ..models import TERMINAL_STATES, RunEndReason, SegmentState
 from ..platform.base import Platform
 from ..storage.monitor import StorageMonitor
@@ -225,6 +225,26 @@ class Finalizer:
             self.on_sealed(segment_id)
         return new_state
 
+    def _measured_lead_in(self, seg: Any, res: ProbeResult) -> float | None:
+        """Stream time between segment 0's listed start and its first footage, from the PTS
+        offset calibrated on segment 1 of the same run (``-reset_timestamps 0``: one constant
+        offset per run). None if segment 1 or either PTS is unavailable (e.g. the run ended)."""
+        if res.first_pts_s is None or seg["stream_start_s"] is None:
+            return None
+        rows = self.ledger.query("SELECT rel_path, stream_start_s FROM segments WHERE run_id=? AND seq=1",
+                                 (seg["run_id"],))
+        if not rows:
+            return None
+        path1 = self.cfg.spool_path / rows[0]["rel_path"]
+        start1 = rows[0]["stream_start_s"] if rows[0]["stream_start_s"] is not None else seg["stream_end_s"]
+        if not path1.exists() or path1.stat().st_size == 0 or start1 is None:
+            return None
+        pts1 = first_video_pts(path1, self.cfg.tools.ffprobe)
+        if pts1 is None:
+            return None
+        offset = pts1 - start1
+        return res.first_pts_s - offset - seg["stream_start_s"]
+
     def _corrections(self, seg: Any, run: Any) -> tuple[float | None, float, float | None, float, bool]:
         """Drift-correction knots for this segment: (k0 stream s, c0, k1 stream s, c1, held).
 
@@ -265,11 +285,22 @@ class Finalizer:
             shortfall = listed - dur                 # stream time the list claims but no video covers
             gop = (dur / res.keyframe_count) if res.keyframe_count else None
             lead_in_limit = (1.5 * gop + 0.5) if gop else 10.0
+            assumed_lead_in = False
             if seg["seq"] == 0 and 0 < shortfall <= lead_in_limit:
                 # FFmpeg discards packets before a run's first keyframe, but the segment list still
-                # starts segment 0 at stream time 0. Footage begins later; the lead-in is part of the
-                # preceding gap.
-                s0 = s1 - dur
+                # starts segment 0 at stream time 0, so footage may begin later (a lead-in that is
+                # part of the preceding gap). A timestamp jump at segment 0's end looks the same,
+                # so the lead-in is measured, not assumed: segment 1's first PTS calibrates the
+                # constant PTS offset of this run's files.
+                lead = self._measured_lead_in(seg, res)
+                if lead is None:
+                    s0, assumed_lead_in = s1 - dur, True
+                    warnings.append("lead_in_unverified")
+                else:
+                    s0 = seg["stream_start_s"] + max(0.0, min(lead, shortfall))
+                    shortfall = (s1 - s0) - dur          # what the measured lead-in does not explain
+            if assumed_lead_in:
+                pass
             elif shortfall > rec.max_internal_gap_s:
                 # A timestamp jump fell on the segment boundary: the list's end is the next
                 # segment's start. Footage ends earlier; the hole is recorded explicitly.
