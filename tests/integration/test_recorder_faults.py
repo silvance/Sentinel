@@ -146,10 +146,16 @@ def test_stream_freeze_detected_as_stall(tmp_path: Path, cam: SimulatedCamera) -
 def test_short_freeze_is_recorded_as_internal_gap(tmp_path: Path, cam: SimulatedCamera) -> None:
     h = Harness(tmp_path, cam.url, recording={"stall_timeout_s": 10, "io_timeout_s": 30,
                                               "max_internal_gap_s": 1.0, "segment_seconds": 4}).start()
+    # The simulator drops whatever its real-time (-re) encoder produces while frozen. Under heavy
+    # machine load the encoder can fall behind, so a 2.5 s wall-clock freeze sometimes produced
+    # < 1 s of missing *stream* time — correctly NOT a gap (below max_internal_gap_s), which made
+    # this test flaky (independent review). A 5 s freeze stays well above the threshold even when
+    # the encoder runs at a fraction of real time, and well below stall/drift thresholds.
+    freeze_s = 5.0
     try:
         h.wait_sealed(1)
         cam.freeze()
-        time.sleep(2.5)
+        time.sleep(freeze_s)
         cam.resume()
         wait_for(lambda: h.gaps("within_segment"), 30, what="internal gap row")
     finally:
@@ -157,7 +163,8 @@ def test_short_freeze_is_recorded_as_internal_gap(tmp_path: Path, cam: Simulated
     assert len(h.runs()) == 1, "a short freeze must not restart recording"
     g = h.gaps("within_segment")[0]
     assert g["reason"] in ("timestamp_discontinuity", "timestamp_discontinuity_at_boundary")
-    assert g["duration_s"] == pytest.approx(2.5, abs=1.0)
+    # Missing stream time is at most the wall-clock freeze (plus one frame) and, under load, less.
+    assert 1.0 < g["duration_s"] <= freeze_s + 0.5
     seg = [s for s in h.segments() if s["segment_id"] == g["prev_segment_id"]][0]
     w = json.loads(seg["warnings"])
     assert "internal_timestamp_gap" in w or "timestamp_gap_at_segment_end" in w
