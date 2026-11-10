@@ -44,6 +44,7 @@ from .config import AppConfig, ConfigError, check_tools, load_config
 from .credentials import CredentialError, load_credentials, register_secret, url_with_credentials
 from .db import Ledger
 from .diagnostics import build_report
+from .ledgerchain import ANCHOR_LOG_NAME, ChainHead, append_anchor, current_chain_head
 from .logging_setup import setup_logging
 from .media.probe import ffmpeg_version
 from .media.videohash import parse_version
@@ -113,6 +114,8 @@ class RecorderService:
         self.storage: StorageMonitor | None = None
         self._next_janitor = 0.0
         self._next_checkpoint = 0.0
+        self._next_anchor = self.clock.mono() + cfg.service.chain_anchor_interval_s
+        self._last_anchor: ChainHead | None = None
         self._next_ntp = 0.0
         self._ntp: bool | None = None
         self._clock_offset: float | None = None      # wall - mono at last tick
@@ -179,15 +182,18 @@ class RecorderService:
             self._terminal = True
             self._write_status(force=True)
             self.ledger.add_event("error", "recorder", "startup_failed", "; ".join(problems))
+            self._anchor_chain("startup_failed")
             self._maybe_report()
             return EXIT_CONFIG
 
         self.integrity = IntegrityWorker(cfg, self.ledger, self.platform, version,
-                                         audit_interval_s=cfg.service.audit_interval_s)
+                                         audit_interval_s=cfg.service.audit_interval_s,
+                                         chain_verify_interval_s=cfg.service.chain_verify_interval_s)
         self.finalizer = Finalizer(cfg, self.ledger, self.platform, self.storage, version,
                                    on_sealed=self.integrity.submit)
         report = Recovery(cfg, self.ledger, self.finalizer).run()
         log.info("startup recovery: %s", report)
+        self._anchor_chain("service_start")
         self.finalizer.start()
         self.integrity.start()
         self.supervisor = RecordingSupervisor(
@@ -225,6 +231,7 @@ class RecorderService:
                 log.error("finaliser did not drain before shutdown; recovery will complete it on next start")
             self.ledger.add_event("audit", "recorder", "service_stop", "Recorder service stopped",
                                   {"drained": drained, "exit_code": exit_code})
+            self._anchor_chain("service_stop")
             # A crash is reported as an error, never as a clean stop.
             self._write_status(force=True, stopping=exit_code == EXIT_OK)
             if exit_code != EXIT_OK:
@@ -309,6 +316,22 @@ class RecorderService:
                 self.ledger.write_snapshot(snap)
             except Exception:
                 log.exception("could not write the operator ledger snapshot")
+        if now >= self._next_anchor:
+            self._next_anchor = now + self.cfg.service.chain_anchor_interval_s
+            self._anchor_chain("periodic")
+
+    def _anchor_chain(self, reason: str) -> None:
+        """Copy the recording-log chain head to the append-only anchor log (docs/07). Periodic
+        anchors are skipped when nothing was logged since the last one."""
+        try:
+            assert self.ledger is not None
+            head = current_chain_head(self.ledger)
+            if head is None or (reason == "periodic" and head == self._last_anchor):
+                return
+            append_anchor(self.cfg.data_path / ANCHOR_LOG_NAME, head, reason, fsync_dir=self.platform.fsync_dir)
+            self._last_anchor = head
+        except Exception:
+            log.exception("could not save the recording-log chain head")
 
     # ------------------------------------------------------------------ status
     def _write_status(self, force: bool = False, stopping: bool = False) -> None:
@@ -380,6 +403,7 @@ class RecorderService:
         integrity_d["last_diagnostic_report"] = self.last_report
 
         last_seg = gap = None
+        ledger_altered = ledger_unprotected = False
         ever_recorded = last_media is not None
         outage = None
         outage_since = None
@@ -407,6 +431,25 @@ class RecorderService:
                 if integ is not None and integ.outstanding_audit_failures():
                     verify_critical = True
                     integrity_d["audit_failures"] = integ.outstanding_audit_failures()
+                # Chain head anchored in every status file (docs/07); verification result for support.
+                head = self.ledger.chain_head()
+                chain_d: dict = head.to_dict() if head is not None else {}
+                rep = integ.chain_report if integ is not None else None
+                chain_d["last_check_utc"] = rep.checked_utc if rep else None
+                chain_d["last_check_ok"] = rep.ok if rep else None
+                if rep is not None and rep.first is not None:
+                    chain_d["first_problem_entry"] = rep.first.position
+                    chain_d["problems"] = len(rep.findings)
+                if rep is not None and rep.faults:
+                    chain_d["protection_gaps"] = len(rep.faults)
+                if self.ledger.chain_discrepancies or self.ledger.chain_failures:
+                    chain_d["discrepancies_found_on_write"] = self.ledger.chain_discrepancies
+                    chain_d["entries_not_written"] = self.ledger.chain_failures
+                integrity_d["ledger_chain"] = chain_d
+                # V-003: signs of alteration. V-004: entries could not be written (system fault).
+                ledger_altered = bool((integ is not None and integ.chain_altered) or self.ledger.chain_discrepancies)
+                ledger_unprotected = bool((integ is not None and integ.chain_unprotected)
+                                          or self.ledger.chain_failures)
             except Exception as exc:  # ledger trouble is itself a system error
                 log.exception("ledger query failed while building status")
                 errors.append("D-001")
@@ -433,7 +476,7 @@ class RecorderService:
             last_end_reason=last_end, ever_recorded=ever_recorded, attempts=attempts,
             unstable_restarts=unstable, clock_anomaly=clock_anomaly, clock_synchronized=self._ntp,
             corrupt_recent=corrupt_recent, verify_problem=verify_problem, verify_critical=verify_critical,
-            simulated=cfg.camera.development_source)
+            ledger_altered=ledger_altered, ledger_unprotected=ledger_unprotected, simulated=cfg.camera.development_source)
         d = evaluate(m, rec.stall_timeout_s, rec.segment_seconds, rec.connect_timeout_s, rec.escalate_after_s)
 
         storage_d = {}

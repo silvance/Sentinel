@@ -242,8 +242,19 @@ class ReviewExporter:
             self.remover.flush(self.target)
             res = self.remover.eject(self.target)
             self.xl.set_batch_state(bid, B_COMPLETE, ejected=int(res.ejected), removal_detail=res.detail)
+            # Integration with the tamper-evident ledger: the export tables (drives,
+            # export_batches, export_items) are NOT covered by the hash chain (chain format 1
+            # covers runs, segments, gaps and events). Their security-relevant outcome is put into
+            # this event, which IS chained: what interval went to which drive, and the SHA-256 of
+            # the manifest and of SHA256SUMS.txt as written to the drive (docs/INTEGRATION.md).
+            b = self.xl.batch(bid) or {}
             self._event("audit", "export_complete", "Review-drive export complete and verified",
-                        {"manifest": manifest_rel, "ejected": res.ejected, "content_check": self.mode})
+                        {"manifest": manifest_rel, "ejected": res.ejected, "content_check": self.mode,
+                         "interval_start_utc": b["interval_start_utc"] if b else None,
+                         "interval_end_utc": b["interval_end_utc"] if b else None,
+                         "manifest_sha256": b["manifest_sha256"] if b else None,
+                         "sums_sha256": b["sums_sha256"] if b else None,
+                         "files_verified": sum(1 for i in self.xl.items(bid) if i["state"] == I_VERIFIED)})
             state = "SAFE_TO_REMOVE" if res.ejected else "COMPLETE_REMOVE_MANUALLY"
             message = ("SAFE TO REMOVE DRIVE. Export complete and verified." if res.ejected else res.operator_message)
             self._status(state, message, percent=100)

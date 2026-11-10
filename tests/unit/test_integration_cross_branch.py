@@ -197,3 +197,53 @@ def test_launcher_with_installed_service_only_views_the_status_folder(tmp_path: 
     assert seen["status_path"] == tmp_path / "status" / "status.json"
     assert seen["start_problem"] is None
     assert not (tmp_path / "data").exists()                              # no launcher.lock written
+
+
+# ---------------------------------------------------------------------- merge 7: ledger chain x others
+def _chain_db(tmp_path: Path) -> Path:
+    from sentinel.db import Ledger
+
+    led = Ledger(tmp_path / "data" / "sentinel.db")
+    led.add_event("audit", "recorder", "service_start", "started")
+    led.close()
+    return tmp_path / "data" / "sentinel.db"
+
+
+def test_chain_reader_retries_a_transient_error_like_ledger_readers(tmp_path: Path, monkeypatch) -> None:
+    import sqlite3
+
+    from sentinel import ledgerchain as lc
+
+    db = _chain_db(tmp_path)
+    real = sqlite3.connect
+    calls = {"n": 0}
+
+    def flaky(*a, **k):  # noqa: ANN002, ANN003
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise sqlite3.OperationalError("disk I/O error")
+        return real(*a, **k)
+
+    monkeypatch.setattr(lc.sqlite3, "connect", flaky)
+    assert lc.current_chain_head(db) is not None and calls["n"] == 2
+    calls["n"] = -100   # a non-transient error is not retried
+    monkeypatch.setattr(lc.sqlite3, "connect", lambda *a, **k: (_ for _ in ()).throw(
+        sqlite3.OperationalError("no such table: x")))
+    assert lc.current_chain_head(db) is None
+
+
+def test_chain_verification_reads_the_status_anchor_from_status_dir(tmp_path: Path) -> None:
+    import json
+
+    from sentinel import ledgerchain as lc
+
+    db = _chain_db(tmp_path)
+    head = lc.current_chain_head(db)
+    status = tmp_path / "status" / "status.json"
+    status.parent.mkdir()
+    status.write_text(json.dumps({"generated_utc": "2026-11-10T00:00:00Z",
+                                  "integrity": {"ledger_chain": {"seq": head.seq, "hash": "f" * 64}}}), "utf-8")
+    # A wrong head in the separate status folder must be noticed when that folder is passed ...
+    assert not lc.verify_ledger(db, status_path=status).ok
+    # ... and is not looked for beside the ledger when it is not (previous behaviour).
+    assert lc.verify_ledger(db).ok

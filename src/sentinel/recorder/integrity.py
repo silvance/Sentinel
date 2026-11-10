@@ -7,6 +7,11 @@
 2. **Rolling audit**: periodically re-reads sealed segments and checks file SHA-256, presence
    and read-only state, so silent changes to stored originals are detected during long
    unattended operation.
+3. **Recording-log chain verification** (``ledgerchain.verify_ledger``): periodically recomputes
+   the ledger's hash chain on a separate read-only connection (one consistent snapshot; it never
+   holds the recorder's ledger lock) and compares covered rows and saved chain heads. A failure
+   raises operator alert V-003. Files are not re-hashed here: the rolling audit already compares
+   files with their rows, and rows are compared with the chain, so files are covered transitively.
 """
 
 from __future__ import annotations
@@ -24,6 +29,7 @@ from ..clock import iso_utc
 from ..config import AppConfig
 from ..db import Ledger
 from ..hashing import sha256_file
+from ..ledgerchain import VerifyReport, verify_ledger
 from ..media.probe import ProbeError
 from ..media.videohash import compute_content_hash
 from ..platform.base import Platform
@@ -36,17 +42,22 @@ MAX_HASH_ATTEMPTS = 3
 
 class IntegrityWorker:
     def __init__(self, cfg: AppConfig, ledger: Ledger, platform: Platform, ffmpeg_version: str | None,
-                 audit_interval_s: float = 600.0, audit_batch: int = 12) -> None:
+                 audit_interval_s: float = 600.0, audit_batch: int = 12,
+                 chain_verify_interval_s: float = 3600.0) -> None:
         self.cfg = cfg
         self.ledger = ledger
         self.platform = platform
         self.ffmpeg_version = ffmpeg_version
         self.audit_interval_s = audit_interval_s
         self.audit_batch = audit_batch
+        self.chain_verify_interval_s = chain_verify_interval_s
         self._q: queue.Queue[str] = queue.Queue()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._next_audit = time.monotonic() + 60.0
+        self._next_chain_verify = time.monotonic() + 90.0    # soon after start: re-raises V-003 after a restart
+        self._last_chain_problem: str | None = None
+        self.chain_report: VerifyReport | None = None
         self.recent_errors: deque[tuple[float, str]] = deque(maxlen=20)
         self.audit_failures: list[dict] = []
         self.hashed = 0
@@ -85,6 +96,9 @@ class IntegrityWorker:
                 if time.monotonic() >= self._next_audit:
                     self.audit_once()
                     self._next_audit = time.monotonic() + self.audit_interval_s
+                if time.monotonic() >= self._next_chain_verify:
+                    self._next_chain_verify = time.monotonic() + self.chain_verify_interval_s
+                    self.verify_chain_once()
                 try:
                     seg_id = self._q.get(timeout=1.0)
                 except queue.Empty:
@@ -157,6 +171,41 @@ class IntegrityWorker:
         if failures:
             self.audit_failures.extend(failures)
         return failures
+
+    # ------------------------------------------------------------------ recording-log chain
+    def verify_chain_once(self) -> VerifyReport:
+        """Verify the ledger's hash chain (read-only snapshot). Records an event when the first
+        problem found changes, so an hourly check does not flood the ledger."""
+        # Many short read snapshots with a pause between them: never starves the recorder's WAL
+        # checkpoint and keeps memory bounded (see verify_ledger).
+        rep = verify_ledger(self.ledger.path, chunk=2000, pause_s=0.005, status_path=self.cfg.status_path)
+        self.chain_report = rep
+        if rep.faults:
+            log.error("recording-log chain has %d protection gap(s) (entries that could not be written)",
+                      len(rep.faults))
+        first = rep.first
+        problem = f"{first.code}@{first.position}" if first is not None else None
+        if first is not None:
+            log.critical("recording-log chain check FAILED at entry %s: %s (%d problems)",
+                         first.position, first.message, len(rep.findings))
+            if problem != self._last_chain_problem:
+                self.ledger.add_event("error", "integrity", "ledger_chain_altered",
+                                      "The recording log failed its tamper-evidence check",
+                                      {"first_position": first.position, "first_code": first.code,
+                                       "first_problem": first.message, "problems": len(rep.findings),
+                                       "entries": rep.entries})
+        else:
+            log.info("recording-log chain verified: %d entries in %.2f s", rep.entries, rep.seconds)
+        self._last_chain_problem = problem
+        return rep
+
+    @property
+    def chain_altered(self) -> bool:
+        return self.chain_report is not None and not self.chain_report.ok
+
+    @property
+    def chain_unprotected(self) -> bool:
+        return self.chain_report is not None and bool(self.chain_report.faults)
 
     def outstanding_audit_failures(self) -> int:
         rows = self.ledger.query("SELECT COUNT(*) n FROM segments WHERE audit_status IS NOT NULL "

@@ -46,6 +46,8 @@ class Measurements:
     corrupt_recent: bool = False
     verify_problem: bool = False                # sealing/fingerprinting errors, or segments waiting too long
     verify_critical: bool = False               # sealing given up after retries, or audit found a change
+    ledger_altered: bool = False                # recording-log hash chain check failed (ledgerchain)
+    ledger_unprotected: bool = False            # chain entries could not be written (system fault)
     simulated: bool = False
 
 
@@ -93,6 +95,10 @@ def evaluate(m: Measurements, stall_timeout_s: float, segment_seconds: float, co
         alerts.append(make_alert("V-001", Severity.WARNING))
     if m.corrupt_recent:
         alerts.append(make_alert("V-002", Severity.WARNING))
+    if m.ledger_altered:
+        alerts.append(make_alert("V-003", Severity.CRITICAL))
+    elif m.ledger_unprotected:
+        alerts.append(make_alert("V-004", Severity.WARNING))
     if m.clock_anomaly:
         alerts.append(make_alert("T-001", Severity.WARNING))
     if m.clock_synchronized is False:

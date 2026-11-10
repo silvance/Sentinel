@@ -49,6 +49,8 @@ CATALOG: dict[str, AlertDef] = {d.code: d for d in [
     AlertDef("S-003", "Recording storage cannot be read", SUPPORT, True),
     AlertDef("V-001", "Recordings could not be verified", SUPPORT, False),
     AlertDef("V-002", "A damaged recording segment was detected", SUPPORT, False),
+    AlertDef("V-003", "The recording log has been altered", SUPPORT, False),
+    AlertDef("V-004", "Part of the recording log could not be protected against changes", SUPPORT, False),
     AlertDef("T-001", "The system clock was changed during recording", SUPPORT, False),
     AlertDef("T-002", "The system clock is not synchronised", SUPPORT, False),
     AlertDef("C-001", "The recorder cannot start because of a configuration or software problem", SUPPORT, True),

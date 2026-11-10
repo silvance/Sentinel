@@ -18,6 +18,8 @@ silently replace the earlier entry instead of failing).
 | 4 | design/drive-prepare | 277 passed (1 failed before the fix below) | alerts.py, config.py, example config |
 | 5 | design/windows-service | 404 passed | none (auto-merged) |
 | 6 | design/single-executable | 480 passed | config.py, platform/windows.py, platform/winacl.py (add/add), tests/unit/test_winacl.py (add/add) |
+| 6+ | cross-branch items (a)(b)(c) | 493 passed | — |
+| 7 | design/tamper-evident-ledger | 575 passed (573 after the merge, +2 integration tests) | db.py, service.py, tests/integration/harness.py, docs/07 |
 
 ## 1. fix/ledger-reader-retry
 Clean merge. Note carried forward: `ledgerchain._ro_connect` (tamper-evident-ledger branch) does
@@ -166,3 +168,45 @@ policy default `"any_drive"`: to be applied when design/archive-drive merges (no
 single-exe's `install_check.location_problems`; it has its own stronger program-file ACL check
 and the credentials-file DACL check. Adding the location check there is left for the owner's
 first real service install, since that path cannot be executed on this machine.
+
+## 7. design/tamper-evident-ledger
+* **db.py** (conflict): `EXPORT_DDL` and `CHAIN_DDL` are separate blocks; both kept and both
+  applied in `_migrate` (export first, then chain). The reader-retry constructor (`readonly`,
+  `retry_seconds`, `_retry_read`) and the chain counters are combined in `Ledger.__init__`;
+  `checkpoint()` is now the ledger branch's PASSIVE checkpoint; `write_snapshot` (service) kept.
+* **service.py** (conflict): the janitor writes the operator ledger snapshot (service) and the
+  periodic chain anchor (ledger); both kept. Startup failure keeps `_terminal = True` (service)
+  and `_anchor_chain("startup_failed")` (ledger).
+* **tests/integration/harness.py** (conflict): `Harness` keeps both changes: host clock-sync
+  pinned to "unknown" (service) and the chain verification after every stop (`check_chain`).
+* **docs/07** (conflict): the chain-head custody checkbox stays in the general checklist; the
+  Windows deployment checklist follows it unchanged.
+* `alerts.py` auto-merged: V-003, V-004 added. Catalogue: **38 codes, no duplicates**.
+* **`ledgerchain._ro_connect` now uses the reader-retry rule** (fix/ledger-reader-retry notes
+  asked for this): open + a probe query are retried on the same transient errors and budget
+  (`db.READ_RETRY_SECONDS`, `db._is_transient`); other errors raise at once. Test:
+  `test_chain_reader_retries_a_transient_error_like_ledger_readers`.
+* **Status anchor under `status_dir`**: `verify_ledger` read the `status.json` anchor beside the
+  ledger only; with the service layout it lives in `status_dir`. New `status_path` parameter,
+  passed as `cfg.status_path` by the CLI, diagnostics and the integrity worker (default unchanged).
+  Test: `test_chain_verification_reads_the_status_anchor_from_status_dir`.
+* **Chain coverage of the write paths other branches added (security-relevant review):**
+  * `events` written by export (`ExportLedger.event`) and by drive-prepare (`drive_prepared`,
+    refusals, failures) go through `Ledger.add_event` → **chained**.
+  * The export tables `drives`, `export_batches`, `export_items` are written directly by
+    `sentinel.export.ledger` and are **NOT covered** by chain format 1 (it covers runs, segments,
+    gaps, events; adding tables needs a new chain format, as the ledger branch notes say). A
+    person with write access to the data folder could alter batch/item state or recorded
+    read-back hashes there without a V-003. Mitigation done here: the chained `export_complete`
+    audit event now also carries the interval, the SHA-256 of the manifest and of
+    `SHA256SUMS.txt` as written to the drive, and the number of verified files, so the outcome
+    that matters for custody is chained (the drive's own manifest/SUMS remain the primary
+    record). Export start/failure/interruption/conflict events were already chained.
+  * The `drives` table is also read by drive-prepare's erase guard (`known.py`): deleting a row
+    there could make an evidence drive look unknown. The guard does not depend on it alone
+    (marker, layout and `drive_prepared` events are checked too; events are chained), but this
+    is a documented residual risk. Owner decision for a later chain format 2: cover
+    `export_batches`/`export_items`/`drives`.
+  * Not done (recommended by the ledger branch, needs a manifest-format decision): write
+    `current_chain_head()` into `Export_Manifest.json` and an `export` anchor line, so the head
+    leaves the machine on every review drive.
