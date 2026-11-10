@@ -17,6 +17,7 @@ silently replace the earlier entry instead of failing).
 | 3 | req/review-drive-export | 96 passed | none (auto-merged) |
 | 4 | design/drive-prepare | 277 passed (1 failed before the fix below) | alerts.py, config.py, example config |
 | 5 | design/windows-service | 404 passed | none (auto-merged) |
+| 6 | design/single-executable | 480 passed | config.py, platform/windows.py, platform/winacl.py (add/add), tests/unit/test_winacl.py (add/add) |
 
 ## 1. fix/ledger-reader-retry
 Clean merge. Note carried forward: `ledgerchain._ro_connect` (tamper-evident-ledger branch) does
@@ -81,3 +82,28 @@ for operators; no credentials are stored in them).
   `drives` erasing likewise must start from the interactive session (UAC), as its notes say.
 * The drive-prepare installed-config path (`%ProgramData%\Sentinel\sentinel.toml`) differs from
   the service layout (`…\Sentinel\config\sentinel.toml`); resolved after merge 6 (below).
+
+## 6. design/single-executable
+* **`src/sentinel/platform/winacl.py` (add/add — both branches created this module).** Merged
+  into one module, keeping every public function of both: windows-service's owner+DACL reader
+  and evaluator (`file_sddl`, `read_dacl`, `parse_sddl`, `disallowed_grants`, `effective_allow`,
+  `service_sid`, SID constants) and single-executable's private-at-creation helpers and broad
+  write check (`private_sddl`, `create_private_dir`, `write_private_file`, `protect_existing`,
+  `set_dacl`, `get_sddl`, `broad_write_aces`, `foreign_trustees`, `dacl_aces`). Duplicates were
+  collapsed to one definition: `AclError` (both `OSError` subclasses), `current_user_sid` (the
+  service version, which upper-cases; SIDs are digits apart from the `S` prefix), the shared
+  constants, `_ACE_RE`. **`parse_rights`** existed in both with different results for an unknown
+  rights code (single-exe: `0xFFFFFFFF`; service: `FILE_ALL_ACCESS | GENERIC_ALL`). Both are
+  "assume everything"; the merged version returns `0xFFFFFFFF`, which satisfies both branches'
+  tests (it includes `GENERIC_ALL`). The two private ctypes loaders (`_advapi`/`_kernel` and
+  `_api`) were kept as they are rather than rewritten, to avoid changing tested Windows-API code.
+* **`tests/unit/test_winacl.py` (add/add):** both test sets kept in one file; single-exe's
+  constants renamed `EXE_PROGRAMDATA` / `EXE_ME` (the service file already defines `ME`).
+* **`platform/windows.py`:** both new methods kept (`restrict_new_files` docstring/no-op from the
+  service branch, `write_access_problems` from single-exe), plus the service branch's
+  `secret_file_problems` and `clock_synchronized`.
+* **`config.py`:** both imports kept (`drives.policy`, `paths`); single-exe's defaults for an
+  omitted `[storage]`/`[tools]` and the relative `credentials_file` resolution sit alongside
+  `status_dir`, `export` and `drives`.
+* `service.py`, `alerts.py` (C-002, C-003), example config, `platform/base.py`/`posix.py`
+  auto-merged. Catalogue: 36 codes, no duplicates.

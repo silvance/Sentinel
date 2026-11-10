@@ -52,6 +52,9 @@ CATALOG: dict[str, AlertDef] = {d.code: d for d in [
     AlertDef("T-001", "The system clock was changed during recording", SUPPORT, False),
     AlertDef("T-002", "The system clock is not synchronised", SUPPORT, False),
     AlertDef("C-001", "The recorder cannot start because of a configuration or software problem", SUPPORT, True),
+    AlertDef("C-002", "This computer has not been set up for recording yet",
+             "Setup must be done by the installing technician. Contact technical support.", True),
+    AlertDef("C-003", "The recorder could not be started", SUPPORT, True),
     AlertDef("D-001", "Recording database problem", SUPPORT, True),
     AlertDef("X-001", "The recorder is not responding", SUPPORT, False),
     # Review-drive export (separate process; never stops recording). docs/04 §6.

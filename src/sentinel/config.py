@@ -16,6 +16,7 @@ from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .drives.policy import DrivePolicy, DrivePolicyError, load_policy
+from .paths import TOOL_NAMES, absolute_tool, default_storage_dirs, default_tool
 
 
 class ConfigError(ValueError):
@@ -257,13 +258,24 @@ def load_config_dict(raw: dict[str, Any], base_dir: Path | None = None, source: 
     unknown = sorted(set(raw) - {"camera", "recording", "storage", "tools", "service", "export", "drives"})
     if unknown:
         raise ConfigError(f"unknown section(s): {', '.join(unknown)}")
-    if "camera" not in raw or "storage" not in raw:
-        raise ConfigError("[camera] and [storage] sections are required")
+    if "camera" not in raw:
+        raise ConfigError("[camera] section is required")
+    # Omitted keys fall back to the install layout (sentinel/paths.py): bundled FFmpeg next to a
+    # frozen executable before PATH, and the per-machine data folders.
+    storage_raw = {**default_storage_dirs(), **dict(raw.get("storage") or {})}
+    tools_raw = {**{t: default_tool(t) for t in TOOL_NAMES}, **dict(raw.get("tools") or {})}
+    for t in TOOL_NAMES:   # always hand absolute tool paths to the recorder (no cwd/PATH surprises)
+        if isinstance(tools_raw.get(t), str):
+            tools_raw[t] = absolute_tool(tools_raw[t], base_dir)
+    camera_raw = dict(raw.get("camera") or {})
+    cred = camera_raw.get("credentials_file")
+    if isinstance(cred, str) and cred and not Path(cred).is_absolute():
+        camera_raw["credentials_file"] = str((base_dir / cred).resolve())
     cfg = AppConfig(
-        camera=_build(CameraConfig, "camera", raw.get("camera"), base_dir),
+        camera=_build(CameraConfig, "camera", camera_raw, base_dir),
         recording=_build(RecordingConfig, "recording", raw.get("recording"), base_dir),
-        storage=_build(StorageConfig, "storage", raw.get("storage"), base_dir),
-        tools=_build(ToolsConfig, "tools", raw.get("tools"), base_dir),
+        storage=_build(StorageConfig, "storage", storage_raw, base_dir),
+        tools=_build(ToolsConfig, "tools", tools_raw, base_dir),
         service=_build(ServiceConfig, "service", raw.get("service"), base_dir),
         export=_build(ExportConfig, "export", raw.get("export"), base_dir),
         source_path=source,

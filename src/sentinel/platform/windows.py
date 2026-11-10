@@ -145,6 +145,15 @@ class WindowsPlatform(Platform):
         """
         return None
 
+    def write_access_problems(self, path: Path) -> list[str]:
+        from . import winacl
+
+        try:
+            sddl = winacl.get_sddl(path)
+        except OSError as exc:
+            return [f"permissions could not be read ({exc})"]
+        return [f"can be changed by {who}" for who in winacl.broad_write_aces(sddl)]
+
     def secret_file_problems(self, path: Path) -> list[str]:
         """Who besides SYSTEM, Administrators, this process's account and the Sentinel service
         account may read, change or re-permission the credentials file. Uses the file's DACL

@@ -10,3 +10,6 @@ spool/
 data/
 logs/
 *.secret
+# packaging: build virtualenvs (outputs go to build/ and dist/, ignored above)
+.venv-build/
+.venv-build-linux/

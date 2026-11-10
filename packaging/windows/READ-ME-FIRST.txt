@@ -1,0 +1,31 @@
+SENTINEL CAMERA RECORDER
+========================
+
+To start Sentinel or check that it is recording:
+
+    Double-click  Sentinel.exe
+
+A window shows the recorder status in large letters. "RECORDING NORMALLY" means
+everything is working. You can close the window; recording continues.
+
+If the window shows an error code (for example "Error R-003"), call technical
+support and read them the code.
+
+Do not move, rename or delete anything in this folder.
+
+
+For the installing technician
+-----------------------------
+* First start: Sentinel asks to be set up. Type SETUP and answer the questions
+  (camera address, stream path from the camera documentation, camera account).
+* Settings and recordings: C:\ProgramData\Sentinel\ (see "Sentinel.exe about").
+* Commands (run from a Command Prompt in this folder):
+      Sentinel.exe about [--verify]     version, folders, bundled FFmpeg, file check
+      Sentinel.exe check-config         validate the settings
+      Sentinel.exe status               status banner
+      Sentinel.exe diagnostics          diagnostic report for support
+      Sentinel.exe stop                 stop the background recorder gracefully
+      Sentinel.exe setup --force        re-run setup (old settings kept as .bak)
+* This build does NOT start automatically when Windows starts. Until the Windows
+  service is installed, someone must double-click Sentinel.exe after every restart.
+* ffmpeg\ contains FFmpeg and its licence; see ffmpeg\FFMPEG-LICENCE-NOTE.txt.

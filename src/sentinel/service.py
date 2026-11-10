@@ -521,20 +521,43 @@ class RecorderService:
 
 
 # ---------------------------------------------------------------------- CLI
-def _cmd_run(args: argparse.Namespace) -> int:
+def run_recorder(config_path: str | Path, before_run: Callable[[RecorderService], None] | None = None) -> int:
+    """Load the configuration and run the recorder in this process until stopped.
+
+    ``before_run`` lets a host (the launcher, a Windows service wrapper) attach an extra stop
+    channel to the service before recording starts; it must not block."""
+    config_path = Path(config_path).resolve()   # absolute: the process changes directory below
     try:
-        cfg = load_config(args.config)
+        cfg = load_config(config_path)
     except ConfigError as exc:
         print(f"configuration error: {exc}", file=sys.stderr)
         return EXIT_CONFIG
     setup_logging(cfg.log_path, cfg.service.log_level)
+    from .install_check import location_problems
+    from .paths import safe_cwd
+
+    problems = location_problems(Path(config_path), cfg)
+    if problems:
+        for p in problems:
+            log.error("refusing to record: %s", p)
+            print(f"configuration error: {p}", file=sys.stderr)
+        return EXIT_CONFIG
+    # All paths are absolute by now (config.py); run, and let FFmpeg run, from a folder that
+    # standard users cannot write, so nothing is ever loaded from a user-controlled directory.
+    os.chdir(safe_cwd())
     svc = RecorderService(cfg)
     signal.signal(signal.SIGINT, svc.request_stop)
     signal.signal(signal.SIGTERM, svc.request_stop)
     if hasattr(signal, "SIGBREAK"):
         signal.signal(signal.SIGBREAK, svc.request_stop)  # Windows CTRL_BREAK_EVENT
-    log.info("Sentinel recorder %s starting (camera %s)", __version__, cfg.camera.id)
+    if before_run is not None:
+        before_run(svc)
+    log.info("Sentinel recorder %s starting (camera %s, ffmpeg %s)", __version__, cfg.camera.id, cfg.tools.ffmpeg)
     return svc.run()
+
+
+def _cmd_run(args: argparse.Namespace) -> int:
+    return run_recorder(args.config)
 
 
 def _cmd_check(args: argparse.Namespace) -> int:
@@ -547,6 +570,9 @@ def _cmd_check(args: argparse.Namespace) -> int:
     parsed = parse_version(ffmpeg_version(cfg.tools.ffmpeg)) if not problems else None
     if parsed is not None and parsed < MIN_FFMPEG:
         problems.append(f"FFmpeg {parsed[0]}.{parsed[1]} is older than the minimum")
+    from .install_check import location_problems
+
+    problems += location_problems(Path(args.config), cfg)
     if cfg.camera.credentials_file:
         try:
             load_credentials(cfg.camera.credentials_file)
