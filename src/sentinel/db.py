@@ -171,28 +171,70 @@ class EventSpec:
     detail: dict[str, Any] | None = None
 
 
+# Readers (GUI, diagnostics, status tools) may open the ledger in the moment after the recorder
+# process died. Measured on Windows: for ~1 s after a hard kill, opening or querying the WAL
+# database can fail with "disk I/O error" (the dead process's file handles are still being
+# released); a second later every access succeeds. Readers retry these transient errors.
+_TRANSIENT_READ_ERRORS = ("disk i/o error", "database is locked", "unable to open database file")
+READ_RETRY_SECONDS = 5.0
+
+
+def _is_transient(exc: sqlite3.OperationalError) -> bool:
+    msg = str(exc).lower()
+    return any(m in msg for m in _TRANSIENT_READ_ERRORS)
+
+
 class Ledger:
     def __init__(self, path: Path, readonly: bool = False) -> None:
         self.path = Path(path)
+        self.readonly = readonly
         self._lock = threading.RLock()
         if readonly:
-            uri = f"{self.path.resolve().as_uri()}?mode=ro"
-            self._conn = sqlite3.connect(uri, uri=True, check_same_thread=False, isolation_level=None)
+            self._conn = self._retry_read(self._open_readonly)
         else:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             self._conn = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA foreign_keys=ON")
-        self._conn.execute("PRAGMA busy_timeout=5000")
+            self._configure(self._conn)
         if not readonly:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA synchronous=FULL")
             self._migrate()
 
     # ------------------------------------------------------------------ infrastructure
+    @staticmethod
+    def _configure(conn: sqlite3.Connection) -> None:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA busy_timeout=5000")
+
+    def _open_readonly(self) -> sqlite3.Connection:
+        uri = f"{self.path.resolve().as_uri()}?mode=ro"
+        conn = sqlite3.connect(uri, uri=True, check_same_thread=False, isolation_level=None)
+        try:
+            self._configure(conn)
+            conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchall()  # surface open-time errors now
+        except BaseException:
+            conn.close()
+            raise
+        return conn
+
+    def _retry_read(self, fn):  # noqa: ANN001, ANN202 - small internal helper
+        deadline = time.monotonic() + READ_RETRY_SECONDS
+        delay = 0.1
+        while True:
+            try:
+                return fn()
+            except sqlite3.OperationalError as exc:
+                if not _is_transient(exc) or time.monotonic() + delay > deadline:
+                    raise
+                time.sleep(delay)
+                delay = min(delay * 2, 1.0)
+
     def close(self) -> None:
         with self._lock:
-            self._conn.close()
+            if self._conn is not None:
+                self._conn.close()
+                self._conn = None
 
     @contextmanager
     def tx(self) -> Iterator[sqlite3.Connection]:
@@ -218,7 +260,23 @@ class Ledger:
 
     def query(self, sql: str, params: Iterable[Any] = ()) -> list[sqlite3.Row]:
         with self._lock:
-            return self._conn.execute(sql, tuple(params)).fetchall()
+            if not self.readonly:
+                return self._conn.execute(sql, tuple(params)).fetchall()
+
+            def attempt() -> list[sqlite3.Row]:
+                if self._conn is None:
+                    self._conn = self._open_readonly()
+                try:
+                    return self._conn.execute(sql, tuple(params)).fetchall()
+                except sqlite3.OperationalError as exc:
+                    if _is_transient(exc):  # reopen on the next attempt: this handle may be stale
+                        try:
+                            self._conn.close()
+                        except sqlite3.Error:
+                            pass
+                        self._conn = None
+                    raise
+            return self._retry_read(attempt)
 
     def integrity_check(self) -> str:
         return self.query("PRAGMA integrity_check")[0][0]
