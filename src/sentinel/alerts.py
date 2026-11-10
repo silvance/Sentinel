@@ -86,6 +86,13 @@ CATALOG: dict[str, AlertDef] = {d.code: d for d in [
              "Do not use this archive drive as evidence. " + SUPPORT, False),
     AlertDef("A-007", "Archive copying is not running", SUPPORT, False),
     AlertDef("A-008", "A recording on this system could not be read for archiving", SUPPORT, False),
+    AlertDef("A-009", "The archive drive will be full within the next few days",
+             "Recording continues. Have an empty archive drive ready for the next swap.", False),
+    # Local retention (admin-enabled removal of archived recordings from this computer).
+    AlertDef("L-001", "Recording storage on this computer will be full before the next expected drive swap",
+             "Recording continues for now. Swap the archive drive. " + SUPPORT, False),
+    AlertDef("L-002", "Archived recordings could not be removed to free space on this computer",
+             "Recording continues for now. Swap the archive drive. " + SUPPORT, False),
     AlertDef("Z-001","A test camera is configured. These recordings are not evidence",
              "Contact technical support before any operational use.", False),
 ]}

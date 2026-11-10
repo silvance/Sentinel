@@ -52,6 +52,7 @@ class Condition:
     verify_failed: bool = False
     source_unreadable: bool = False
     software_errors: int = 0
+    capacity_low: bool = False              # attached drive holds less than N days at the measured rate
 
 
 def evaluate_alerts(c: Condition) -> list[Alert]:
@@ -72,6 +73,8 @@ def evaluate_alerts(c: Condition) -> list[Alert]:
         alerts.append(make_alert("A-006", Severity.CRITICAL))
     if c.source_unreadable:
         alerts.append(make_alert("A-008", Severity.CRITICAL))
+    if c.capacity_low and not c.full:
+        alerts.append(make_alert("A-009", Severity.WARNING))
     if c.software_errors >= 3:
         alerts.append(make_alert("A-007", Severity.WARNING, detail={"consecutive_errors": c.software_errors}))
     alerts.sort(key=lambda a: -a.severity)

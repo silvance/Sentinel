@@ -167,6 +167,7 @@ class ArchiveWorker:
         self._thread: threading.Thread | None = None
         self._last_publish = 0.0
         self._instance: str | None = None
+        self._last_scan: tuple[DriveScan | None, bool] = (None, False)
 
     # ================================================================== public control
     def request_swap(self) -> None:
@@ -302,11 +303,35 @@ class ArchiveWorker:
 
     def step(self) -> str:
         """One unit of work: look at the drive(s), then copy+verify at most one segment. Returns
-        'absent' | 'unusable' | 'waiting_for_removal' | 'swapped' | 'full' | 'idle' | 'copied'."""
+        'absent' | 'unusable' | 'waiting_for_removal' | 'swapped' | 'full' | 'idle' | 'copied'.
+        Afterwards the drive presence sessions are updated (used by the retention rule)."""
+        result = self._step()
+        try:
+            self._sync_sessions()
+        except Exception:
+            log.exception("could not update archive drive presence")
+        return result
+
+    def _sync_sessions(self) -> None:
+        scan, swapped_present = self._last_scan
+        if scan is None or self.al is None:
+            return
+        present = set()
+        for t in scan.candidates:
+            try:
+                present.add(t.drive_key)
+            except TargetError:
+                continue
+        if swapped_present and self._swapped_drive:
+            present.add(self._swapped_drive)
+        self.al.sync_sessions(present, keep_open=bool(scan.unusable), swapped=self._swapped_drive)
+
+    def _step(self) -> str:
         self._open()
         self._poll_control()
         scan = self.locator.scan()
         target, swapped_present = self._select(scan)
+        self._last_scan = (scan, swapped_present)
         if target is None:
             if self.att is not None:
                 self._detached(unexpected=True)
@@ -851,8 +876,23 @@ class ArchiveWorker:
         cond = Condition(state=self.state, backlog_s=risk.seconds, threshold_s=self.acfg.backlog_alert_hours * 3600,
                          removed_unexpectedly=self.removed_unexpectedly, after_swap=self.after_swap, full=self.full,
                          unusable=self.state == ST_UNUSABLE, verify_failed=bool(problems),
-                         source_unreadable=bool(self.source_failed), software_errors=self.errors)
+                         source_unreadable=bool(self.source_failed), software_errors=self.errors,
+                         capacity_low=self._capacity_low())
         return cond, risk, queue, problems
+
+    def _capacity_low(self) -> bool:
+        """The attached drive has less free space than ``capacity_warning_days`` of footage at the
+        measured recording rate (alert A-009)."""
+        if self.att is None or self.al is None:
+            return False
+        rate = self.al.recording_rate()
+        if not rate:
+            return False
+        try:
+            free = self.io.free_bytes(Path(self.att.target.root))
+        except OSError:
+            return False
+        return free < self.acfg.capacity_warning_days * 86400 * rate
 
     def alerts(self) -> list[Alert]:
         return evaluate_alerts(self.conditions()[0])

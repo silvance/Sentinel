@@ -120,6 +120,21 @@ class ArchiveConfig:
     swap_max_wait_s: float = 120.0            # on swap, finish the file in flight if it takes no longer than this
     verify_attempts: int = 3                  # read-back failures per file before alerting and skipping it
     not_running_critical_after_s: float = 1800.0  # archive process down this long => A-007 becomes critical
+    capacity_warning_days: float = 5.0        # A-009 when the attached drive holds less than this at the measured rate
+
+
+@dataclass(frozen=True)
+class RetentionConfig:
+    """Admin-enabled deletion of ARCHIVED local originals when internal storage runs low (sentinel.retention).
+    OFF by default: the project owner must decide to enable it (docs/branches/design-local-retention.md)."""
+    enabled: bool = False
+    floor_free_gb: float = -1.0               # act when free space drops below this; < 0 = storage.warning_free_gb
+    margin_gb: float = 10.0                   # ...and free only up to floor + margin, never more
+    min_verified_copies: int = 1              # VERIFIED archive copies (not LOST) required before deleting
+    require_removed_drive: bool = True        # count only copies on drives that have left the machine
+    keep_recent_hours: float = 24.0           # never delete footage sealed less than this long ago
+    max_deletions_per_pass: int = 500
+    expected_swap_days: float = 5.0           # horizon for the "storage will run out before the next swap" alert
 
 
 @dataclass(frozen=True)
@@ -132,6 +147,7 @@ class AppConfig:
     export: ExportConfig = field(default_factory=ExportConfig)
     source_path: str | None = None
     archive: ArchiveConfig = field(default_factory=ArchiveConfig)
+    retention: RetentionConfig = field(default_factory=RetentionConfig)
 
     @property
     def spool_path(self) -> Path:
@@ -251,11 +267,19 @@ def _validate(cfg: AppConfig) -> None:
             raise ConfigError(f"[archive] {name} must be positive")
     if arc.reserve_free_mb < 0:
         raise ConfigError("[archive] reserve_free_mb must not be negative")
+    ret = cfg.retention
+    if ret.min_verified_copies < 1:
+        raise ConfigError("[retention] min_verified_copies must be at least 1")
+    if ret.margin_gb < 0 or ret.keep_recent_hours < 0 or ret.expected_swap_days <= 0 or ret.max_deletions_per_pass < 1:
+        raise ConfigError("[retention] margin_gb and keep_recent_hours must be >= 0, expected_swap_days > 0, "
+                          "max_deletions_per_pass >= 1")
+    if ret.enabled and not arc.enabled:
+        raise ConfigError("[retention] requires [archive] enabled = true (only archived recordings may be removed)")
 
 
 def load_config_dict(raw: dict[str, Any], base_dir: Path | None = None, source: str | None = None) -> AppConfig:
     base_dir = base_dir or Path.cwd()
-    unknown = sorted(set(raw) - {"camera", "recording", "storage", "tools", "service", "export", "archive"})
+    unknown = sorted(set(raw) - {"camera", "recording", "storage", "tools", "service", "export", "archive", "retention"})
     if unknown:
         raise ConfigError(f"unknown section(s): {', '.join(unknown)}")
     if "camera" not in raw or "storage" not in raw:
@@ -269,6 +293,7 @@ def load_config_dict(raw: dict[str, Any], base_dir: Path | None = None, source: 
         export=_build(ExportConfig, "export", raw.get("export"), base_dir),
         source_path=source,
         archive=_build(ArchiveConfig, "archive", raw.get("archive"), base_dir),
+        retention=_build(RetentionConfig, "retention", raw.get("retention"), base_dir),
     )
     _validate(cfg)
     return cfg

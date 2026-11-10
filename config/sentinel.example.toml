@@ -73,3 +73,17 @@ backlog_alert_hours = 24           # "not yet archived" longer than this => crit
 reserve_free_mb = 1024             # never fill the archive drive beyond this
 index_every_s = 3600               # rewrite the drive's index after this much copied footage
 swap_max_wait_s = 120              # on "Swap", finish the file in flight only if it takes <= this
+
+# Removal of ARCHIVED recordings from this computer when its storage runs low.
+# OFF by default: an administrator enables it only after the owner's decision
+# (docs/branches/design-local-retention.md). Never removes damaged (CORRUPT), unarchived,
+# recent, or "lost" recordings; by default only counts copies on archive drives that have
+# been removed from the computer.
+[retention]
+enabled = false
+floor_free_gb = -1                 # -1 = use [storage] warning_free_gb
+margin_gb = 10                     # free up to floor + margin, never more
+min_verified_copies = 1
+require_removed_drive = true
+keep_recent_hours = 24
+expected_swap_days = 5             # alert L-001 if storage will run out before the next swap

@@ -264,6 +264,40 @@ class ArchiveLedger:
                                        "reason": reason}))
 
     @retry_locked
+    def sync_sessions(self, present: set[str], keep_open: bool, swapped: str | None = None) -> None:
+        """Presence sessions of archive drives (used by the retention rule: "has this drive left the
+        machine?"). Opens a session for each present drive known to the ledger; closes the open sessions
+        of drives no longer present — unless ``keep_open`` (some drive is present but unreadable, so
+        absence is not proven)."""
+        open_rows = {r["drive_id"]: r["session_id"] for r in self.ledger.query(
+            "SELECT drive_id, session_id FROM archive_drive_sessions WHERE gone_utc IS NULL")}
+        to_open = [d for d in present if d not in open_rows]
+        to_close = [] if keep_open else [(d, s) for d, s in open_rows.items() if d not in present]
+        if to_open:
+            known = {r["drive_id"] for r in self.ledger.query(
+                f"SELECT drive_id FROM drives WHERE drive_id IN ({','.join('?' for _ in to_open)})", to_open)}
+            to_open = [d for d in to_open if d in known]
+        if not to_open and not to_close:
+            return
+        now = iso_utc(time.time())
+        with normal_priority(), self.ledger.tx() as c:
+            for d in to_open:
+                c.execute("INSERT INTO archive_drive_sessions(drive_id, seen_utc) VALUES (?,?)", (d, now))
+            for d, sid in to_close:
+                c.execute("UPDATE archive_drive_sessions SET gone_utc=?, gone_how=? WHERE session_id=?",
+                          (now, "swapped" if d == swapped else "removed", sid))
+
+    @retry_locked
+    def recording_rate(self, window_s: float = 86400.0) -> float | None:
+        """Measured recording rate (bytes per second of footage) over the segments sealed in the last
+        ``window_s``; None if there are none."""
+        since = iso_utc(time.time() - window_s)
+        r = self.ledger.query("SELECT COALESCE(SUM(size_bytes),0) b, COALESCE(SUM(duration_s),0) d FROM segments "
+                              "WHERE camera_id=? AND state IN ('FINALIZED','INTERRUPTED') AND sealed_utc >= ?",
+                              (self.camera_id, since))[0]
+        return float(r["b"]) / float(r["d"]) if r["d"] and float(r["d"]) > 0 else None
+
+    @retry_locked
     def record_index(self, drive_id: str, generation: int, generated_utc: str, reason: str, copies: int,
                      json_sha256: str, sums_sha256: str) -> None:
         with normal_priority(), self.ledger.tx() as c:

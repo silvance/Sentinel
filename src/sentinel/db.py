@@ -267,6 +267,37 @@ CREATE TABLE IF NOT EXISTS archive_indexes (       -- every Sentinel/INDEX/ gene
 );
 """
 
+# ---------------------------------------------------------------------------------------------
+# Optional local retention (admin-enabled, default OFF; sentinel.retention). A local original may be
+# deleted only after it is verified on archive drive(s); the segment row keeps all its metadata and
+# hashes and gets ``segments.local_deleted_utc`` (added by _migrate). Every deletion has a row here.
+RETENTION_DDL = """
+CREATE TABLE IF NOT EXISTS retention_deletions (
+    deletion_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    segment_id        TEXT NOT NULL REFERENCES segments(segment_id),
+    state             TEXT NOT NULL,          -- DELETING (decided, files may still exist) | DONE
+    rel_path          TEXT NOT NULL,
+    sha256            TEXT NOT NULL,
+    size_bytes        INTEGER,
+    framehash_rel_path TEXT,
+    archive_copies    TEXT NOT NULL,          -- JSON: the VERIFIED copies (copy_id, drive_id, path) relied on
+    reason            TEXT NOT NULL,
+    free_before       INTEGER,
+    free_after        INTEGER,
+    decided_utc       TEXT NOT NULL,
+    deleted_utc       TEXT
+);
+
+CREATE TABLE IF NOT EXISTS archive_drive_sessions (   -- when each archive drive was physically present
+    session_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    drive_id          TEXT NOT NULL REFERENCES drives(drive_id),
+    seen_utc          TEXT NOT NULL,
+    gone_utc          TEXT,                   -- NULL while the drive is (or may be) attached
+    gone_how          TEXT                    -- swapped | removed | not_present
+);
+CREATE INDEX IF NOT EXISTS ix_archive_sessions_open ON archive_drive_sessions(drive_id, gone_utc);
+"""
+
 # Columns that may be written once (NULL -> value) on a sealed segment, never changed after.
 WRITE_ONCE = frozenset({
     "sha256", "size_bytes", "rel_path", "start_utc", "end_utc", "duration_s",
@@ -360,6 +391,10 @@ class Ledger:
             self._conn.executescript(DDL)
             self._conn.executescript(EXPORT_DDL)
             self._conn.executescript(ARCHIVE_DDL)
+            self._conn.executescript(RETENTION_DDL)
+            cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(segments)")}
+            if "local_deleted_utc" not in cols:   # additive column (retention); NULL = original kept locally
+                self._conn.execute("ALTER TABLE segments ADD COLUMN local_deleted_utc TEXT")
             row = self._conn.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()
             if row is None:
                 self._conn.execute("INSERT INTO schema_meta(key, value) VALUES ('schema_version', ?)",
@@ -541,12 +576,15 @@ class Ledger:
 
     def segments_needing_content_hash(self, max_attempts: int = 3) -> list[sqlite3.Row]:
         return self.query("SELECT * FROM segments WHERE state IN ('FINALIZED','INTERRUPTED') "
-                          "AND content_sha256 IS NULL AND content_hash_attempts < ? ORDER BY rowid", (max_attempts,))
+                          "AND content_sha256 IS NULL AND content_hash_attempts < ? AND local_deleted_utc IS NULL "
+                          "ORDER BY rowid", (max_attempts,))
 
     def segments_for_audit(self, limit: int) -> list[sqlite3.Row]:
+        # Originals removed by the (admin-enabled) retention rule are on archive drives, not here:
+        # they are not audited locally and never reported missing.
         return self.query("SELECT * FROM segments WHERE state IN ('FINALIZED','INTERRUPTED','CORRUPT') "
-                          "AND sha256 IS NOT NULL ORDER BY (last_audit_utc IS NOT NULL), last_audit_utc, rowid "
-                          "LIMIT ?", (limit,))
+                          "AND sha256 IS NOT NULL AND local_deleted_utc IS NULL "
+                          "ORDER BY (last_audit_utc IS NOT NULL), last_audit_utc, rowid LIMIT ?", (limit,))
 
     def state_counts(self) -> dict[str, int]:
         return {r["state"]: r["n"] for r in self.query("SELECT state, COUNT(*) n FROM segments GROUP BY state")}

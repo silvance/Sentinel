@@ -230,13 +230,13 @@ class Planner:
         main: list[dict[str, Any]] = []
         if start is not None and end is not None and start < end:
             main = self._rows(f"SELECT s.*, s.rowid AS rid FROM segments s WHERE s.camera_id=? AND s.state IN ({marks}) "
-                              f"AND s.start_utc >= ? AND s.end_utc <= ? AND {not_on_drive} "
+                              f"AND s.start_utc >= ? AND s.end_utc <= ? AND s.local_deleted_utc IS NULL AND {not_on_drive} "
                               f"ORDER BY s.start_utc, s.rowid",
                               (cam, *TERMINAL, start, end, I_VERIFIED, B_COMPLETE, drive_id))
         late: list[dict[str, Any]] = []
         if prev_end is not None:
             late = self._rows(f"SELECT s.*, s.rowid AS rid FROM segments s WHERE s.camera_id=? AND s.state IN ({marks}) "
-                              f"AND (s.start_utc IS NULL OR s.start_utc < ?) AND {not_anywhere} "
+                              f"AND (s.start_utc IS NULL OR s.start_utc < ?) AND s.local_deleted_utc IS NULL AND {not_anywhere} "
                               f"ORDER BY s.start_utc, s.rowid", (cam, *TERMINAL, prev_end, I_VERIFIED, B_COMPLETE))
         for s in late:
             s["late"] = True
@@ -246,6 +246,16 @@ class Planner:
             start = end = prev_end or (main or late)[0]["start_utc"] or ""
 
         warnings: list[dict[str, Any]] = []
+        if start and end:
+            # Originals removed locally by the retention rule (verified on archive drives) cannot be exported
+            # from this computer; they are named in the manifest instead of failing the export.
+            gone = self._rows(f"SELECT segment_id, start_utc, end_utc FROM segments s WHERE s.camera_id=? AND "
+                              f"s.state IN ({marks}) AND s.local_deleted_utc IS NOT NULL AND s.start_utc >= ? AND "
+                              f"s.end_utc <= ? ORDER BY s.rowid", (cam, *TERMINAL, start, end))
+            if gone:
+                warnings.append({"code": "footage_only_on_archive_drive", "segment_ids": [g["segment_id"] for g in gone],
+                                 "message": "Some recordings in this period are kept only on archive drives and are "
+                                            "not on this review drive.", "seconds": None})
         all_gaps = self._rows("SELECT * FROM recording_gaps WHERE camera_id=? ORDER BY gap_id", (cam,))
         late_ids = {s["segment_id"] for s in late}
 
