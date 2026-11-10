@@ -18,7 +18,8 @@ param(
     [string]$Python = "",
     [switch]$AllowDirty,
     [switch]$AllowGplInternalUse,   # bundle a GPL FFmpeg for a build that never leaves the organisation
-    [switch]$InspectOnly            # only check the FFmpeg folder (licence policy, required components)
+    [switch]$InspectOnly,           # only check the FFmpeg folder (licence policy, required components)
+    [string]$SourceOfferContact = ""  # who honours the LGPL source offer (licences\SOURCE-OFFER.txt)
 )
 $ErrorActionPreference = "Stop"
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
@@ -36,5 +37,6 @@ $argsList = @((Join-Path $root "packaging\build.py"), "--ffmpeg-dir", $FfmpegDir
 if ($AllowDirty) { $argsList += "--allow-dirty" }
 if ($AllowGplInternalUse) { $argsList += "--allow-gpl-internal-use" }
 if ($InspectOnly) { $argsList += "--inspect-only" }
+if ($SourceOfferContact) { $argsList += @("--source-offer-contact", $SourceOfferContact) }
 & $vpy @argsList
 exit $LASTEXITCODE
