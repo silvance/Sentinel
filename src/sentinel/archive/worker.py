@@ -91,6 +91,7 @@ class Attached:
     copies_since_index: int = 0
     copies_this_attach: int = 0
     stale_index: bool = False       # index write failed; retry
+    next_index_retry: float = 0.0
 
 
 @dataclass
@@ -261,7 +262,7 @@ class ArchiveWorker:
         assert self.att is not None
         if self._swap.is_set():
             return self._do_swap()
-        if self.att.stale_index:
+        if self.att.stale_index and self.mono() >= self.att.next_index_retry:
             self._write_index("retry")
         if self.full and not self._space_available():
             self._set(ST_FULL, "The archive drive is full. Replace it with an empty archive drive. "
@@ -666,6 +667,7 @@ class ArchiveWorker:
         except OSError as exc:
             log.warning("archive index write failed: %s", exc)
             att.stale_index = True
+            att.next_index_retry = self.mono() + 60.0
             if not self._drive_error(exc):
                 self._event("warning", "archive_index_failed", "Archive drive index could not be written",
                             {"error": f"{type(exc).__name__}: {exc}"})

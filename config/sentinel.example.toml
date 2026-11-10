@@ -56,3 +56,16 @@ content_check = "sampled"
 sample_edge_frames = 30
 sample_spans = 3
 sample_span_frames = 30
+
+# Continuous copy of sealed recordings to a swappable archive drive (requirement S1).
+# Runs as its own process: python -m sentinel.archive run --config <this file>
+[archive]
+enabled = false
+drive_path = "/media/sentinel-archive"   # Windows example: "E:\\" (the archive drive's root)
+require_drive_marker = true        # only drives prepared by Sentinel (SENTINEL_DRIVE.json)
+resume_policy = "this_drive"       # or "any_drive": a new drive continues where the last one stopped
+max_rate_mb_s = 40                 # throttle for reading local recordings (recording uses ~0.5-1.5 MB/s)
+backlog_alert_hours = 24           # "not yet archived" longer than this => critical alert A-004
+reserve_free_mb = 1024             # never fill the archive drive beyond this
+index_every_s = 3600               # rewrite the drive's index after this much copied footage
+swap_max_wait_s = 120              # on "Swap", finish the file in flight only if it takes <= this

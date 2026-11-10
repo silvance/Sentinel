@@ -299,7 +299,17 @@ class Ledger:
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.execute("PRAGMA busy_timeout=5000")
         if not readonly:
-            self._conn.execute("PRAGMA journal_mode=WAL")
+            # Switching a new database to WAL needs an exclusive lock and SQLite does not wait for
+            # it (busy_timeout is not applied), so two processes opening a fresh ledger at the same
+            # moment (recorder + archive at first boot) would fail with "database is locked". Retry.
+            for attempt in range(50):
+                try:
+                    self._conn.execute("PRAGMA journal_mode=WAL")
+                    break
+                except sqlite3.OperationalError as exc:
+                    if "locked" not in str(exc) or attempt == 49:
+                        raise
+                    time.sleep(0.1)
             self._conn.execute("PRAGMA synchronous=FULL")
             self._migrate()
 
