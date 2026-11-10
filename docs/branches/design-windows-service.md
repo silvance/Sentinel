@@ -215,7 +215,7 @@ part whose real behaviour has not been observed.
 | 2.6 LOW | Credentials-file icacls failure ignored | **Fixed** | The step is now required (install stops on failure) and is only planned when the file exists; otherwise `set-camera-credentials` applies the ACL itself. |
 
 Tests after the fixes: `tests/unit` **135 passed**; `tests/integration/test_windows_service.py` **2 passed**.
-The full integration suite was not re-run after these fixes (it takes ~6 min and was flaky on the shared host — §5).
+Full integration suite after the fixes (32 tests): **28 passed, 4 failed** — the hard-kill `disk I/O error` (fails identically on `main`), and three timing-sensitive tests that also fail intermittently on `main` on this shared host (`test_camera_offline_shows_interrupted_and_recovers` failed on `main` too; `test_short_freeze_…` and `test_corrupted_stream_data_…` failed earlier on this branch and passed in isolation). None of them touches the changed code paths, but a re-run on a quiet machine is still required before merge (§8).
 
 ### Cross-branch integration (not changed here)
 * **`host` sub-command.** My binPath for a frozen build is `"<exe>" host --config "<cfg>"`. The
