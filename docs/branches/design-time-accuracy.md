@@ -120,6 +120,15 @@ ported as `_reviewer_probe`, and the `seg0_probe.py` shape) and
 | 8 LOW (pre-existing) | Race between segment close and break detection | **Fixed.** Pending segments are timed only after a progress report newer than their end has passed the lost-time check (`segment_ready`); `observed_closed_utc` is now stamped when the close is *seen*, not when it is processed (the hold otherwise distorted it by up to 1 s; caught by the drift integration tests). |
 | 9 LOW | Observation thread could write after ledger close | **Fixed.** `_closing` event checked before writing; join 30 s (`test_clock_observation_is_not_written_once_stopping`). |
 
+**Tests after the review fixes (commit 1fd31f5, this PC):**
+* `tests/unit tests/integration/test_time_accuracy.py` → **95 passed** (91 unit + 4 integration).
+  The first attempt failed 3 drift tests: segment ends drifted −0.1 → −1.08 s in a sawtooth.
+  Cause: the new finding-8 hold delayed processing by up to one progress interval, and
+  `observed_closed_utc` was stamped at processing time. The segment times were right; the
+  reference was wrong. Fixed by stamping when the close is seen; then 95 passed.
+* `tests/integration/test_recorder_faults.py tests/integration/test_unattended.py` → **18 passed**.
+* `test_service_process.py` / `test_media_hashing.py` were not re-run after the review fixes.
+
 ## 5. NOT executed / not verified
 * **Linux:** `chronyc tracking`, `timedatectl show`/`show-timesync` parsing is from documented
   formats only (unit-tested with hand-written fixtures); never run on Linux.
