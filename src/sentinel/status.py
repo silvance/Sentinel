@@ -100,7 +100,9 @@ def evaluate(m: Measurements, stall_timeout_s: float, segment_seconds: float, co
     if m.unstable_restarts >= 5:
         alerts.append(make_alert("R-004", Severity.WARNING, detail={"restarts_10min": m.unstable_restarts}))
     if m.simulated:
-        alerts.append(make_alert("Z-001", Severity.WARNING))
+        # First among equal-severity alerts, so the single-alert banner shows "not evidence"
+        # rather than another warning (e.g. T-002 on a host whose time service is stopped).
+        alerts.insert(0, make_alert("Z-001", Severity.WARNING))
 
     starting = False
     fatal = bool(m.component_errors) or bool(m.storage_error)
