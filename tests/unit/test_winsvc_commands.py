@@ -1,0 +1,165 @@
+"""Exact install/uninstall commands for the Windows service (generated, not executed: needs admin)."""
+
+from __future__ import annotations
+
+import subprocess
+from pathlib import Path, PureWindowsPath
+
+import pytest
+
+from sentinel.platform import windows as winplat
+from sentinel.winsvc import SERVICE_NAME
+from sentinel.winsvc.__main__ import EXIT_MEANINGS, execute, main
+from sentinel.winsvc.commands import (FAILURE_ACTIONS, InstallInputs, PlanError, Step, check_dedicated_dir,
+                                      host_command, install_plan, render, uninstall_plan)
+
+SVC_SID = "S-1-5-80-3978339998-2545952871-631246257-1716324596-627421672"
+FORBIDDEN = [r"C:\Windows", r"C:\Program Files", r"C:\ProgramData", r"C:\Users", r"C:\Users\op"]
+
+
+def _inputs(start: bool = True, creds: bool = True) -> InstallInputs:
+    host = host_command(Path(r"C:\ProgramData\Sentinel\config\sentinel.toml"), frozen=True,
+                        executable=r"C:\Program Files\Sentinel\sentinel-service.exe")
+    return InstallInputs(Path(r"C:\ProgramData\Sentinel\config\sentinel.toml"),
+                         (Path(r"D:\Sentinel\spool"), Path(r"C:\ProgramData\Sentinel\data"),
+                          Path(r"C:\ProgramData\Sentinel\logs")),
+                         Path(r"C:\ProgramData\Sentinel\config\camera.dpapi") if creds else None, host, start=start)
+
+
+def test_service_name_constant_matches_platform_layer() -> None:
+    assert winplat.SENTINEL_SERVICE_NAME == SERVICE_NAME == "SentinelRecorder"
+
+
+def test_frozen_host_command_quotes_executable_and_config() -> None:
+    h = host_command(Path(r"C:\ProgramData\Sentinel\config\sentinel.toml"), frozen=True,
+                     executable=r"C:\Program Files\Sentinel\sentinel-service.exe")
+    assert h.command_line == ('"C:\\Program Files\\Sentinel\\sentinel-service.exe" host --config '
+                              'C:\\ProgramData\\Sentinel\\config\\sentinel.toml')
+    assert h.environment == ()
+
+
+def test_venv_host_command_uses_base_interpreter_and_pythonpath() -> None:
+    h = host_command(Path(r"C:\ProgramData\Sentinel config\sentinel.toml"), frozen=False,
+                     executable=r"C:\Sentinel\venv\Scripts\python.exe",
+                     base_executable=r"C:\Program Files\Python312\python.exe",
+                     prefix=r"C:\Sentinel\venv", base_prefix=r"C:\Program Files\Python312",
+                     package_root=Path(r"C:\Sentinel\src"))
+    assert h.command_line == ('"C:\\Program Files\\Python312\\python.exe" -m sentinel.winsvc host --config '
+                              '"C:\\ProgramData\\Sentinel config\\sentinel.toml"')
+    assert h.interpreter == r"C:\Program Files\Python312\python.exe"
+    assert h.environment == (r"PYTHONPATH=C:\Sentinel\src;C:\Sentinel\venv\Lib\site-packages",)
+
+
+def test_plain_interpreter_host_command_has_no_venv_path() -> None:
+    h = host_command(Path(r"C:\Cfg\Sentinel\sentinel.toml"), frozen=False, executable=r"C:\Py\python.exe",
+                     base_executable=r"C:\Py\python.exe", prefix=r"C:\Py", base_prefix=r"C:\Py",
+                     package_root=Path(r"C:\Program Files\Sentinel\src"))
+    assert h.environment == (r"PYTHONPATH=C:\Program Files\Sentinel\src",)
+
+
+def test_install_plan_exact_commands() -> None:
+    steps = install_plan(_inputs(), forbidden=FORBIDDEN)
+    argvs = [s.argv for s in steps if s.argv]
+    assert argvs[0] == ("sc.exe", "create", "SentinelRecorder", "binPath=",
+                        '"C:\\Program Files\\Sentinel\\sentinel-service.exe" host --config '
+                        'C:\\ProgramData\\Sentinel\\config\\sentinel.toml',
+                        "start=", "auto", "obj=", "NT SERVICE\\SentinelRecorder", "DisplayName=", "Sentinel Recorder")
+    assert ("sc.exe", "failure", "SentinelRecorder", "reset=", "86400", "actions=",
+            "restart/5000/restart/30000/restart/60000") in argvs
+    assert ("sc.exe", "failureflag", "SentinelRecorder", "1") in argvs
+    assert ("sc.exe", "sidtype", "SentinelRecorder", "unrestricted") in argvs
+    assert ("sc.exe", "privs", "SentinelRecorder", "SeChangeNotifyPrivilege") in argvs
+    assert ("icacls", r"D:\Sentinel\spool", "/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F",
+            "*S-1-5-32-544:(OI)(CI)F", f"*{SVC_SID}:(OI)(CI)M", "/Q") in argvs
+    assert ("icacls", r"D:\Sentinel\spool", "/setowner", "*S-1-5-32-544", "/Q") in argvs
+    assert ("icacls", r"D:\Sentinel\spool\*", "/reset", "/T", "/C", "/Q") in argvs
+    assert ("icacls", r"C:\ProgramData\Sentinel\config", "/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F",
+            "*S-1-5-32-544:(OI)(CI)F", f"*{SVC_SID}:(OI)(CI)RX", "*S-1-5-32-545:(OI)(CI)RX", "/Q") in argvs
+    assert ("icacls", r"C:\ProgramData\Sentinel\config\camera.dpapi", "/inheritance:r", "/grant:r",
+            "*S-1-5-18:F", "*S-1-5-32-544:F", f"*{SVC_SID}:R", "/Q") in argvs
+    assert argvs[-1] == ("sc.exe", "start", "SentinelRecorder")
+    actions = [s.action for s in steps if s.action]
+    assert actions == ["set_preshutdown_timeout", "make_dirs"]          # frozen build: no environment step
+    pre = [s for s in steps if s.action == "set_preshutdown_timeout"][0]
+    assert pre.params == {"service": "SentinelRecorder", "timeout_ms": 120000}
+    # The service must exist before folder ACLs name its SID? Not required (SIDs are literal), but
+    # the order is: register -> configure -> folders -> start.
+    assert [s.argv[1] for s in steps if s.argv and s.argv[0] == "sc.exe"] == [
+        "create", "description", "failure", "failureflag", "sidtype", "privs", "start"]
+
+
+def test_install_plan_rendering_is_what_subprocess_runs() -> None:
+    step = install_plan(_inputs(), forbidden=FORBIDDEN)[0]
+    line = render(step)
+    assert line == subprocess.list2cmdline(step.argv)
+    assert 'binPath= "\\"C:\\Program Files\\Sentinel\\sentinel-service.exe\\" host --config' in line
+
+
+def test_install_plan_options() -> None:
+    steps = install_plan(_inputs(start=False, creds=False), forbidden=FORBIDDEN)
+    assert not any(s.argv and s.argv[:2] == ("sc.exe", "start") for s in steps)
+    assert not any(s.argv and "camera.dpapi" in " ".join(s.argv) for s in steps)
+    assert FAILURE_ACTIONS.endswith("restart/60000")
+
+
+@pytest.mark.parametrize("path", [r"C:\\", r"C:\ProgramData", r"C:\Users", r"D:\Data", r"C:\Users\op",
+                                  "relative\\dir"])
+def test_refuses_to_re_acl_system_or_shallow_folders(path: str) -> None:
+    with pytest.raises(PlanError):
+        check_dedicated_dir(PureWindowsPath(path), "folder", FORBIDDEN)  # type: ignore[arg-type]
+
+
+def test_refuses_ancestor_of_a_system_folder() -> None:
+    with pytest.raises(PlanError):
+        check_dedicated_dir(PureWindowsPath(r"C:\Program Files\Sub"), "folder",  # type: ignore[arg-type]
+                            [r"C:\Program Files\Sub\Windows"])
+
+
+def test_accepts_dedicated_folders() -> None:
+    check_dedicated_dir(PureWindowsPath(r"C:\ProgramData\Sentinel\data"), "f", FORBIDDEN)  # type: ignore[arg-type]
+    check_dedicated_dir(PureWindowsPath(r"C:\Users\op\Sentinel\data"), "f", FORBIDDEN)  # type: ignore[arg-type]
+
+
+def test_config_folder_must_not_be_a_data_folder() -> None:
+    inp = _inputs()
+    bad = InstallInputs(inp.config_path, (inp.config_path.parent,), None, inp.host)
+    with pytest.raises(PlanError):
+        install_plan(bad, forbidden=FORBIDDEN)
+
+
+def test_uninstall_plan_never_touches_data() -> None:
+    steps = uninstall_plan()
+    assert [s.argv for s in steps if s.argv] == [("sc.exe", "stop", "SentinelRecorder"),
+                                                ("sc.exe", "delete", "SentinelRecorder")]
+    assert steps[0].may_fail
+    assert not any(s.argv and s.argv[0] in ("icacls", "rmdir", "del") for s in steps)
+
+
+def test_execute_stops_at_first_required_failure() -> None:
+    calls: list[list[str]] = []
+
+    def run(argv: list[str], **_: object) -> subprocess.CompletedProcess:
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 1 if argv[0] in ("may", "bad") else 0, "", "boom")
+
+    out: list[str] = []
+    steps = [Step("ok", ("ok",)), Step("may", ("may",), may_fail=True), Step("bad", ("bad",)), Step("never", ("x",))]
+    assert execute(steps, run=run, out=out.append) is False
+    assert calls == [["ok"], ["may"], ["bad"]]
+    assert any("FAILED" in o for o in out)
+
+
+def test_cli_dry_runs(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["uninstall", "--dry-run"]) == 0
+    assert "sc.exe delete SentinelRecorder" in capsys.readouterr().out
+    cfg = tmp_path / "missing.toml"
+    assert main(["install", "--config", str(cfg), "--dry-run"]) == 1
+    assert "configuration" in capsys.readouterr().out
+
+
+def test_exit_meanings_cover_service_exit_codes() -> None:
+    from sentinel import service
+
+    for code in (service.EXIT_OK, service.EXIT_CONFIG, service.EXIT_LOCKED, service.EXIT_RUNTIME,
+                 service.EXIT_WATCHDOG):
+        assert code in EXIT_MEANINGS
