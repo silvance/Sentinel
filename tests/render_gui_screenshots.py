@@ -18,8 +18,7 @@ HERE = Path(__file__).resolve().parent
 sys.path[:0] = [str(HERE.parent / "src"), str(HERE)]
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from conftest import base_config_dict  # noqa: E402
-from gui_support import SCENARIOS, populate_ledger, scenario, write_doc  # noqa: E402
+from gui_support import SCENARIOS, gui_config_dict, is_test_camera, populate_ledger, scenario, write_doc  # noqa: E402
 from sentinel.config import load_config_dict  # noqa: E402
 from sentinel.gui.window import prepare_qt_environment  # noqa: E402
 
@@ -33,20 +32,15 @@ from sentinel.gui.window import MainWindow, apply_app_style  # noqa: E402
 SIZE = (1366, 768)
 
 
-def make_cfg(tmp: Path):  # noqa: ANN201
-    d = base_config_dict(tmp)
-    d["camera"]["name"] = "Camera 1"
-    d["recording"]["display_timezone"] = "America/New_York"
-    d["storage"]["warning_free_gb"] = 50.0
-    d["storage"]["critical_free_gb"] = 5.0
-    return load_config_dict(d, base_dir=tmp)
+def make_cfg(tmp: Path, test_camera: bool):  # noqa: ANN201
+    return load_config_dict(gui_config_dict(tmp, test_camera), base_dir=tmp)
 
 
 def render(app: QApplication, name: str, out: Path, *, page: str = "dashboard", dark: bool = False) -> Path:
     now = time.time()
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
-        cfg = make_cfg(tmp)
+        cfg = make_cfg(tmp, is_test_camera(name))
         doc, last_end = scenario(name, now)
         gap_reason = (doc.get("open_gap") or {}).get("reason")
         populate_ledger(cfg.data_path / "sentinel.db", now, end_at=last_end, open_gap_reason=gap_reason)

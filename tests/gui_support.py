@@ -66,13 +66,14 @@ def scenario(name: str, now: float) -> tuple[dict[str, Any], float | None]:
     last_end = now - 65.0
     if name == "recording_test_camera":
         return status_doc(base_measurements(simulated=True), now, last_segment_end=last_end), last_end
-    if name in ("r003_notice", "r003_critical"):
+    if name in ("r003_notice", "r003_critical", "r003_critical_test_camera"):
         outage = 52.0 if name == "r003_notice" else 7 * 60.0
         since = now - outage
         m = base_measurements(ffmpeg_running=False, media_seen_this_run=False, seconds_since_media_advance=None,
                               seconds_since_last_seal=outage + 30, in_backoff=True, outage_seconds=outage,
                               outage_since_utc=iso_utc(since), last_end_reason="ffmpeg_error",
-                              attempts=4 if name == "r003_notice" else 23)
+                              attempts=4 if name == "r003_notice" else 23,
+                              simulated=name.endswith("_test_camera"))
         gap = {"since_utc": iso_utc(since), "reason": "ffmpeg_error", "attempts": m.attempts, "seconds": outage}
         return status_doc(m, now, last_segment_end=since, open_gap=gap), since
     if name == "s002_storage_full":
@@ -88,7 +89,27 @@ def scenario(name: str, now: float) -> tuple[dict[str, Any], float | None]:
     raise KeyError(name)
 
 
-SCENARIOS = ("recording_test_camera", "r003_notice", "r003_critical", "s002_storage_full", "x001_not_responding")
+SCENARIOS = ("recording_test_camera", "r003_notice", "r003_critical", "s002_storage_full", "x001_not_responding",
+             "r003_critical_test_camera")
+
+
+def is_test_camera(name: str) -> bool:
+    return name.endswith("_test_camera")
+
+
+def gui_config_dict(tmp: Path, test_camera: bool) -> dict[str, Any]:
+    """Config for GUI tests/screenshots. Production-like scenarios use an RTSP camera address
+    (documentation range, never contacted: the GUI does not talk to the camera); test-camera
+    scenarios use the simulator settings, which is what makes the recorder raise Z-001."""
+    from conftest import base_config_dict
+    d = base_config_dict(tmp)
+    d["camera"]["name"] = "Camera 1"
+    d["recording"]["display_timezone"] = "America/New_York"
+    d["storage"]["warning_free_gb"] = 50.0
+    d["storage"]["critical_free_gb"] = 5.0
+    if not test_camera:
+        d["camera"] = {"id": "CAM01", "name": "Camera 1", "url": "rtsp://192.0.2.10:554/stream"}
+    return d
 
 
 # ---------------------------------------------------------------------------- ledger

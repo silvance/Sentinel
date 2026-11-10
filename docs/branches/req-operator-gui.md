@@ -59,8 +59,17 @@ LGPL-3.0, as planned in docs/01 §5.
 ## 4. Design (owner guidance: "obvious", calm, not childish, not a stock Qt form)
 * One dominant element: the state in words ("Recording normally · Since 15:10 today · No action
   needed"). Critical alerts *take over* that area (red, white text) instead of popping dialogs;
-  warnings (e.g. Z-001, S-001) appear as a full-width amber banner above it; notices (automatic
+  warnings (e.g. S-001) appear as a full-width amber banner above it; notices (automatic
   recovery in progress) explain the state inside it.
+* Critical takeover, without repeating itself (review fix): the large title is the alert's catalogue
+  headline ("Camera connection lost", "The recorder is not responding"); directly under it the
+  **exact** `alert.message` ("Recording stopped. Error R-003: …"). A small state word ("SYSTEM
+  ERROR") appears above the title only when the message does not already begin with it.
+* **Z-001 test-camera marker is visible in every state and on every page** (review fix): a slim
+  amber strip under the header, outside the page stack, with icon, "TEST SYSTEM — NOT EVIDENCE",
+  the exact Z-001 message and the code. It is driven by the status alerts *and* by the
+  configuration (`development_source = true`, the recorder's own Z-001 condition), so it stays up
+  even when no status can be read (X-001). It is not repeated in the dashboard banner.
 * Status is never colour alone: each tone has its own icon **shape** (circle-check, circle-i,
   triangle, octagon, circle-dash) and words ("TEST SYSTEM — NOT EVIDENCE", "Recording stopped").
   Colours come from the colour-blind-safe Okabe-Ito family; the timeline uses solid / hatched /
@@ -78,7 +87,9 @@ LGPL-3.0, as planned in docs/01 §5.
   full, system error ⇒ "Not in use"), and shows "Unknown" while the recorder is not responding.
 
 ### Screenshots (offscreen, 1366×768, real ledger + status produced by the recorder's own `evaluate()`)
-Re-generate with `python tests/render_gui_screenshots.py`.
+Re-generate with `python tests/render_gui_screenshots.py`. Scenarios named "test camera" use the
+simulator configuration (so Z-001 shows); the others use a production-style camera configuration
+(a documentation-range address that is never contacted), so no Z-001 strip appears.
 
 | | |
 |---|---|
@@ -87,6 +98,7 @@ Re-generate with `python tests/render_gui_screenshots.py`.
 | R-003 critical "Recording stopped…" | ![](gui-screenshots/r003_critical.png) |
 | S-002 storage full | ![](gui-screenshots/s002_storage_full.png) |
 | X-001 recorder not responding | ![](gui-screenshots/x001_not_responding.png) |
+| R-003 critical on a test camera (Z-001 strip stays visible) | ![](gui-screenshots/r003_critical_test_camera.png) |
 | View Recording Status (24 h timeline) | ![](gui-screenshots/r003_notice_timeline.png) |
 | View Previous Exports (none yet) | ![](gui-screenshots/recording_test_camera_exports.png) |
 | R-003 critical, dark theme | ![](gui-screenshots/r003_critical_dark.png) |
@@ -95,8 +107,8 @@ Re-generate with `python tests/render_gui_screenshots.py`.
 
 | Command | Result |
 |---|---|
-| `python -m pytest tests/unit -q -p no:cacheprovider` | **159 passed** (50 existing + 109 new GUI tests), 0 failed |
-| `python -m pytest tests/integration/test_gui_recorder.py -q -p no:cacheprovider` | **2 passed** (run 3 times during development; passed each time after fixing the test's own status read, see below) |
+| `python -m pytest tests/unit -q -p no:cacheprovider` | **168 passed** (50 existing + 118 new GUI tests), 0 failed — after the review fixes |
+| `python -m pytest tests/integration/test_gui_recorder.py -q -p no:cacheprovider` | **2 passed** (after the review fixes; also 3 earlier runs, each passed after fixing the test's own status read, see below) |
 | `python -m pytest tests/integration/test_service_process.py -q -p no:cacheprovider` | **1 passed, 1 failed** (`test_hard_kill_restart_recovery_and_graceful_stop`, `sqlite3.OperationalError: disk I/O error`) — **also fails on unmodified `main`** in the same session (main: 1 pass then 2 fails; this branch alone: 1 pass, 3 fails). Not caused by this branch (no recorder code changed); see §7. |
 
 What the new tests cover:
@@ -111,8 +123,12 @@ What the new tests cover:
   error with a Windows path, an RTSP URL and an SQLite error;
 * ledger opened read-only (an INSERT raises "readonly database"); ledger, WAL and status.json bytes
   unchanged after refreshes and page visits; no other file created in the data folder;
+* critical takeover: title is the catalogue headline and the message does not start with it (no
+  visible repetition), message still exact;
+* Z-001 strip on screen while R-003 critical takes over, on the overview, timeline, exports and PIN
+  pages; Z-001 shown from configuration when no status exists; no strip for a production camera;
 * exactly three routine buttons, no Stop; keyboard (Enter opens, Esc returns); all buttons and the
-  status area fully visible at 1366×768 in light and dark for all five scenarios; fonts ≥ 14 px,
+  status area fully visible at 1366×768, with no scrollbar, in light and dark for all six scenarios; fonts ≥ 14 px,
   headline ≥ 30 px; admin area locked without PIN, wrong PIN refused, lockout, re-locks on leave;
 * timeline: plain sentences ("No recording 14:05 – 14:09", "Camera disconnected · 4 min · …UTC"),
   within-segment freeze cut out, open gap "so far", unsaved current segment shown as "Recording now";

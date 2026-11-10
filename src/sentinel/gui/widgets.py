@@ -107,7 +107,7 @@ class StatusHero(QFrame):
         self.p = palette
         self.setObjectName("hero")
         outer = QHBoxLayout(self)
-        outer.setContentsMargins(28, 24, 28, 24)
+        outer.setContentsMargins(28, 20, 28, 20)
         outer.setSpacing(22)
         self.icon = IconWidget(Icon.OK, palette.ok, 64)
         icol = QVBoxLayout()
@@ -155,11 +155,15 @@ class StatusHero(QFrame):
             self.setStyleSheet(f"#hero {{ background: {bg}; border-radius: {RADIUS}px; border: none; }}"
                                f" QLabel {{ color: {fg}; }}")
             self.icon.set_icon(Icon.CRITICAL, fg, inner=bg)
-            self.label_word.setText(v.banner.label.upper())
-            self.label_word.setVisible(v.banner.label.lower() != v.headline.lower())
+            # Title = what went wrong ("Camera connection lost"); the body is the exact alert message,
+            # which already begins with the state ("Recording stopped. Error R-003: ..."). The state
+            # word is shown small above the title only when the message does not already say it.
+            state = v.headline
+            self.label_word.setText(state.upper())
+            self.label_word.setVisible(not v.banner.message.lower().startswith(state.lower()))
             for w in (self.label_word, self.headline, self.message, self.supporting, self.detail):
                 w.setStyleSheet(f"color: {fg};")
-            self.headline.setText(v.headline)
+            self.headline.setText(v.banner.title or state)
             self.message.setText(v.banner.message)
             self.message.show()
             self.supporting.hide()
@@ -258,6 +262,43 @@ class AlertBand(QFrame):
     def set_feedback(self, text: str) -> None:
         self.buttons.feedback.setText(text)
         self.buttons.feedback.setVisible(bool(text))
+
+
+class TestCameraStrip(QFrame):
+    """Persistent full-width strip under the header for Z-001 (test camera, not evidence).
+
+    It sits outside the page stack, so it stays visible on every page and in every state,
+    including when a critical alert takes over the status area."""
+
+    def __init__(self, palette: Palette, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("teststrip")
+        bg, fg = palette.warning_banner_bg, palette.warning_banner_text
+        self._fg = fg
+        self.setStyleSheet(f"#teststrip {{ background: {bg}; border-bottom: 1px solid {palette.border}; }}"
+                           f" QLabel {{ color: {fg}; }}")
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(28, 9, 28, 9)
+        lay.setSpacing(14)
+        self.icon = IconWidget(Icon.WARNING, fg, 24, inner=bg)
+        lay.addWidget(self.icon)
+        self.word = label("TEST SYSTEM — NOT EVIDENCE", SMALL_PX, W.Bold, wrap=False)
+        lay.addWidget(self.word)
+        self.message = label("", CAPTION_PX, W.Medium)
+        lay.addWidget(self.message, 1)
+        self.chip = CodeChip()
+        lay.addWidget(self.chip)
+        self.alert: AlertView | None = None
+        self.hide()
+
+    def apply(self, a: AlertView | None) -> None:
+        self.alert = a
+        if a is None:
+            self.hide()
+            return
+        self.message.setText(a.message)
+        self.chip.set_code(a.code_text, self._fg, self._fg)
+        self.show()
 
 
 # --------------------------------------------------------------------------- tiles

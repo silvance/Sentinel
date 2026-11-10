@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from ..alerts import Severity, make_alert
+from ..alerts import CATALOG, Severity, make_alert
 from ..clock import parse_iso_utc
 from ..models import CameraLink, OverallStatus
 from ..status import read_status
@@ -88,6 +88,7 @@ class AlertView:
     label: str                   # words that accompany the icon, e.g. "Recording stopped"
     recording_stopped: bool
     offer_report: bool           # show "Save diagnostic report"
+    title: str = ""              # the catalogue headline, e.g. "Camera connection lost"
 
     @property
     def code_text(self) -> str:
@@ -164,15 +165,25 @@ def alert_view(a: dict[str, Any]) -> AlertView | None:
     except (TypeError, ValueError):
         sev = 0
     stopped = bool(a.get("recording_stopped"))
+    d = CATALOG.get(code)
     return AlertView(code=code, message=message, severity=sev, tone=severity_tone(sev),
                      label=alert_label(code, sev, stopped), recording_stopped=stopped,
-                     offer_report=sev >= Severity.WARNING and code != "Z-001")
+                     offer_report=sev >= Severity.WARNING and code != "Z-001",
+                     title=d.headline if d else alert_label(code, sev, stopped))
 
 
 def x001_view() -> AlertView:
     a = make_alert("X-001", Severity.CRITICAL)
     return AlertView(code=a.code, message=a.message, severity=a.severity, tone=Tone.CRITICAL,
-                     label="Recorder not responding", recording_stopped=False, offer_report=True)
+                     label="Recorder not responding", recording_stopped=False, offer_report=True,
+                     title=CATALOG["X-001"].headline)
+
+
+def z001_view() -> AlertView:
+    """The test-camera marker, exactly as the recorder words it (same catalogue, same severity)."""
+    v = alert_view(make_alert("Z-001", Severity.WARNING).to_dict())
+    assert v is not None
+    return v
 
 
 def _epoch(iso: Any) -> float | None:
@@ -259,7 +270,10 @@ def drive_tile(export_available: bool) -> TileView:
 
 def build_dashboard(read: StatusRead, *, tz: ZoneInfo, now: float | None = None,
                     last_saved_epoch: float | None = None, recording_since_epoch: float | None = None,
-                    export_available: bool = False) -> DashboardView:
+                    export_available: bool = False, config_test_camera: bool = False) -> DashboardView:
+    """``config_test_camera``: the configuration says the source is a test camera
+    (``development_source = true``, the recorder's own Z-001 condition). Z-001 is then shown even
+    when no status can be read, so test footage is never mistaken for evidence."""
     now = time.time() if now is None else now
     doc = read.doc
     stale = read.kind is not ReadKind.OK
@@ -268,6 +282,8 @@ def build_dashboard(read: StatusRead, *, tz: ZoneInfo, now: float | None = None,
     test_cam = next((a for a in alerts if a.code == "Z-001"), None)
     if top is not None and top.code == "Z-001":
         test_cam = top
+    if test_cam is None and config_test_camera:
+        test_cam = z001_view()
 
     if stale:
         banner = x001_view()

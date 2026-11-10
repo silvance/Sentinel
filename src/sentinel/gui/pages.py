@@ -70,8 +70,8 @@ class DashboardPage(QWidget):
         content = QWidget()
         content.setObjectName("page")
         lay = QVBoxLayout(content)
-        lay.setContentsMargins(MARGIN, 22, MARGIN, 18)
-        lay.setSpacing(16)
+        lay.setContentsMargins(MARGIN, 18, MARGIN, 14)
+        lay.setSpacing(14)
 
         self.band = AlertBand(palette)
         self.band.save_report.connect(self.save_report)
@@ -79,12 +79,10 @@ class DashboardPage(QWidget):
         self.hero = StatusHero(palette)
         self.hero.save_report.connect(self.save_report)
         self.hero.save_report_elsewhere.connect(self.save_report_elsewhere)
-        self.test_strip = AlertBand(palette, compact=True)
         self.others = QVBoxLayout()
         self.others.setSpacing(6)
         lay.addWidget(self.band)
         lay.addWidget(self.hero)
-        lay.addWidget(self.test_strip)
         lay.addLayout(self.others)
 
         tiles = QHBoxLayout()
@@ -140,10 +138,9 @@ class DashboardPage(QWidget):
         self.btn_prepare.set_description("Copy recordings to a review drive." if available else reason)
 
     def apply(self, v: DashboardView) -> None:
-        self.band.apply(v.banner if (v.banner is not None and not v.banner_takes_over) else None)
+        # Z-001 lives in the window's persistent test-camera strip, never in this band (no duplicate).
+        self.band.apply(band_alert(v) if not v.banner_takes_over else None)
         self.hero.apply(v)
-        show_test = v.test_camera is not None and (v.banner is None or v.banner.code != "Z-001")
-        self.test_strip.apply(v.test_camera if show_test else None)
         clear_layout(self.others)
         for a in v.other_alerts[:3]:
             self.others.addWidget(_other_alert_row(self.p, a))
@@ -154,6 +151,11 @@ class DashboardPage(QWidget):
     def set_report_feedback(self, text: str) -> None:
         self.hero.set_feedback(text if self.hero.takeover else "")
         self.band.set_feedback(text if not self.hero.takeover else "")
+
+
+def band_alert(v: DashboardView) -> AlertView | None:
+    """The alert for a page's banner band: the current banner, except Z-001 (shown by the strip)."""
+    return v.banner if v.banner is not None and v.banner.code != "Z-001" else None
 
 
 def _other_alert_row(p: Palette, a: AlertView) -> QWidget:

@@ -144,6 +144,19 @@ def test_test_camera_is_always_visible() -> None:
     assert all(a.code != "Z-001" for a in v.other_alerts)
 
 
+def test_configured_test_camera_is_flagged_even_without_status() -> None:
+    v = build_dashboard(StatusRead(None, "missing", ReadKind.MISSING, None), tz=TZ, now=NOW,
+                        config_test_camera=True)
+    assert v.test_camera is not None and v.test_camera.message == make_alert("Z-001", Severity.WARNING).message
+    assert build_dashboard(StatusRead(None, "missing", ReadKind.MISSING, None), tz=TZ, now=NOW).test_camera is None
+
+
+def test_alert_title_is_catalogue_headline() -> None:
+    doc, _ = _doc_with("R-003", Severity.CRITICAL, recovering=True)
+    v = build_dashboard(fresh(doc), tz=TZ, now=NOW)
+    assert v.banner is not None and v.banner.title == "Camera connection lost"
+
+
 # ---------------------------------------------------------------------------- X-001
 X001 = make_alert("X-001", Severity.CRITICAL).message
 

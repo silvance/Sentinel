@@ -14,9 +14,9 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6")
 
-from conftest import base_config_dict  # noqa: E402
-from gui_support import SCENARIOS, base_measurements, populate_ledger, scenario, status_doc, write_doc  # noqa: E402
-from sentinel.alerts import Severity, make_alert  # noqa: E402
+from gui_support import (SCENARIOS, base_measurements, gui_config_dict, is_test_camera,  # noqa: E402
+                         populate_ledger, scenario, status_doc, write_doc)
+from sentinel.alerts import CATALOG, Severity, make_alert  # noqa: E402
 from sentinel.config import load_config_dict  # noqa: E402
 from sentinel.gui import admin_pin  # noqa: E402
 from sentinel.gui.window import prepare_qt_environment  # noqa: E402
@@ -44,20 +44,19 @@ def app() -> QApplication:
     return a  # type: ignore[return-value]
 
 
-def make_cfg(tmp: Path):  # noqa: ANN201
-    d = base_config_dict(tmp)
-    d["camera"]["name"] = "Camera 1"
-    d["recording"]["display_timezone"] = "America/New_York"
-    return load_config_dict(d, base_dir=tmp)
+def make_cfg(tmp: Path, test_camera: bool):  # noqa: ANN201
+    return load_config_dict(gui_config_dict(tmp, test_camera), base_dir=tmp)
 
 
 def open_window(app: QApplication, tmp: Path, name: str | None = None, doc: dict | None = None,
-                dark: bool = False) -> MainWindow:
-    cfg = make_cfg(tmp)
+                dark: bool = False, test_camera: bool | None = None) -> MainWindow:
     now = time.time()
     last_end = None
     if name is not None:
         doc, last_end = scenario(name, now)
+    if test_camera is None:   # configure the camera the way the status says it is
+        test_camera = is_test_camera(name) if name else any(a["code"] == "Z-001" for a in (doc or {}).get("alerts", []))
+    cfg = make_cfg(tmp, test_camera)
     if doc is not None:
         write_doc(cfg.data_path / "status.json", doc)
     populate_ledger(cfg.data_path / "sentinel.db", now, end_at=last_end,
@@ -87,7 +86,7 @@ def visible_texts(root: QWidget) -> list[str]:
 
 
 def operator_texts(win: MainWindow, app: QApplication) -> list[str]:
-    texts = visible_texts(win.topbar) + visible_texts(win.dashboard)
+    texts = visible_texts(win.topbar) + visible_texts(win.test_strip) + visible_texts(win.dashboard)
     win.show_timeline()
     app.processEvents()
     win.timeline_page.bar.repaint()
@@ -116,10 +115,23 @@ def test_banner_shows_exact_alert_message(app: QApplication, tmp_path: Path, nam
             expected = make_alert("X-001", Severity.CRITICAL).message
             assert d.hero.message.text() == expected and d.hero.message.isVisibleTo(d)
             assert d.hero.chip.text() == "Error X-001"
+        elif doc["banner"] and doc["alert"]["code"] == "Z-001":
+            # Z-001 is shown by the persistent strip, not repeated in the dashboard band.
+            assert win.test_strip.isVisibleTo(win) and win.test_strip.message.text() == doc["alert"]["message"]
+            assert not d.band.isVisibleTo(d)
+            assert d.hero.headline.text() == "Recording normally"
         elif doc["banner"] and v.banner_takes_over:
-            assert d.hero.message.text() == doc["alert"]["message"] and d.hero.message.isVisibleTo(d)
+            msg = doc["alert"]["message"]
+            assert d.hero.message.text() == msg and d.hero.message.isVisibleTo(d)
             assert d.hero.chip.text() == f"Error {doc['alert']['code']}"
             assert d.hero.buttons.primary.isVisibleTo(d) and d.hero.buttons.primary.text() == "Save diagnostic report"
+            # No visible repetition: the title is the catalogue headline, not the message's first words,
+            # and the small state word is hidden when the message already starts with it.
+            title = d.hero.headline.text()
+            assert title == CATALOG[doc["alert"]["code"]].headline
+            assert not msg.lower().startswith(title.lower())
+            if d.hero.label_word.isVisibleTo(d):
+                assert not msg.lower().startswith(d.hero.label_word.text().lower())
         elif doc["banner"]:
             assert d.band.isVisibleTo(d) and d.band.message.text() == doc["alert"]["message"]
             assert d.band.word.text()                       # words, not only colour
@@ -127,9 +139,7 @@ def test_banner_shows_exact_alert_message(app: QApplication, tmp_path: Path, nam
         else:
             assert d.hero.supporting.text() == doc["alert"]["message"]
             assert d.hero.chip.text() == f"Error {doc['alert']['code']}"
-        if name == "recording_test_camera":
-            assert d.band.isVisibleTo(d) and d.band.alert and d.band.alert.code == "Z-001"
-            assert d.hero.headline.text() == "Recording normally"
+        assert win.test_strip.isVisibleTo(win) == is_test_camera(name)
     finally:
         win.close()
 
@@ -142,8 +152,56 @@ def test_z001_strip_visible_under_more_severe_alert(app: QApplication, tmp_path:
     try:
         d = win.dashboard
         assert d.hero.chip.text() == "Error S-002"
-        assert d.test_strip.isVisibleTo(d) and d.test_strip.alert and d.test_strip.alert.code == "Z-001"
-        assert d.test_strip.message.text() == make_alert("Z-001", Severity.WARNING).message
+        s = win.test_strip
+        assert s.isVisibleTo(win) and s.alert and s.alert.code == "Z-001"
+        assert s.message.text() == make_alert("Z-001", Severity.WARNING).message
+    finally:
+        win.close()
+
+
+def _strip_on_screen(win: MainWindow) -> bool:
+    s = win.test_strip
+    top_left = s.mapTo(win, s.rect().topLeft())
+    return (s.isVisibleTo(win) and s.height() > 0 and 0 <= top_left.y() < 200
+            and s.message.text() == make_alert("Z-001", Severity.WARNING).message
+            and s.chip.text() == "Error Z-001" and "NOT EVIDENCE" in s.word.text())
+
+
+def test_z001_stays_visible_while_r003_critical_takes_over(app: QApplication, tmp_path: Path) -> None:
+    """Safety marker: test footage must never be mistaken for evidence, whatever else is shown."""
+    win = open_window(app, tmp_path, "r003_critical_test_camera")
+    try:
+        d = win.dashboard
+        assert win.view is not None and win.view.banner_takes_over and win.view.banner.code == "R-003"
+        assert d.hero.chip.text() == "Error R-003"
+        assert _strip_on_screen(win)
+        win.show_timeline()
+        app.processEvents()
+        assert _strip_on_screen(win)
+        win.show_exports()
+        app.processEvents()
+        assert _strip_on_screen(win)
+        win.show_admin()
+        app.processEvents()
+        assert _strip_on_screen(win)
+    finally:
+        win.close()
+
+
+def test_z001_from_configuration_when_status_unavailable(app: QApplication, tmp_path: Path) -> None:
+    """No status at all (X-001): the configured test camera is still flagged."""
+    win = open_window(app, tmp_path, doc=None, test_camera=True)
+    try:
+        assert win.view is not None and win.view.stale and win.dashboard.hero.chip.text() == "Error X-001"
+        assert _strip_on_screen(win)
+    finally:
+        win.close()
+
+
+def test_no_z001_for_a_production_camera(app: QApplication, tmp_path: Path) -> None:
+    win = open_window(app, tmp_path, doc=None, test_camera=False)
+    try:
+        assert not win.test_strip.isVisibleTo(win)
     finally:
         win.close()
 
@@ -273,6 +331,9 @@ def test_layout_fits_1366x768(app: QApplication, tmp_path: Path, name: str, dark
             bottom_right = w.mapTo(win, r.bottomRight())
             assert w.isVisibleTo(win)
             assert bottom_right.y() <= win.height() and bottom_right.x() <= win.width(), (w, bottom_right)
+        from PySide6.QtWidgets import QScrollArea
+        sa = d.findChildren(QScrollArea)[0]
+        assert not sa.verticalScrollBar().isVisible(), "overview needs scrolling at 1366x768"
         assert d.hero.headline.font().pixelSize() >= 30
         assert min(lbl.font().pixelSize() for lbl in d.findChildren(QLabel) if lbl.isVisibleTo(d)) >= 14
     finally:

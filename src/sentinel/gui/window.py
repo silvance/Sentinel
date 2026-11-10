@@ -22,11 +22,11 @@ from ..config import AppConfig
 from . import textfmt as tf
 from .admin_pin import AdminGate
 from .ledger_view import (load_admin, load_exports, load_timeline, pretty_json, recording_since, snapshot)
-from .pages import AdminLockPage, AdminPage, DashboardPage, ExportsPage, TimelinePage
+from .pages import AdminLockPage, AdminPage, DashboardPage, ExportsPage, TimelinePage, band_alert
 from .report import ReportError, save_diagnostic_report
 from .theme import BODY_PX, CAPTION_PX, Palette, font, stylesheet
 from .viewmodel import DashboardView, ReadKind, StatusRead, build_dashboard, read_status_robust
-from .widgets import label
+from .widgets import TestCameraStrip, label
 
 W = QFont.Weight
 REFRESH_MS = 2000
@@ -132,6 +132,8 @@ class MainWindow(QMainWindow):
         v.setSpacing(0)
         self.topbar = TopBar(palette, cam_text)
         v.addWidget(self.topbar)
+        self.test_strip = TestCameraStrip(palette)      # Z-001: outside the page stack, always visible
+        v.addWidget(self.test_strip)
         self.stack = QStackedWidget()
         v.addWidget(self.stack, 1)
         self.setCentralWidget(root)
@@ -185,6 +187,7 @@ class MainWindow(QMainWindow):
         """Re-read status.json and the ledger (read-only) and re-render. Never raises."""
         self._tick += 1
         now = self.clock()
+        test_cam = self.cfg.camera.development_source     # the recorder's own Z-001 condition
         try:
             read = read_status_robust(self.status_path, self.max_age_s)
             # One unreadable read (file being replaced at that instant, after in-call retries) is
@@ -202,26 +205,28 @@ class MainWindow(QMainWindow):
             snap = snapshot(self.db_path, self.cfg.camera.id)
             self.view = build_dashboard(self.read, tz=self.tz, now=now, last_saved_epoch=snap.last_saved_epoch,
                                         recording_since_epoch=recording_since(snap) if snap.available else None,
-                                        export_available=self.export_available)
+                                        export_available=self.export_available, config_test_camera=test_cam)
         except Exception as exc:  # a GUI bug must never look like "all is well": show X-001
             self.read = StatusRead(None, f"GUI error: {exc!r}", ReadKind.UNREADABLE, None)
-            self.view = build_dashboard(self.read, tz=self.tz, now=now, export_available=self.export_available)
+            self.view = build_dashboard(self.read, tz=self.tz, now=now, export_available=self.export_available,
+                                        config_test_camera=test_cam)
         self.dashboard.apply(self.view)
+        self.test_strip.apply(self.view.test_camera)
         self.topbar.apply(now, self.tz, self.view.updated)
         current = self.stack.currentWidget()
         if current is self.timeline_page and self._tick % TIMELINE_EVERY == 0:
             self._refresh_timeline()
         elif current is self.timeline_page:
-            self.timeline_page.band.apply(self.view.banner)
+            self.timeline_page.band.apply(band_alert(self.view))
         elif current is self.exports_page:
-            self.exports_page.band.apply(self.view.banner)
+            self.exports_page.band.apply(band_alert(self.view))
 
     def _refresh_timeline(self) -> None:
         assert self.view is not None
         now = self.clock()
         slack = self.cfg.recording.segment_seconds * 1.5 + 120.0
         tl = load_timeline(self.db_path, self.cfg.camera.id, now, live=self.view.live, live_slack_s=slack)
-        self.timeline_page.apply(tl, self.tz, self.view.banner, now)
+        self.timeline_page.apply(tl, self.tz, band_alert(self.view), now)
 
     # ------------------------------------------------------------------ navigation
     def show_dashboard(self) -> None:
@@ -235,7 +240,7 @@ class MainWindow(QMainWindow):
 
     def show_exports(self) -> None:
         assert self.view is not None
-        self.exports_page.apply(load_exports(self.db_path), self.tz, self.export_available, self.view.banner,
+        self.exports_page.apply(load_exports(self.db_path), self.tz, self.export_available, band_alert(self.view),
                                 self.clock())
         self.stack.setCurrentWidget(self.exports_page)
         self.exports_page.header.back_btn.setFocus()
