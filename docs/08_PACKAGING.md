@@ -39,7 +39,7 @@ The launcher never stops recording, and closing its window has no effect on the 
 
 | Option | Startup | Antivirus / SmartScreen | Reproducible / offline | Code signing | Fit with a Windows service | Verdict |
 |---|---|---|---|---|---|---|
-| **PyInstaller one-folder** (chosen) | Measured 0.32 s warm, 1.3 s first run after build | No self-extraction, no UPX; ordinary exe + DLLs. Lowest false-positive profile of the PyInstaller modes | Two clean builds were bit-identical (§7); builds offline from a wheel folder | Sign `Sentinel.exe` (and optionally every PE in `_internal\`) in place | Same exe can be the service host; one process, real PID | **Chosen** |
+| **PyInstaller one-folder** (chosen) | Measured 0.32 s warm, 1.3 s first run after build | No self-extraction, no UPX; ordinary exe + DLLs. Lowest false-positive profile of the PyInstaller modes | Two builds on one machine: all bundled files identical except BUILD-MANIFEST.json timestamps (§7); builds offline from a wheel folder | Sign `Sentinel.exe` (and optionally every PE in `_internal\`) in place | Same exe can be the service host; one process, real PID | **Chosen** |
 | PyInstaller one-file | Unpacks ~20 MB (plus 444 MB FFmpeg if bundled inside) to `%TEMP%` on **every** start | Self-extracting bootloaders are a well-known AV heuristic trigger; temp-dir writes of executables | Same as above | Signing covers the outer file only; extracted DLLs unsigned | Two processes (bootloader parent + child): signals, job objects, PIDs and the single-instance lock become indirect; temp folder cleanup on hard kill | Rejected |
 | Nuitka standalone/one-file | Faster Python start (irrelevant: the recorder is I/O bound and runs for days) | Compiled binaries have also drawn AV false positives; one-file mode has the same extraction issue | Needs a C compiler toolchain (MSVC or a downloaded MinGW) on the build machine; longer, compiler-dependent builds | Fine | Fine in standalone mode | Rejected: heavier toolchain, no benefit for this workload |
 | Embeddable Python zip + native launcher | Fast | Clean (signed python.exe from python.org) | Very transparent | Needs our own signed launcher stub (C) | Fine | Viable fallback; rejected for now because it needs a compiled launcher and hand-maintained dependency copying that PyInstaller already does |
@@ -51,16 +51,34 @@ operator still sees and starts exactly one program.
 ## 3. Resolution rules (`src/sentinel/paths.py`, unit-tested in `tests/unit/test_paths_tools.py`)
 
 **FFmpeg / FFprobe.** `[tools] ffmpeg/ffprobe` in the configuration always win. When not set, a
-*frozen* build uses `<app>\ffmpeg\ffmpeg.exe` / `ffprobe.exe` (`<app>/ffmpeg/ffmpeg` on Linux) if
-the file exists; otherwise the bare name and the OS searches PATH (the behaviour of a source
-checkout, which never looks for a bundled copy).
+*frozen* build **always** uses `<app>\ffmpeg\ffmpeg.exe` / `ffprobe.exe` (`<app>/ffmpeg/ffmpeg` on
+Linux); if that file is missing the recorder and the launcher refuse to start (C-001) — there is
+no fallback to PATH. A source checkout searches only the *absolute* directories on PATH itself
+(never the current directory or relative PATH entries, unlike `shutil.which` on Windows). Every
+tool path handed to the recorder is absolute (configured relative paths are resolved against
+the configuration folder). The recorder changes its working directory to
+`%SystemRoot%\System32` (`/` on Linux) before recording, and the launcher starts it there, so
+neither it nor FFmpeg ever runs from a user-writable folder.
 
 **Configuration file**, first that exists:
 1. `--config FILE` (returned even if missing, so the named file is reported as missing);
-2. `%SENTINEL_CONFIG%` / `$SENTINEL_CONFIG` (same rule);
+2. per-machine file (table below) — nothing a user can set or create outranks it;
 3. `<app>\sentinel.toml` — frozen builds only: a folder a technician pre-configured ("portable");
-4. per-machine file (table below);
+4. `%SENTINEL_CONFIG%` / `$SENTINEL_CONFIG` (development convenience; skipped if missing);
 5. Linux without root only: the per-user file.
+
+**Refusal of changeable locations** (`src/sentinel/install_check.py`, run by
+`service.run_recorder`, by the launcher before it starts anything, and reported by
+`check-config`): the configuration file and folder, the credentials file and folder, the FFmpeg
+programs and their folder, and the spool/data/log folders (or, if not created yet, their nearest
+existing parent) must not be changeable by Everyone, Authenticated Users, Users, Interactive,
+Guests, Anonymous or Power Users (Windows: evaluated from the DACL read with
+`GetNamedSecurityInfoW`; an unreadable ACL counts as a problem) — on Linux: not world-writable,
+not group-writable unless group root, owned by root or the recorder's account. `%ProgramData%`
+itself fails this check (standard users may create files and folders in it), so a hand-written
+configuration whose folders are plain sub-folders of `%ProgramData%` is refused until they are
+protected (run setup, or restrict them). Consequence for technicians: an FFmpeg configured in a
+folder like `C:\ffmpeg\bin` (which inherits "Authenticated Users: Modify" from `C:\`) is refused.
 
 **Default locations** (used by first-run setup, and when `[storage]` keys are omitted):
 
@@ -90,11 +108,20 @@ written. Everything else keeps the tested defaults (5-minute segments, audio exc
 
 * An existing configuration is never overwritten silently: `setup --force` moves it to
   `sentinel.toml.<UTC>.bak` first (the recorder also audits configuration changes).
-* Credentials go to `camera.secret` next to the configuration, never into it. On Windows the
-  file's ACL is reduced with `icacls` to the setup account, SYSTEM and Administrators (inheritance
-  removed — verified by `tests/unit/test_launcher.py`); on Linux it is `0600`. **Interim:** the
-  recorder then has to run under that same account (run setup while logged in as the account
-  that will use Sentinel). The Windows-service branch replaces this file with DPAPI storage.
+* Folders: before anything is written, setup creates the configuration folder and the
+  spool/data/log folders **private from creation** (`CreateDirectoryW` with a protected DACL:
+  setup account, SYSTEM, Administrators, inherited by everything the recorder later creates;
+  Linux `0750`). An existing folder is re-protected only if it is empty or holds nothing but
+  Sentinel's own files; otherwise setup stops rather than re-permission someone else's data.
+* Credentials go to `camera.secret` next to the configuration, never into it. Windows: the file
+  is created by `CreateFileW` with an explicit protected DACL (setup account, SYSTEM,
+  Administrators) under a temporary name, so it is never readable by others even for an instant;
+  its DACL is read back and verified, then it is renamed over the target (a rename keeps the
+  file's own DACL) and verified again. Linux: `O_CREAT|O_EXCL` with mode `0600`, verified, renamed.
+  **Any failure aborts setup and deletes the plaintext**; the configuration is written only after
+  the secret succeeded. **Interim:** the recorder has to run under the setup account (run setup
+  while logged in as the account that will use Sentinel). The Windows-service branch replaces
+  this file with DPAPI storage and grants its service account access.
 * `setup --simulated-camera tcp://127.0.0.1:8554` (hidden, developer only) writes a
   `development_source = true` configuration; every status then shows Z-001.
 
@@ -106,25 +133,35 @@ written. Everything else keeps the tested defaults (5-minute segments, audio exc
   data folder; Linux `start_new_session=True`. A hidden console (not `DETACHED_PROCESS`) is used
   on purpose: FFmpeg/FFprobe children inherit it and never flash console windows.
 * **Single instance** is the recorder's existing instance lock (`data\recorder.lock`); a second
-  recorder exits with code 3. The launcher probes that lock before starting, never while a
-  recorder may be starting (a probe holds the lock for an instant), and serialises concurrent
-  launchers with `data\launcher.lock`. Start is confirmed by a status heartbeat newer than the
+  recorder exits with code 3. The launcher's "is it running?" check never touches that lock (a
+  probe that takes the lock, even briefly, could make a starting recorder exit as "already
+  running"): on Windows it checks whether the recorder's stop event exists; on Linux whether the
+  PID in `recorder.lock` is alive and its `/proc/<pid>/cmdline` is a recorder run (PID reuse
+  ruled out; without `/proc` only liveness). A recorder started without the launcher host
+  (`python -m sentinel.service run`) is not seen; starting another is still safe (it exits on the
+  lock, reported as running). Concurrent launchers are serialised with `data\launcher.lock`. Start is confirmed by a status heartbeat newer than the
   spawn; an early exit maps to C-001 (configuration/tools) or C-003 (anything else).
 * **Graceful stop** (technician: `Sentinel.exe stop`): Windows — a named event
   `Local\SentinelRecorderStop-<hash of data folder>` created by the recorder with its token's
   default security (same account, SYSTEM, Administrators); it exists only while a recorder
   listens, so a stop can never be left armed. Linux — SIGTERM to the PID in `recorder.lock`, sent
-  only while that lock is actually held (a free lock means a stale PID). Both end in the
+  only after the PID check above. Both end in the
   existing graceful path: the open segment is closed and sealed as FINALIZED.
-* **Limitations of this interim mode** (replaced by the service branch): no start at boot or
-  logon — after a restart someone must open Sentinel (U8 risk); runs under the account that
-  opened it; nobody restarts it if the recorder process itself exits (the recorder already
-  retries the camera forever internally).
+* **Interim background mode is NOT suitable for unattended deployment.** The recorder is a
+  process of the logged-on user's session: it **stops when that user logs off** (and at every
+  restart), it **depends on that user being logged on**, it does not start by itself at boot or
+  logon, and nobody restarts it if the process exits (the recorder already retries the camera
+  forever internally). Unattended operation (U8) requires the Windows service (branch
+  design/windows-service) or, on Linux, the systemd unit.
 
 ### Plug-in points for the other branches (no packaging change needed)
-* **Windows service** (design/windows-service): append a provider to
-  `sentinel.launcher.control.CONTROL_PROVIDERS` returning a control whose `is_running/start/stop`
-  use the Service Control Manager when the service is installed. The service host runs the same
+* **Windows service** (design/windows-service): insert a provider at the **front** of
+  `sentinel.launcher.control.CONTROL_PROVIDERS` that returns a Service-Control-Manager control
+  whenever the service is **installed, in any state**: `is_running` = SCM state RUNNING, `start`
+  = StartService (if access is denied, show C-003 — never fall back), `stop` = ControlService.
+  While the service is installed the launcher must never start a detached recorder (two
+  recorders would race for the lock, and the session one would stop at logoff); setup should
+  then also hand credentials to the service's DPAPI store instead of `camera.secret`. The service host runs the same
   `Sentinel.exe` (e.g. a new `service` sub-command); `service.run_recorder(config, before_run=…)`
   lets it attach the SCM stop callback exactly as the launcher attaches its stop channel.
 * **Operator GUI** (req/operator-gui): append a provider to `sentinel.launcher.view.VIEW_PROVIDERS`
@@ -176,10 +213,11 @@ UPX is disabled on purpose (packed executables are a common false-positive trigg
 |---|---|
 | Build time (PyInstaller + copy + manifest) | 13 s; 27 s including a fresh hash-checked venv install |
 | Output folder | 635 files, 465.9 MB (444.4 MiB): FFmpeg 444.3 MB (`ffmpeg.exe` 222.2 MB, `ffprobe.exe` 222.0 MB), Python runtime + code 18.2 MiB in `_internal` (605 tzdata files), `Sentinel.exe` 2.4 MiB |
-| Reproducibility | Two builds from a clean venv, same commit: all 635 file hashes identical (`SHA256SUMS.txt` equal; `BUILD-MANIFEST.json` differs only by its build timestamp) |
+| Reproducibility | Two builds on one machine (fresh hash-checked venv each, commit 2439529): all bundled files identical (635/635 hashes in `SHA256SUMS.txt`); only `BUILD-MANIFEST.json` differs, by its build timestamp. Not tested across machines. |
 | Startup (`Sentinel.exe about`) | 0.32 s warm (5 runs 0.31–0.39 s); 1.29 s on the first run after a fresh build; one outlier of 7.4 s observed once (assumed antivirus scan; not investigated) |
 | Launcher: double-click → recorder confirmed by heartbeat | 0.74–0.75 s (`launch --once` wall time); recorder process start → first status 0.5 s |
 | Frozen recorder, 30 s, simulated camera, PATH without any FFmpeg | 15 segments FINALIZED, 14 content-hashed (the last one is hashed on next start, existing behaviour); every FFmpeg command line starts with the bundled `dist\Sentinel\ffmpeg\ffmpeg.exe`; graceful stop via `Sentinel.exe stop`; final segment FINALIZED; status `STOPPED`. Separate first-run-setup run (same build, PATH without FFmpeg): `stop` took 2.2 s |
+| Re-test after the QA review fixes (commit d26c67e, rebuilt) | Frozen 30 s run again: 15 segments FINALIZED with the bundled FFmpeg, PATH without FFmpeg, graceful stop; `launch --once` 1.45 s. Setup with credentials under a stand-in `%ProgramData%`: folder, `spool` and `camera.secret` show only the setup account, SYSTEM and Administrators (`icacls`), no `(I)` entries. Hidden `ffprobe.exe` → `launch` C-001 (exit 2), `check-config` "FFprobe not found (<bundled path>)". Configuration in a folder granting Users Modify → C-001, "configuration file/folder … can be changed by Users". WSL rebuild: 7 segments in 12 s, stop via verified PID; Linux unit suite 112 passed, 2 skipped. |
 | Bundled FFmpeg | `9.0.1-full_build-www.gyan.dev`; `ffmpeg.exe` SHA-256 `57c56e369d5b4873b4d93fc1a1d833cb7cd8bc9325c14b05c34ce60b22842d8a`; `ffprobe.exe` SHA-256 `afe05347caaabe479b3c4eae71992b6ec1e11c57266a1d665deb0f9fe9847208`; licence class GPL-3.0-or-later |
 
 ## 8. FFmpeg licensing (decision for the owner — not decided here; not legal advice)
