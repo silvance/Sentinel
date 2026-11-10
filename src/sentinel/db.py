@@ -134,6 +134,87 @@ CREATE TABLE IF NOT EXISTS events (
 );
 """
 
+# ---------------------------------------------------------------------------------------------
+# Phase 3: review-drive export ledger (docs/04 §6). Kept as a separate block so other branches
+# can append their own DDL without touching the recorder tables. State machine and all writes:
+# ``sentinel.export.ledger``. Additive (CREATE ... IF NOT EXISTS), so SCHEMA_VERSION is unchanged.
+EXPORT_DDL = """
+CREATE TABLE IF NOT EXISTS drives (                -- docs/04 §5; owned by the export branch
+    drive_id          TEXT PRIMARY KEY,       -- stable key derived from the identity (see export.target)
+    drive_uuid        TEXT,                   -- from SENTINEL_DRIVE.json when present
+    serial            TEXT,                   -- disk serial (may be the USB bridge's own serial: risk C2)
+    model             TEXT,
+    size_bytes        INTEGER,
+    bus_type          TEXT,                   -- usb | sata | ...
+    unique_id         TEXT,                   -- WWN / unique device id, if any
+    volume_guid       TEXT,                   -- Windows volume GUID
+    fs_uuid           TEXT,                   -- filesystem UUID (Linux)
+    label             TEXT,
+    identity          TEXT NOT NULL,          -- full identity JSON as observed (diagnostic fields included)
+    first_seen_utc    TEXT NOT NULL,
+    last_seen_utc     TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS export_batches (
+    batch_id          TEXT PRIMARY KEY,       -- export id (UUIDv4), printed in every manifest
+    purpose           TEXT NOT NULL,          -- 'review'
+    camera_id         TEXT NOT NULL,
+    drive_id          TEXT NOT NULL REFERENCES drives(drive_id),
+    state             TEXT NOT NULL,          -- PLANNED|COPYING|VERIFYING|MANIFEST|EJECTING|COMPLETE|FAILED|INTERRUPTED
+    interval_start_utc TEXT NOT NULL,
+    interval_end_utc  TEXT NOT NULL,
+    display_timezone  TEXT NOT NULL,
+    operator_id       TEXT,
+    app_version       TEXT NOT NULL,
+    ffmpeg_version    TEXT,
+    stamp             TEXT NOT NULL,          -- filesystem-safe local time stamp used in document names
+    plan              TEXT,                   -- JSON: gaps, coverage, warnings fixed at planning time
+    planned_utc       TEXT NOT NULL,
+    finished_utc      TEXT,
+    attempts          INTEGER NOT NULL DEFAULT 1,
+    error_code        TEXT,                   -- operator alert code (E-0xx) when FAILED/INTERRUPTED
+    error_detail      TEXT,
+    manifest_generated_utc TEXT,              -- frozen once, so regenerated documents are byte-identical
+    manifest_rel_path TEXT,
+    manifest_sha256   TEXT,
+    sums_sha256       TEXT,
+    ejected           INTEGER,                -- 1 drive ejected by software, 0 operator must remove it
+    removal_detail    TEXT,
+    updated_utc       TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_export_batches_cam ON export_batches(camera_id, state);
+
+CREATE TABLE IF NOT EXISTS export_items (
+    item_id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id          TEXT NOT NULL REFERENCES export_batches(batch_id),
+    ordinal           INTEGER NOT NULL,
+    kind              TEXT NOT NULL,          -- original|framehash|mp4|quarantine|quarantine_framehash|document
+    segment_id        TEXT,                   -- source segment (originals, sidecars, quarantine)
+    sources           TEXT,                   -- JSON list of segment_ids (mp4 derivatives)
+    source_rel_path   TEXT,                   -- relative to the spool (originals / sidecars)
+    dest_rel_path     TEXT NOT NULL,          -- relative to the drive root, forward slashes
+    state             TEXT NOT NULL,          -- PLANNED|COPIED|VERIFIED|FAILED
+    expected_sha256   TEXT,                   -- known before copying (sealed hash), NULL for derivatives
+    sha256            TEXT,                   -- measured by reading the destination back
+    size_bytes        INTEGER,
+    planned_bytes     INTEGER,
+    verify_method     TEXT,
+    written_sha256    TEXT,                   -- mp4/documents: SHA-256 of the file as written, before read-back
+    content_check     TEXT,                   -- mp4: full | sampled | deferred (decoded-picture check level)
+    content_verified_utc TEXT,
+    content_sha256    TEXT,                   -- mp4: decoded-frame content hash, verified equal to sources
+    frame_count       INTEGER,
+    already_present   INTEGER NOT NULL DEFAULT 0,
+    detail            TEXT,                   -- JSON
+    error             TEXT,
+    copied_utc        TEXT,
+    verified_utc      TEXT,
+    updated_utc       TEXT NOT NULL,
+    UNIQUE (batch_id, dest_rel_path)
+);
+CREATE INDEX IF NOT EXISTS ix_export_items_seg ON export_items(segment_id, state);
+"""
+
 # Columns that may be written once (NULL -> value) on a sealed segment, never changed after.
 WRITE_ONCE = frozenset({
     "sha256", "size_bytes", "rel_path", "start_utc", "end_utc", "duration_s",
@@ -258,6 +339,7 @@ class Ledger:
     def _migrate(self) -> None:
         with self._lock:
             self._conn.executescript(DDL)
+            self._conn.executescript(EXPORT_DDL)
             row = self._conn.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()
             if row is None:
                 self._conn.execute("INSERT INTO schema_meta(key, value) VALUES ('schema_version', ?)",

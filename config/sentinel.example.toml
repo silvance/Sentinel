@@ -44,3 +44,15 @@ ffprobe = "/usr/bin/ffprobe"
 
 [service]
 log_level = "INFO"
+
+[export]
+# Every exported file is always read back from the review drive and its SHA-256 checked.
+# content_check controls the extra picture-by-picture check of the MP4 videos:
+#   "full"     decode every frame (slow: hours per day of 5MP footage)
+#   "sampled"  frame count check + decode the first/last frames and a few spans per video
+#   "deferred" none now; run `python -m sentinel.export verify-content` later on the drive
+# PROVISIONAL DEFAULT "sampled" - owner decision pending.
+content_check = "sampled"
+sample_edge_frames = 30
+sample_spans = 3
+sample_span_frames = 30

@@ -90,12 +90,25 @@ class ServiceConfig:
 
 
 @dataclass(frozen=True)
+class ExportConfig:
+    """Review-drive export (sentinel.export). Byte verification of every file is always done;
+    ``content_check`` only controls the additional decoded-picture comparison of MP4 videos:
+    full | sampled | deferred (see docs/branches/req-review-drive-export.md). The provisional
+    default is an OWNER DECISION still open."""
+    content_check: str = "sampled"
+    sample_edge_frames: int = 30              # sampled: frames checked at the start and at the end
+    sample_spans: int = 3                     # sampled: additional spans at pseudo-random positions
+    sample_span_frames: int = 30              # sampled: frames per additional span
+
+
+@dataclass(frozen=True)
 class AppConfig:
     camera: CameraConfig
     recording: RecordingConfig
     storage: StorageConfig
     tools: ToolsConfig = field(default_factory=ToolsConfig)
     service: ServiceConfig = field(default_factory=ServiceConfig)
+    export: ExportConfig = field(default_factory=ExportConfig)
     source_path: str | None = None
 
     @property
@@ -195,11 +208,16 @@ def _validate(cfg: AppConfig) -> None:
         raise ConfigError("[service] intervals must be positive")
     if cfg.service.log_level.upper() not in ("DEBUG", "INFO", "WARNING", "ERROR"):
         raise ConfigError("[service] log_level must be DEBUG, INFO, WARNING or ERROR")
+    ex = cfg.export
+    if ex.content_check not in ("full", "sampled", "deferred"):
+        raise ConfigError("[export] content_check must be 'full', 'sampled' or 'deferred'")
+    if ex.sample_edge_frames < 1 or ex.sample_spans < 0 or ex.sample_span_frames < 1:
+        raise ConfigError("[export] sample_edge_frames and sample_span_frames must be >= 1, sample_spans >= 0")
 
 
 def load_config_dict(raw: dict[str, Any], base_dir: Path | None = None, source: str | None = None) -> AppConfig:
     base_dir = base_dir or Path.cwd()
-    unknown = sorted(set(raw) - {"camera", "recording", "storage", "tools", "service"})
+    unknown = sorted(set(raw) - {"camera", "recording", "storage", "tools", "service", "export"})
     if unknown:
         raise ConfigError(f"unknown section(s): {', '.join(unknown)}")
     if "camera" not in raw or "storage" not in raw:
@@ -210,6 +228,7 @@ def load_config_dict(raw: dict[str, Any], base_dir: Path | None = None, source: 
         storage=_build(StorageConfig, "storage", raw.get("storage"), base_dir),
         tools=_build(ToolsConfig, "tools", raw.get("tools"), base_dir),
         service=_build(ServiceConfig, "service", raw.get("service"), base_dir),
+        export=_build(ExportConfig, "export", raw.get("export"), base_dir),
         source_path=source,
     )
     _validate(cfg)
