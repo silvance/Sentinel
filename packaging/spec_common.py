@@ -29,7 +29,8 @@ HIDDEN_IMPORTS = ["sentinel.platform.windows", "sentinel.platform.posix", "senti
                   # Operator screen (launcher view, imported lazily); PyInstaller's PySide6 hooks then
                   # collect QtCore/QtGui/QtWidgets and the Qt platform plugins.
                   "sentinel.gui", "sentinel.gui.__main__", "sentinel.gui.window", "sentinel.power",
-                  "sentinel.archive.__main__"]
+                  "sentinel.archive.__main__", "sentinel.export.__main__",
+                  "sentinel.drives.cli"]
 # The service executable (and the launcher's service control) import these lazily.
 SERVICE_HIDDEN_IMPORTS = ["sentinel.winsvc", "sentinel.winsvc.__main__", "sentinel.winsvc.scm",
                           "sentinel.winsvc.commands", "sentinel.winsvc.control", "sentinel.winsvc.credstore",

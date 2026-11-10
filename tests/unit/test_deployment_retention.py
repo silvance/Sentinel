@@ -132,6 +132,24 @@ def test_launcher_forwards_archive_commands(monkeypatch: pytest.MonkeyPatch) -> 
     assert seen == [["swap", "--config", "x.toml", "--timeout", "5"]]
 
 
+def test_launcher_forwards_export_commands(monkeypatch: pytest.MonkeyPatch) -> None:
+    import sentinel.export.__main__ as export_main
+
+    seen: list[list[str]] = []
+    monkeypatch.setattr(export_main, "main", lambda argv: seen.append(argv) or 0)
+    assert cli.main(["export", "run", "--config", "x.toml", "--target", "E:\\"]) == 0
+    assert seen == [["run", "--config", "x.toml", "--target", "E:\\"]]
+
+
+def test_launcher_forwards_drive_commands(monkeypatch: pytest.MonkeyPatch) -> None:
+    import sentinel.drives.cli as drives_cli
+
+    seen: list[list[str]] = []
+    monkeypatch.setattr(drives_cli, "main", lambda argv: seen.append(argv) or 0)
+    assert cli.main(["drives", "prepare", "--disk", "3", "--dry-run"]) == 0
+    assert seen == [["prepare", "--disk", "3", "--dry-run"]]
+
+
 # ---------------------------------------------------------------------- Windows service install
 CFG = Path(r"C:\ProgramData\Sentinel\config\sentinel.toml")
 DIRS = (Path(r"D:\Sentinel\spool"), Path(r"C:\ProgramData\Sentinel\data"), Path(r"C:\ProgramData\Sentinel\logs"))

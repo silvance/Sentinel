@@ -274,7 +274,7 @@ re-implements this with only `sqlite3`, `hashlib` and `json` and agrees with the
 - [ ] Suspend/hibernate disabled; BIOS set to power on after power loss; UPS recommended.
 - [ ] SSH disabled or restricted to administrators; no remote desktop.
 - [ ] Removable-drive filesystem approved (risk C1); drive preparation authority decided (docs/04 §4).
-- [ ] Acceptance tests (docs/06) run on the deployment hardware with the real camera; results filed.
+- [ ] Acceptance tests (docs/06) and the bench test, soak and operator dry run (docs/09_BENCH_TEST.md) run on the deployment hardware with the real camera; results filed.
 - [ ] Recording-log chain head (`python -m sentinel.ledgerchain head`) recorded on the custody form at every drive swap; `ledgerchain verify` run before any evidence hand-over.
 
 ### Windows deployment (draft; see docs/branches/design-windows-service.md)

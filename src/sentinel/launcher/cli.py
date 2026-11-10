@@ -12,6 +12,8 @@ Technician / support commands (same executable):
     Sentinel.exe recorder run [--config FILE]          run the recorder in this window
     Sentinel.exe archive run|swap|resume|status|designate ... --config FILE   archive-drive copy
     Sentinel.exe admin-pin [--config FILE]             set the operator screen's administrator PIN
+    Sentinel.exe export run --config FILE --target DRIVE   export new recordings to a review drive
+    Sentinel.exe drives list|classify|prepare|eject ...  identify and prepare drives (administrator)
     Sentinel.exe stop [--timeout S] [--config FILE]    graceful stop of the background recorder
     Sentinel.exe status [--json] | check-config | diagnostics [--out DIR] | schedule [--days N]
     Sentinel.exe about [--verify]                      version, paths, bundled tools, build manifest
@@ -355,6 +357,10 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("admin-pin", "set the administrator PIN of the operator screen (technician)")
     arc = sub.add_parser("archive", help="archive-drive copy commands (run, swap, resume, status, designate, ...)")
     arc.add_argument("archive_args", nargs=argparse.REMAINDER)
+    exp = sub.add_parser("export", help="review-drive export commands (run, verify-content, status; technician)")
+    exp.add_argument("export_args", nargs=argparse.REMAINDER)
+    drv = sub.add_parser("drives", help="drive tools: list, classify, prepare, eject (administrator)")
+    drv.add_argument("drives_args", nargs=argparse.REMAINDER)
     rec = sub.add_parser("recorder", help="recorder process commands")
     rec_sub = rec.add_subparsers(dest="recorder_cmd", required=True)
     run = rec_sub.add_parser("run", help="run the recorder in the foreground")
@@ -403,6 +409,14 @@ def main(argv: list[str] | None = None) -> int:
         from ..archive.__main__ import main as archive_main
 
         return archive_main(list(args.archive_args))
+    if args.cmd == "export":
+        from ..export.__main__ import main as export_main
+
+        return export_main(list(args.export_args))
+    if args.cmd == "drives":
+        from ..drives.cli import main as drives_main
+
+        return drives_main(list(args.drives_args))
     if args.cmd == "stop":
         return cmd_stop(args)
     if args.cmd == "about":
