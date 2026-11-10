@@ -9,6 +9,7 @@ Technician / support commands (same executable):
     Sentinel.exe setup [--force] [--config FILE]       first-run setup questions
     Sentinel.exe recorder run [--config FILE]          run the recorder in this window
     Sentinel.exe archive run|swap|resume|status|designate ... --config FILE   archive-drive copy
+    Sentinel.exe admin-pin [--config FILE]             set the operator screen's administrator PIN
     Sentinel.exe stop [--timeout S] [--config FILE]    graceful stop of the background recorder
     Sentinel.exe status [--json] | check-config | diagnostics [--out DIR] | schedule [--days N]
     Sentinel.exe about [--verify]                      version, paths, bundled tools, build manifest
@@ -126,7 +127,7 @@ def cmd_launch(args: argparse.Namespace) -> int:
             log.info("start via %s: ok=%s %s", control.name, result.ok, result.detail)
             if not result.ok:
                 start_problem = result.code
-        return select_view().run(cfg.status_path, cfg.camera.name, started_after=started_after,
+        return select_view(cfg).run(cfg.status_path, cfg.camera.name, started_after=started_after,
                                  once=args.once, start_problem=start_problem)
     # Refuse before creating anything: configuration, credentials, tools and data folders must
     # not be changeable by other accounts; bundled tools must be present (no PATH fallback).
@@ -167,7 +168,7 @@ def cmd_launch(args: argparse.Namespace) -> int:
                 control.start_archive()   # [archive] enabled (deployed default); no-op when it already runs
         finally:
             launcher_lock.close()
-    view = select_view()
+    view = select_view(cfg)
     return view.run(cfg.status_path, cfg.camera.name, started_after=started_after,
                     once=args.once, start_problem=start_problem)
 
@@ -341,6 +342,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("setup", "first-run setup (technician)")
     p.add_argument("--force", action="store_true", help="replace an existing configuration (kept as .bak)")
     p.add_argument("--simulated-camera", metavar="URL", help=argparse.SUPPRESS)  # developer use only
+    p = add("admin-pin", "set the administrator PIN of the operator screen (technician)")
     arc = sub.add_parser("archive", help="archive-drive copy commands (run, swap, resume, status, designate, ...)")
     arc.add_argument("archive_args", nargs=argparse.REMAINDER)
     rec = sub.add_parser("recorder", help="recorder process commands")
@@ -370,6 +372,14 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_setup(args)
     if args.cmd == "recorder":
         return cmd_recorder_run(args)
+    if args.cmd == "admin-pin":
+        cfg_path = _resolve(args.config)
+        if cfg_path is None:
+            print("No configuration file found (run 'setup' first).")
+            return EXIT_CONFIG
+        from ..gui.__main__ import main as gui_main
+
+        return gui_main(["--config", str(cfg_path), "--set-admin-pin"])
     if args.cmd == "archive":
         from ..archive.__main__ import main as archive_main
 

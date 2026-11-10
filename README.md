@@ -30,7 +30,8 @@ FFmpeg 9.0.1, simulated camera).
 ## Not yet done
 Anything on the real camera, real removable drives, an administrator service install, Linux
 (except a WSL build), or Python 3.12; the operator screen cannot yet start
-an export (needs a request interface to the service).
+an export (needs a request interface to the service). The operator screen is bundled in the build
+(2026-11-10) but has not been looked at on a real display from the built program yet.
 
 ## Click-to-run program (branch design/single-executable)
 `Sentinel.exe` (one-folder PyInstaller build with FFmpeg bundled next to it) sets itself up on

@@ -190,7 +190,7 @@ def test_launcher_with_installed_service_only_views_the_status_folder(tmp_path: 
         raise AssertionError("service-managed launcher must not check or create the service's folders")
 
     monkeypatch.setattr(cli, "select_control", lambda p, c: svc)
-    monkeypatch.setattr(cli, "select_view", lambda: View())
+    monkeypatch.setattr(cli, "select_view", lambda *_a: View())
     monkeypatch.setattr(cli, "location_problems", no_checks)
     rc = cli.cmd_launch(argparse.Namespace(config=str(cfgf), once=True, no_start=False))
     assert rc == 0 and scm.started == 1

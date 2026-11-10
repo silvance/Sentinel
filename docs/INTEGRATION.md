@@ -416,3 +416,15 @@ Uncommitted on `main` (based on `bd1a445`) at the time of writing.
   installed files match the manifest. Frozen smoke test
   (`SENTINEL_FROZEN_EXE=dist\Sentinel\Sentinel.exe SENTINEL_LAUNCHER_RUN_S=30
   tests/integration/test_launcher_process.py`): passed.
+* **Operator screen bundled (2026-11-10):** `Sentinel.exe` now opens the operator screen (status,
+  dark mode, "Lock this computer") instead of the console banner (`sentinel.launcher.view.GuiStatusView`).
+  The console banner remains for `launch --once`, start problems, no GUI library, no display and
+  `SENTINEL_TEXT_STATUS=1`. A console created for the double-clicked program is hidden when the
+  screen opens; a technician's own Command Prompt is left alone. New: `Sentinel.exe admin-pin`.
+  Build requirements gained `pyside6-essentials==6.11.3` + `shiboken6==6.11.3` (hash-pinned, win_amd64
+  and manylinux). Build: 778 files, 373.3 MB (263.9 MB FFmpeg); `about --verify` OK; frozen smoke test
+  passed; the frozen program started headless (`QT_QPA_PLATFORM=offscreen`) loaded Qt6Core/Gui/Widgets
+  and kept running in the screen's event loop. **NOT verified:** the screen on a real display from the
+  built program, the console hiding on a real double-click. **Open:** Qt/PySide6 are LGPL-3.0 like
+  FFmpeg — their licence texts and source offer must ship with a release (build.py copies only
+  FFmpeg's today).

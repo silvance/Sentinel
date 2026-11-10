@@ -51,25 +51,41 @@ def main(argv: list[str] | None = None) -> int:
             print(f"configuration error: {exc}", file=sys.stderr)
             return EXIT_CONFIG
 
-    from .window import prepare_qt_environment
-    prepare_qt_environment()
-    from PySide6.QtWidgets import QApplication, QMessageBox
-
-    from .window import MainWindow, apply_app_style
-
-    app = QApplication.instance() or QApplication(sys.argv[:1])
-    app.setApplicationName("Sentinel")
-    apply_app_style(app)  # type: ignore[arg-type]
+    app = _app()
     try:
         cfg = load_config(args.config)
     except ConfigError as exc:
+        from PySide6.QtWidgets import QMessageBox
+
         print(f"configuration error: {exc}", file=sys.stderr)
         QMessageBox.critical(None, "Sentinel",
                              "The Sentinel screen cannot start because its settings could not be read.\n\n"
                              "Recording is not affected by this screen. Contact technical support.")
         return EXIT_CONFIG
-    win = MainWindow(cfg, appearance=args.theme)
-    if args.windowed:
+    return run_window(cfg, theme=args.theme, windowed=args.windowed, app=app)
+
+
+def _app():  # noqa: ANN202
+    from .window import prepare_qt_environment
+    prepare_qt_environment()
+    from PySide6.QtWidgets import QApplication
+
+    from .window import apply_app_style
+
+    app = QApplication.instance() or QApplication(sys.argv[:1])
+    app.setApplicationName("Sentinel")
+    apply_app_style(app)  # type: ignore[arg-type]
+    return app
+
+
+def run_window(cfg, theme: str | None = None, windowed: bool = False, app=None) -> int:  # noqa: ANN001
+    """Open the operator screen for a loaded configuration and run until it is closed (also the
+    launcher's view: ``Sentinel.exe``)."""
+    app = app or _app()
+    from .window import MainWindow
+
+    win = MainWindow(cfg, appearance=theme)
+    if windowed:
         win.resize(1366, 768)
         win.show()
     else:

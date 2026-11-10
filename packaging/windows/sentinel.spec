@@ -64,7 +64,8 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,               # UPX-packed executables are a common antivirus false-positive trigger
-    console=True,            # the status banner is shown in this console window (GUI branch replaces it)
+    console=True,            # technician commands print here; when the operator screen opens, a console
+                             # created for the double-clicked program is hidden (sentinel.launcher.view)
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,

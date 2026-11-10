@@ -51,7 +51,8 @@ locked, signed out, or with nobody signed in.
   10 min from the active plan (`powrprof`: lid action if a lid is present; idle sleep/hibernate only
   if keep-awake failed). Event `sleep_risk` when the risk appears or changes; details in
   `status.json` → `power`.
-* **"Lock this computer"** on the operator screen (Windows): minimises the window and locks Windows
+* **"Lock this computer"** on the operator screen (Windows; in the built `Sentinel.exe` since the
+  operator screen was bundled the same day): minimises the window and locks Windows
   (`LockWorkStation`, same as Windows key + L); tooltip says recording continues.
 * **BitLocker** for the laptop's disk is in the deployment checklist (docs/07): a Windows setting,
   not something Sentinel switches on.

@@ -15,6 +15,9 @@ HAVE_FFMPEG = shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is 
 # Run the recorder under test with a specific FFmpeg (e.g. the LGPL build to be shipped) while the
 # simulated camera keeps using the FFmpeg on PATH (it needs libx264, which LGPL builds lack).
 TEST_TOOLS_DIR = os.environ.get("SENTINEL_TEST_TOOLS_DIR")
+# Tests never open the operator screen from the launcher (it would block on a real window); the
+# GUI view is tested directly in tests/unit/test_gui_launch.py.
+os.environ.setdefault("SENTINEL_TEXT_STATUS", "1")
 
 
 def tools_for_tests() -> dict[str, str]:

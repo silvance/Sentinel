@@ -5,8 +5,12 @@ To start Sentinel or check that it is recording:
 
     Double-click  Sentinel.exe
 
-A window shows the recorder status in large letters. "RECORDING NORMALLY" means
-everything is working. You can close the window; recording continues.
+The Sentinel screen shows the recorder status. "Recording normally" means
+everything is working. You can close the screen; recording continues.
+
+Leaving the computer unattended: press "Lock this computer" (or Windows key + L).
+Recording continues while the computer is locked. Do not close the lid or put
+the computer to sleep.
 
 If the window shows an error code (for example "Error R-003"), call technical
 support and read them the code.
@@ -26,6 +30,8 @@ For the installing technician
       Sentinel.exe diagnostics          diagnostic report for support
       Sentinel.exe stop                 stop the background recorder gracefully
       Sentinel.exe setup --force        re-run setup (old settings kept as .bak)
+      Sentinel.exe admin-pin            set the administrator PIN of the screen
+      Sentinel.exe schedule             show when a recording schedule records/pauses
 * This build does NOT start automatically when Windows starts. Until the Windows
   service is installed, someone must double-click Sentinel.exe after every restart.
 * ffmpeg\ contains FFmpeg and its licence; see ffmpeg\FFMPEG-LICENCE-NOTE.txt.

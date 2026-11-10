@@ -189,6 +189,12 @@ docs/branches/design-local-retention.md §7); the file's header says how to swit
 
 ## 6. Building (Windows)
 
+Since 2026-11-10 the build also bundles the operator screen (PySide6-Essentials 6.11.3, from
+`requirements/build.txt`, hash-pinned): `Sentinel.exe` opens it after starting the recorder; the
+console banner remains the fallback (`sentinel/launcher/view.py`). Size with it: 373 MB.
+Qt and PySide6 are LGPL-3.0: ship their licence texts and honour the source offer (not yet
+automated in build.py).
+
 ```powershell
 powershell -ExecutionPolicy Bypass -File packaging\windows\build.ps1 -FfmpegDir <folder with ffmpeg.exe and ffprobe.exe>
 ```

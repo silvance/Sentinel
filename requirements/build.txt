@@ -12,6 +12,13 @@
 # Runtime dependency of the program itself (bundled into the build), see runtime.txt:
 tzdata==2025.2 ; sys_platform == "win32" \
     --hash=sha256:1a403fada01ff9221ca8044d701868fa132215d84beb92242d9acd2147f667a8
+# Operator screen (bundled since 2026-11-10; requirements/gui.txt): Qt essentials only.
+pyside6-essentials==6.11.3 \
+    --hash=sha256:ea61687d2c27f8cc7a851c259481be1001dbffa3bebacea4491d9905e7a5d0cf \
+    --hash=sha256:c6a5c3b58bf55aef6e09a7de690ff6133335014ab81a7f22f56363ea08e8f6a3
+shiboken6==6.11.3 \
+    --hash=sha256:1d38919492d08417b7579ad077bc81110d05183d21eb21d66316bc556140a8a3 \
+    --hash=sha256:e601c957011345c741b88f661a12486f478db881d6777bdf37e3dc7a8d3387c6
 # PyInstaller and its dependencies:
 pyinstaller==6.22.3 \
     --hash=sha256:500bd58c7bf7e584a8435adccbd763a0b918d5c12b08d74ff50fd79b2915458b \

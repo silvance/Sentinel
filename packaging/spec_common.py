@@ -25,7 +25,11 @@ EXCLUDES = ["sentinel.sim", "sentinel.sim.camera", "tkinter", "_tkinter", "pytes
 # Imported lazily (inside functions) or chosen at run time by platform; listed so the
 # analysis never depends on how PyInstaller's bytecode scan treats function-level imports.
 HIDDEN_IMPORTS = ["sentinel.platform.windows", "sentinel.platform.posix", "sentinel.launcher.cli",
-                  "sentinel.service"]
+                  "sentinel.service",
+                  # Operator screen (launcher view, imported lazily); PyInstaller's PySide6 hooks then
+                  # collect QtCore/QtGui/QtWidgets and the Qt platform plugins.
+                  "sentinel.gui", "sentinel.gui.__main__", "sentinel.gui.window", "sentinel.power",
+                  "sentinel.archive.__main__"]
 # The service executable (and the launcher's service control) import these lazily.
 SERVICE_HIDDEN_IMPORTS = ["sentinel.winsvc", "sentinel.winsvc.__main__", "sentinel.winsvc.scm",
                           "sentinel.winsvc.commands", "sentinel.winsvc.control", "sentinel.winsvc.credstore",
