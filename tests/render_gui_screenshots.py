@@ -72,7 +72,9 @@ def render(app: QApplication, name: str, out: Path, *, page: str = "dashboard", 
         write_doc(cfg.data_path / "status.json", doc)
         if page == "exports_records":
             add_export_records(cfg.data_path / "sentinel.db", now)
-        win = MainWindow(cfg, DARK if dark else LIGHT, export_available=False, auto_refresh=False,
+        # export_available=True: as in the integrated build, where sentinel.export is installed but the
+        # button stays disabled ("Not yet available from this screen") until the GUI<->export interface exists.
+        win = MainWindow(cfg, DARK if dark else LIGHT, export_available=True, auto_refresh=False,
                          clock=lambda: now)
         win.resize(*SIZE)
         win.show()
@@ -100,7 +102,8 @@ def main() -> int:
     made.append(render(app, "r003_notice", out, page="timeline"))
     made.append(render(app, "recording_test_camera", out, page="exports"))
     made.append(render(app, "r003_notice", out, page="exports_records"))
-    made.append(render(app, "r003_critical", out, dark=True))
+    for n in ("recording_test_camera", "r003_critical", "s002_storage_full"):
+        made.append(render(app, n, out, dark=True))
     for p in made:
         print(p)
     return 0

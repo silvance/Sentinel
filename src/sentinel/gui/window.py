@@ -12,7 +12,8 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from PySide6.QtCore import QRectF, QStandardPaths, Qt, QTimer, Signal
-from PySide6.QtGui import QCloseEvent, QColor, QFont, QKeySequence, QPainter, QPaintEvent, QPen, QShortcut
+from PySide6.QtGui import (QCloseEvent, QColor, QFont, QGuiApplication, QKeySequence, QPainter, QPaintEvent,
+                           QPen, QShortcut)
 from PySide6.QtWidgets import (QApplication, QFileDialog, QHBoxLayout, QMainWindow, QStackedWidget, QVBoxLayout,
                                QWidget)
 
@@ -23,7 +24,8 @@ from .admin_pin import AdminGate
 from .ledger_view import (load_admin, load_exports, load_timeline, pretty_json, recording_since, snapshot)
 from .pages import AdminLockPage, AdminPage, DashboardPage, ExportsPage, TimelinePage, band_alert
 from .report import ReportError, save_diagnostic_report
-from .theme import BODY_PX, CAPTION_PX, Palette, font, stylesheet
+from .prefs import load_appearance, save_appearance
+from .theme import APPEARANCES, BODY_PX, CAPTION_PX, Palette, font, pick_palette, stylesheet
 from .viewmodel import (DashboardView, HeartbeatWatch, ReadKind, StatusRead, build_dashboard,
                         read_status_robust)
 from .widgets import TestCameraStrip, label
@@ -103,12 +105,14 @@ class TopBar(QWidget):
 class MainWindow(QMainWindow):
     _report_done = Signal(str, bool)
 
-    def __init__(self, cfg: AppConfig, palette: Palette, *, export_available: bool | None = None,
+    def __init__(self, cfg: AppConfig, palette: Palette | None = None, *, export_available: bool | None = None,
                  clock: Callable[[], float] = time.time, auto_refresh: bool = True,
-                 mono: Callable[[], float] = time.monotonic) -> None:
+                 mono: Callable[[], float] = time.monotonic, appearance: str | None = None,
+                 prefs_path: Path | None = None) -> None:
+        """``palette`` fixes the theme (tests, screenshots). Otherwise ``appearance`` ("auto" =
+        Follow Windows, "light", "dark") is used, or the user's remembered preference."""
         super().__init__()
         self.cfg = cfg
-        self.p = palette
         self.clock = clock
         self.tz = ZoneInfo(cfg.recording.display_timezone)
         self.status_path = cfg.data_path / "status.json"
@@ -124,29 +128,57 @@ class MainWindow(QMainWindow):
         self._last_good: StatusRead | None = None
         self._unreadable_streak = 0
         self.heartbeat_watch = HeartbeatWatch(self.max_age_s, mono)
+        self.prefs_path = prefs_path
+        if appearance in APPEARANCES:
+            self.appearance = appearance
+        elif palette is not None:
+            self.appearance = "dark" if palette.dark else "light"
+        else:
+            self.appearance = load_appearance(prefs_path)
+        palette = palette or pick_palette(self.appearance)
 
-        cam_text = f"{cfg.camera.name} ({cfg.camera.id})" if cfg.camera.name else f"Camera {cfg.camera.id}"
-        self.setWindowTitle(f"Sentinel \u2014 {cam_text}")
+        self.cam_text = f"{cfg.camera.name} ({cfg.camera.id})" if cfg.camera.name else f"Camera {cfg.camera.id}"
+        self.setWindowTitle(f"Sentinel — {self.cam_text}")
         self.setMinimumSize(1024, 640)
-        self.setStyleSheet(stylesheet(palette))
+        self._build_ui(palette)
 
+        self._report_done.connect(self._on_report_done)
+        QShortcut(QKeySequence(Qt.Key.Key_Escape), self, activated=self.show_dashboard)
+        QShortcut(QKeySequence("F5"), self, activated=self.refresh)
+        try:   # Follow Windows: re-theme live when the operating system switches light/dark
+            QGuiApplication.styleHints().colorSchemeChanged.connect(self._system_scheme_changed)
+        except AttributeError:   # Qt < 6.5
+            pass
+
+        self.timer = QTimer(self)
+        self.timer.setInterval(REFRESH_MS)
+        self.timer.timeout.connect(self.refresh)
+        self.refresh()
+        if auto_refresh:
+            self.timer.start()
+
+    def _build_ui(self, palette: Palette) -> None:
+        """(Re)create every widget for ``palette``. Called at start and when the appearance changes."""
+        cfg = self.cfg
+        self.p = palette
+        self.setStyleSheet(stylesheet(palette))
         root = QWidget()
         root.setObjectName("root")
         v = QVBoxLayout(root)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(0)
-        self.topbar = TopBar(palette, cam_text)
+        self.topbar = TopBar(palette, self.cam_text)
         v.addWidget(self.topbar)
         self.test_strip = TestCameraStrip(palette)      # Z-001: outside the page stack, always visible
         v.addWidget(self.test_strip)
         self.stack = QStackedWidget()
         v.addWidget(self.stack, 1)
-        self.setCentralWidget(root)
+        self.setCentralWidget(root)                     # deletes the previous widget tree
 
         now = self.clock()
         tz_text = (f"Times shown in {zone_words(cfg.recording.display_timezone)} time "
                    f"({tf.utc_offset_text(self.tz, now)})")
-        self.dashboard = DashboardPage(palette, tz_text)
+        self.dashboard = DashboardPage(palette, tz_text, self.appearance)
         self.timeline_page = TimelinePage(palette)
         self.exports_page = ExportsPage(palette)
         self.lock_page = AdminLockPage(palette)
@@ -165,6 +197,7 @@ class MainWindow(QMainWindow):
         d.timeline.connect(self.show_timeline)
         d.exports.connect(self.show_exports)
         d.admin.connect(self.show_admin)
+        d.appearance_selected.connect(self.set_appearance)
         d.save_report.connect(lambda: self.save_report(None))
         d.save_report_elsewhere.connect(self.save_report_elsewhere)
         self.timeline_page.back.connect(self.show_dashboard)
@@ -174,16 +207,37 @@ class MainWindow(QMainWindow):
         self.admin_page.lock.connect(self.show_dashboard)
         self.admin_page.refresh_requested.connect(self.refresh_admin)
         self.admin_page.save_report.connect(lambda: self.save_report(None))
-        self._report_done.connect(self._on_report_done)
-        QShortcut(QKeySequence(Qt.Key.Key_Escape), self, activated=self.show_dashboard)
-        QShortcut(QKeySequence("F5"), self, activated=self.refresh)
 
-        self.timer = QTimer(self)
-        self.timer.setInterval(REFRESH_MS)
-        self.timer.timeout.connect(self.refresh)
+    # ------------------------------------------------------------------ appearance
+    def set_appearance(self, mode: str) -> None:
+        """Operator's display choice: remembered in their own profile, applied immediately.
+        Purely visual; it never changes whether the window or its taskbar entry is visible."""
+        if mode not in APPEARANCES:
+            return
+        self.appearance = mode
+        save_appearance(mode, self.prefs_path)          # best effort; failure only means "not remembered"
+        self._retheme(pick_palette(mode))
+
+    def _system_scheme_changed(self, *_: object) -> None:
+        if self.appearance == "auto":
+            self._retheme(pick_palette("auto"))
+
+    def _retheme(self, palette: Palette) -> None:
+        if palette == self.p:
+            self.dashboard.set_appearance_value(self.appearance)
+            return
+        current = self.stack.currentWidget()
+        page = ("timeline" if current is self.timeline_page else
+                "exports" if current is self.exports_page else "dashboard")   # admin re-locks
+        self._build_ui(palette)
         self.refresh()
-        if auto_refresh:
-            self.timer.start()
+        if page == "timeline":
+            self.show_timeline()
+        elif page == "exports":
+            self.show_exports()
+        else:
+            self.stack.setCurrentWidget(self.dashboard)
+            self.dashboard.appearance.setFocus()
 
     # ------------------------------------------------------------------ refresh
     def refresh(self) -> None:

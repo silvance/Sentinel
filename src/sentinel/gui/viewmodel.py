@@ -314,8 +314,7 @@ def drive_tile(export_available: bool) -> TileView:
                         "The review-drive feature is not installed in this version.")
     # Installed but not connected to this screen (the GUI<->export interface is not defined yet).
     return TileView("Review drive", "Not available here yet", Tone.NEUTRAL,
-                    "The review-drive feature cannot be started from this screen yet. "
-                    "Contact technical support to prepare a review drive.")
+                    "Ask technical support to prepare a review drive.")
 
 
 def build_dashboard(read: StatusRead, *, tz: ZoneInfo, now: float | None = None,

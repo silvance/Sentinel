@@ -152,9 +152,10 @@ class StatusHero(QFrame):
         self.takeover = v.banner_takes_over
         if self.takeover and v.banner is not None:
             bg, fg = p.banner(Tone.CRITICAL)
-            self.setStyleSheet(f"#hero {{ background: {bg}; border-radius: {RADIUS}px; border: none; }}"
+            self.setStyleSheet(f"#hero {{ background: {bg}; border-radius: {RADIUS}px;"
+                               f" border: 2px solid {p.banner_border(Tone.CRITICAL)}; }}"
                                f" QLabel {{ color: {fg}; }}")
-            self.icon.set_icon(Icon.CRITICAL, fg, inner=bg)
+            self.icon.set_icon(Icon.CRITICAL, p.banner_icon(Tone.CRITICAL), inner=bg)
             # Title = what went wrong ("Camera connection lost"); the body is the exact alert message,
             # which already begins with the state ("Recording stopped. Error R-003: ..."). The state
             # word is shown small above the title only when the message does not already say it.
@@ -248,10 +249,12 @@ class AlertBand(QFrame):
         if a is None:
             self.hide()
             return
-        bg, fg = self.p.banner(a.tone if a.tone is Tone.CRITICAL else Tone.WARNING)
-        self.setStyleSheet(f"#band {{ background: {bg}; border-radius: {RADIUS}px; }} QLabel {{ color: {fg}; }}")
+        t = a.tone if a.tone is Tone.CRITICAL else Tone.WARNING
+        bg, fg = self.p.banner(t)
+        self.setStyleSheet(f"#band {{ background: {bg}; border-radius: {RADIUS}px;"
+                           f" border: 2px solid {self.p.banner_border(t)}; }} QLabel {{ color: {fg}; }}")
         shape = Icon.CRITICAL if a.tone is Tone.CRITICAL else (Icon.WARNING if a.severity >= 2 else Icon.INFO)
-        self.icon.set_icon(shape, fg, inner=bg)
+        self.icon.set_icon(shape, self.p.banner_icon(t), inner=bg)
         self.word.setText(a.label.upper())
         self.chip.set_code(a.code_text, fg, fg)
         self.message.setText(a.message)
@@ -275,12 +278,13 @@ class TestCameraStrip(QFrame):
         self.setObjectName("teststrip")
         bg, fg = palette.warning_banner_bg, palette.warning_banner_text
         self._fg = fg
-        self.setStyleSheet(f"#teststrip {{ background: {bg}; border-bottom: 1px solid {palette.border}; }}"
+        self.setStyleSheet(f"#teststrip {{ background: {bg}; border-top: 1px solid {palette.banner_border(Tone.WARNING)};"
+                           f" border-bottom: 2px solid {palette.banner_border(Tone.WARNING)}; }}"
                            f" QLabel {{ color: {fg}; }}")
         lay = QHBoxLayout(self)
         lay.setContentsMargins(28, 9, 28, 9)
         lay.setSpacing(14)
-        self.icon = IconWidget(Icon.WARNING, fg, 24, inner=bg)
+        self.icon = IconWidget(Icon.WARNING, palette.banner_icon(Tone.WARNING), 24, inner=bg)
         lay.addWidget(self.icon)
         self.word = label("TEST SYSTEM — NOT EVIDENCE", SMALL_PX, W.Bold, wrap=False)
         lay.addWidget(self.word)

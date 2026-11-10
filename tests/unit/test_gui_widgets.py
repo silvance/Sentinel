@@ -49,7 +49,7 @@ def make_cfg(tmp: Path, test_camera: bool):  # noqa: ANN201
 
 
 def open_window(app: QApplication, tmp: Path, name: str | None = None, doc: dict | None = None,
-                dark: bool = False, test_camera: bool | None = None) -> MainWindow:
+                dark: bool = False, test_camera: bool | None = None, export_available: bool = False) -> MainWindow:
     now = time.time()
     last_end = None
     if name is not None:
@@ -61,7 +61,7 @@ def open_window(app: QApplication, tmp: Path, name: str | None = None, doc: dict
         write_doc(cfg.data_path / "status.json", doc)
     populate_ledger(cfg.data_path / "sentinel.db", now, end_at=last_end,
                     open_gap_reason=((doc or {}).get("open_gap") or {}).get("reason"))
-    win = MainWindow(cfg, DARK if dark else LIGHT, export_available=False, auto_refresh=False)
+    win = MainWindow(cfg, DARK if dark else LIGHT, export_available=export_available, auto_refresh=False)
     win.resize(1366, 768)
     win.show()
     app.processEvents()
@@ -386,12 +386,15 @@ def test_keyboard_navigation(app: QApplication, tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("name", SCENARIOS)
 @pytest.mark.parametrize("dark", [False, True])
-def test_layout_fits_1366x768(app: QApplication, tmp_path: Path, name: str, dark: bool) -> None:
-    """At 1366x768 the status area and all three routine buttons are fully visible without scrolling."""
-    win = open_window(app, tmp_path, name, dark=dark)
+@pytest.mark.parametrize("export_available", [False, True])
+def test_layout_fits_1366x768(app: QApplication, tmp_path: Path, name: str, dark: bool,
+                              export_available: bool) -> None:
+    """At 1366x768 the status area and all three routine buttons are fully visible without scrolling
+    (both disabled-button wordings, light and dark)."""
+    win = open_window(app, tmp_path, name, dark=dark, export_available=export_available)
     try:
         d = win.dashboard
-        for w in (d.hero, d.btn_prepare, d.btn_timeline, d.btn_exports, d.btn_admin):
+        for w in (d.hero, d.btn_prepare, d.btn_timeline, d.btn_exports, d.appearance, d.btn_admin):
             r = w.rect()
             bottom_right = w.mapTo(win, r.bottomRight())
             assert w.isVisibleTo(win)

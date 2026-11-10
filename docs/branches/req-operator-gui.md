@@ -23,7 +23,7 @@ not part of this branch and the screen says so honestly instead of pretending.
 | 24 h recording timeline (recorded vs gaps, reason in plain words) | E3 (continuity) | Stated (task); layout is my design |
 | Display timezone with UTC alongside | E1 | Stated |
 | 1366×768, large fonts, keyboard, 2 s refresh, robust to status.json replacement | Task brief | Stated |
-| Light and dark themes (follows the OS) | Owner guidance | Design choice |
+| Display setting Light / Dark / Follow Windows on the main screen, remembered per user; low-glare dark | Owner request (2026-11-10) | Stated; storage location and palette are my design |
 | Prepare Review Drive | U4 | **Disabled in this build**, with honest text, also when `sentinel.export` is installed (QA finding 3.1/3.2; see "Prepare Review Drive: intended interface") |
 
 ## 3. What changed
@@ -38,6 +38,7 @@ not part of this branch and the screen says so honestly instead of pretending.
   * `report.py` — saves `build_report` output to the Desktop or a chosen folder via a private temp
     folder (see §6), read-back hash check, never overwrites.
   * `textfmt.py` — times ("Yesterday 22:10", "14:05 UTC"), durations, sizes, "about 6 days".
+  * `prefs.py` — the per-user display preference (see §4 "Display: Light / Dark / Follow Windows").
   * `theme.py`, `icons.py`, `widgets.py`, `pages.py`, `window.py`, `__main__.py` — the Qt layer.
 * `pyproject.toml`: optional extra `gui = ["PySide6-Essentials==6.11.3", "shiboken6==6.11.3"]`,
   script `sentinel-gui`. `requirements/gui.txt` with the same pins.
@@ -86,7 +87,27 @@ LGPL-3.0, as planned in docs/01 §5.
 * Camera tile does not blame the camera when recording stopped for another reason (storage
   full, system error ⇒ "Not in use"), and shows "Unknown" while the recorder is not responding.
 
+### Display: Light / Dark / Follow Windows (owner request)
+* A plainly labelled **Display** drop-down in the footer of the main screen (keyboard reachable,
+  Tab order after the three buttons): *Follow Windows* (default), *Light*, *Dark*. The change
+  applies immediately; an open administrator page is locked again when the screen is rebuilt.
+* Remembered **per user** in the user's own profile — `%APPDATA%\Sentinel\gui-preferences.json`
+  on Windows, `$XDG_CONFIG_HOME/sentinel/gui-preferences.json` (default `~/.config`) elsewhere —
+  never in the recorder's data folder. Missing, unreadable or unknown ⇒ Follow Windows; a save
+  failure only means the choice is not remembered. `--theme` on the command line overrides it for
+  one session without saving.
+* Follow Windows tracks the OS setting live (Qt colour-scheme change signal).
+* Low-glare dark: dark neutral greys (window #15181C, cards #1C2026 — not pure black), text at
+  reduced luminance (#D4D9DF), muted status colours, and banners as **dark tinted panels with a
+  coloured outline** (critical #3D1D1B with a red border; warning/Z-001 #3A3016 with an amber border)
+  instead of large bright fills. Icon shapes and words are unchanged. Every text and status pair is
+  WCAG AA (≥ 4.5:1) in both themes — computed in the tests (lowest: light 4.69, dark 4.79).
+* Purely visual. Nothing hides the window, its taskbar entry or notifications; a test checks the
+  window stays an ordinary, visible top-level window with unchanged flags after switching.
+
 ### Screenshots (offscreen, 1366×768, real ledger + status produced by the recorder's own `evaluate()`)
+Rendered with `sentinel.export` treated as installed, as in the integrated build, so the disabled
+Prepare Review Drive shows its current wording ("Not yet available from this screen…").
 Re-generate with `python tests/render_gui_screenshots.py`. Scenarios named "test camera" use the
 simulator configuration (so Z-001 shows); the others use a production-style camera configuration
 (a documentation-range address that is never contacted), so no Z-001 strip appears.
@@ -102,13 +123,15 @@ simulator configuration (so Z-001 shows); the others use a production-style came
 | View Recording Status (24 h timeline) | ![](gui-screenshots/r003_notice_timeline.png) |
 | View Previous Exports (none yet) | ![](gui-screenshots/recording_test_camera_exports.png) |
 | View Previous Exports with records (export branch schema, plain-word outcomes) | ![](gui-screenshots/r003_notice_exports_records.png) |
-| R-003 critical, dark theme | ![](gui-screenshots/r003_critical_dark.png) |
+| Dark: recording normally (test camera) | ![](gui-screenshots/recording_test_camera_dark.png) |
+| Dark: R-003 critical | ![](gui-screenshots/r003_critical_dark.png) |
+| Dark: S-002 storage full | ![](gui-screenshots/s002_storage_full_dark.png) |
 
 ## 5. Tests (development host, Windows 11, Python 3.14.3, FFmpeg 9.0.1)
 
 | Command | Result |
 |---|---|
-| `python -m pytest tests/unit -q -p no:cacheprovider` | **175 passed** (50 existing + 125 new GUI tests), 0 failed — after the orchestrator and QA review fixes |
+| `python -m pytest tests/unit -q -p no:cacheprovider` | **202 passed** (50 existing + 152 GUI tests), 0 failed — after the review fixes and the display setting |
 | `python -m pytest tests/integration/test_gui_recorder.py -q -p no:cacheprovider` | **2 passed** (after the QA fixes; also earlier runs, each passed after fixing the test's own status read, see below) |
 | `python -m pytest tests/integration/test_service_process.py -q -p no:cacheprovider` | **1 passed, 1 failed** (`test_hard_kill_restart_recovery_and_graceful_stop`, `sqlite3.OperationalError: disk I/O error`) — **also fails on unmodified `main`** in the same session (main: 1 pass then 2 fails; this branch alone: 1 pass, 3 fails). Not caused by this branch (no recorder code changed); see §7. |
 
@@ -135,8 +158,14 @@ What the new tests cover:
   visible repetition), message still exact;
 * Z-001 strip on screen while R-003 critical takes over, on the overview, timeline, exports and PIN
   pages; Z-001 shown from configuration when no status exists; no strip for a production camera;
+* display setting: default/unreadable/unknown ⇒ Follow Windows; save/restore round trip; unwritable
+  location fails safe; default location is the user profile; Follow Windows maps to the OS setting
+  and follows a live change; choosing Dark in the control re-themes, is saved and is restored by a
+  new window; admin re-locks on re-theme; contrast ≥ 4.5:1 for all key pairs in both themes; dark
+  fills stay below 5 % luminance; dark critical takeover and Z-001 strip render with icon + words;
 * exactly three routine buttons, no Stop; keyboard (Enter opens, Esc returns); all buttons and the
-  status area fully visible at 1366×768, with no scrollbar, in light and dark for all six scenarios; fonts ≥ 14 px,
+  status area and Display control fully visible at 1366×768, with no scrollbar, in light and dark for all six
+  scenarios and both disabled-button wordings; fonts ≥ 14 px,
   headline ≥ 30 px; admin area locked without PIN, wrong PIN refused, lockout, re-locks on leave;
 * timeline: plain sentences ("No recording 14:05 – 14:09", "Camera disconnected · 4 min · …UTC"),
   within-segment freeze cut out, open gap "so far", unsaved current segment shown as "Recording now";
@@ -232,4 +261,5 @@ unmodified `main`.
 | QA 3.1/3.2 (high): Prepare Review Drive launched an export command that could not work (no `--target`, output discarded, false "window opening" text, no `-m` in a frozen build) | Fixed: launch path removed; button disabled with honest text even if export is installed; interface documented above |
 | QA 3.3 (medium): a wall clock set backwards hides a dead recorder (negative heartbeat age) | Fixed in the GUI viewmodel: a heartbeat age beyond the limit in either direction is stale, plus monotonic "heartbeat stopped changing" check; `read_status` on main unchanged |
 | QA 3.4 (low): Previous Exports showed raw ledger outcome strings | Fixed: fixed plain-word outcomes for every state (unknown included), drive label from `drives`, only well-formed error codes |
+| Owner: dark mode for discreet review in a dim room | Added: Display control (Light / Dark / Follow Windows), per-user memory, low-glare dark palette, AA contrast tested |
 | Remaining | One live-recorder X-001 flash of at most one refresh right after a >15 s backward clock change (documented in §6); the interface for Prepare Review Drive is still to be built |

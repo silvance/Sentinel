@@ -7,14 +7,15 @@ from zoneinfo import ZoneInfo
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
-from PySide6.QtWidgets import (QAbstractItemView, QFrame, QHBoxLayout, QHeaderView, QLineEdit, QPlainTextEdit,
+from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QFrame, QHBoxLayout, QHeaderView, QLineEdit, QPlainTextEdit,
                                QPushButton, QScrollArea, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout,
                                QWidget)
 
 from . import textfmt as tf
 from .icons import TONE_ICON, Icon, IconWidget
 from .ledger_view import OUTCOME_COMPLETED, AdminData, ExportList, SpanKind, Timeline
-from .theme import BODY_PX, CAPTION_PX, SMALL_PX, TITLE_PX, VALUE_PX, Palette, font
+from .theme import (APPEARANCE_LABELS, APPEARANCES, BODY_PX, CAPTION_PX, SMALL_PX, TITLE_PX, VALUE_PX, Palette,
+                    font)
 from .viewmodel import AlertView, DashboardView
 from .widgets import (ActionButton, AlertBand, InfoTile, LegendItem, SpanRow, StatusHero, TimelineBar, card,
                       clear_layout, label)
@@ -62,8 +63,10 @@ class DashboardPage(QWidget):
     admin = Signal()
     save_report = Signal()
     save_report_elsewhere = Signal()
+    appearance_selected = Signal(str)
 
-    def __init__(self, palette: Palette, tz_text: str, parent: QWidget | None = None) -> None:
+    def __init__(self, palette: Palette, tz_text: str, appearance: str = "auto",
+                 parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.p = palette
         content = QWidget()
@@ -114,6 +117,20 @@ class DashboardPage(QWidget):
         self.tz_label = label(tz_text, CAPTION_PX, wrap=False, name="tertiary")
         foot.addWidget(self.tz_label)
         foot.addStretch(1)
+        # Display preference: plainly labelled, on the main screen, keyboard reachable.
+        disp = label("Display", CAPTION_PX, W.DemiBold, wrap=False, name="secondary")
+        foot.addWidget(disp)
+        self.appearance = QComboBox()
+        for mode in APPEARANCES:
+            self.appearance.addItem(APPEARANCE_LABELS[mode], mode)
+        self.appearance.setAccessibleName("Display")
+        self.appearance.setToolTip("Light, Dark, or follow the Windows setting. Remembered for you.")
+        disp.setBuddy(self.appearance)
+        self.set_appearance_value(appearance)
+        self.appearance.activated.connect(
+            lambda i: self.appearance_selected.emit(str(self.appearance.itemData(i))))
+        foot.addWidget(self.appearance)
+        foot.addSpacing(12)
         self.btn_admin = QPushButton("Administrator")
         self.btn_admin.setObjectName("link")
         self.btn_admin.setToolTip("Diagnostics for administrators (PIN required)")
@@ -126,7 +143,12 @@ class DashboardPage(QWidget):
         outer.addWidget(scroll(content))
         self.setTabOrder(self.btn_prepare, self.btn_timeline)
         self.setTabOrder(self.btn_timeline, self.btn_exports)
-        self.setTabOrder(self.btn_exports, self.btn_admin)
+        self.setTabOrder(self.btn_exports, self.appearance)
+        self.setTabOrder(self.appearance, self.btn_admin)
+
+    def set_appearance_value(self, mode: str) -> None:
+        i = self.appearance.findData(mode)
+        self.appearance.setCurrentIndex(i if i >= 0 else 0)
 
     def set_prepare_available(self, available: bool, reason: str = "") -> None:
         # Only ever called with False in this build (see window.py); kept so integration can enable it.

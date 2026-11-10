@@ -10,7 +10,7 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass
 
-from PySide6.QtGui import QColor, QFont, QGuiApplication
+from PySide6.QtGui import QFont, QGuiApplication
 from PySide6.QtCore import Qt
 
 from .viewmodel import Tone
@@ -39,6 +39,10 @@ class Palette:
     warning_banner_text: str
     critical_banner_bg: str
     critical_banner_text: str
+    warning_banner_border: str = ""      # dark theme: the outline carries the colour, not a bright fill
+    critical_banner_border: str = ""
+    warning_banner_icon: str = ""        # icon colour on the banner (defaults to the banner text)
+    critical_banner_icon: str = ""
 
     def tone(self, t: Tone) -> str:
         return {Tone.OK: self.ok, Tone.INFO: self.info, Tone.WARNING: self.warning,
@@ -46,36 +50,89 @@ class Palette:
 
     def soft(self, t: Tone) -> str:
         """Tinted background for a tone (tone colour at low opacity over the surface)."""
-        base, over = QColor(self.surface), QColor(self.tone(t))
-        a = 0.16 if self.dark else 0.09
-        r = round(base.red() * (1 - a) + over.red() * a)
-        g = round(base.green() * (1 - a) + over.green() * a)
-        b = round(base.blue() * (1 - a) + over.blue() * a)
-        return QColor(r, g, b).name()
+        return mix(self.surface, self.tone(t), 0.16 if self.dark else 0.09)
 
     def banner(self, t: Tone) -> tuple[str, str]:
         if t is Tone.CRITICAL:
             return self.critical_banner_bg, self.critical_banner_text
         return self.warning_banner_bg, self.warning_banner_text
 
+    def banner_border(self, t: Tone) -> str:
+        b = self.critical_banner_border if t is Tone.CRITICAL else self.warning_banner_border
+        return b or self.banner(t)[0]
+
+    def banner_icon(self, t: Tone) -> str:
+        i = self.critical_banner_icon if t is Tone.CRITICAL else self.warning_banner_icon
+        return i or self.banner(t)[1]
+
+
+def mix(base: str, over: str, a: float) -> str:
+    b = [int(base[i:i + 2], 16) for i in (1, 3, 5)]
+    o = [int(over[i:i + 2], 16) for i in (1, 3, 5)]
+    return "#" + "".join(f"{round(x * (1 - a) + y * a):02x}" for x, y in zip(b, o))
+
+
+def relative_luminance(hex_color: str) -> float:
+    """WCAG 2.x relative luminance of an sRGB colour '#rrggbb'."""
+    h = hex_color.lstrip("#")
+    def lin(c: float) -> float:
+        return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+    r, g, b = (lin(int(h[i:i + 2], 16) / 255) for i in (0, 2, 4))
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def contrast_ratio(fg: str, bg: str) -> float:
+    """WCAG contrast ratio (1..21). AA for normal text is >= 4.5."""
+    hi, lo = sorted((relative_luminance(fg), relative_luminance(bg)), reverse=True)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def key_pairs(p: Palette) -> list[tuple[str, str, str]]:
+    """(name, foreground, background) pairs that carry text or status meaning on screen."""
+    pairs = [
+        ("text on window", p.text, p.bg), ("text on card", p.text, p.surface),
+        ("secondary text on card", p.text2, p.surface), ("secondary text on window", p.text2, p.bg),
+        ("tertiary text on card", p.text3, p.surface), ("tertiary text on window", p.text3, p.bg),
+        ("tertiary text on disabled button", p.text3, p.surface_alt),
+        ("button text on accent", p.accent_text, p.accent), ("accent on card", p.accent, p.surface),
+        ("warning banner text", p.warning_banner_text, p.warning_banner_bg),
+        ("critical banner text", p.critical_banner_text, p.critical_banner_bg),
+        ("warning banner icon", p.banner_icon(Tone.WARNING), p.warning_banner_bg),
+        ("critical banner icon", p.banner_icon(Tone.CRITICAL), p.critical_banner_bg),
+    ]
+    for t in (Tone.OK, Tone.INFO, Tone.WARNING, Tone.CRITICAL, Tone.NEUTRAL):
+        pairs.append((f"{t} status on card", p.tone(t), p.surface))
+    for t in (Tone.OK, Tone.INFO, Tone.WARNING, Tone.CRITICAL):         # status area tints
+        pairs += [(f"{t} icon on its tint", p.tone(t), p.soft(t)), (f"text on {t} tint", p.text, p.soft(t)),
+                  (f"secondary text on {t} tint", p.text2, p.soft(t))]
+    return pairs
+
 
 LIGHT = Palette(
     dark=False, bg="#EDEFF2", surface="#FFFFFF", surface_alt="#F5F6F8", border="#D7DBE1",
-    text="#14171B", text2="#4A5360", text3="#677080",
+    text="#14171B", text2="#4A5360", text3="#5F6875",
     accent="#2C56C9", accent_hover="#2349B0", accent_text="#FFFFFF", focus="#2C56C9",
-    ok="#127A5A", info="#2160A6", warning="#946000", critical="#B42318", neutral="#677080",
+    ok="#127A5A", info="#2160A6", warning="#8A5A00", critical="#B42318", neutral="#5F6875",
     warning_banner_bg="#F4BE45", warning_banner_text="#1D1708",
     critical_banner_bg="#B42318", critical_banner_text="#FFFFFF",
 )
 
+# Low-glare dark theme for dim rooms: dark neutral greys (not pure black), text at reduced luminance
+# (~0.69 instead of white), muted status colours, and banners as dark tinted panels with a coloured
+# outline instead of large bright fills. Every text/status pair meets WCAG AA (tests compute it).
 DARK = Palette(
-    dark=True, bg="#0E1114", surface="#171B20", surface_alt="#1E232A", border="#2B3139",
-    text="#E7EAEE", text2="#AEB6C0", text3="#8C95A1",
-    accent="#7097FF", accent_hover="#86A7FF", accent_text="#0E1114", focus="#86A7FF",
-    ok="#3CC394", info="#72AEEE", warning="#F2B641", critical="#FF6E61", neutral="#8C95A1",
-    warning_banner_bg="#F2B641", warning_banner_text="#1D1708",
-    critical_banner_bg="#B7322A", critical_banner_text="#FFFFFF",
+    dark=True, bg="#15181C", surface="#1C2026", surface_alt="#232830", border="#313842",
+    text="#D4D9DF", text2="#A2ABB6", text3="#96A0AB",
+    accent="#7C9CF0", accent_hover="#92ADF4", accent_text="#11141A", focus="#92ADF4",
+    ok="#4FBF95", info="#79AEE6", warning="#E2AE4A", critical="#F07E72", neutral="#96A0AB",
+    warning_banner_bg="#3A3016", warning_banner_text="#F4D38A", warning_banner_border="#B88A2E",
+    warning_banner_icon="#E2AE4A",
+    critical_banner_bg="#3D1D1B", critical_banner_text="#F5D0CB", critical_banner_border="#C2564B",
+    critical_banner_icon="#F07E72",
 )
+
+APPEARANCES = ("auto", "light", "dark")          # "auto" = Follow Windows (the operating system setting)
+APPEARANCE_LABELS = {"auto": "Follow Windows", "light": "Light", "dark": "Dark"}
 
 
 def system_prefers_dark() -> bool:
@@ -85,12 +142,12 @@ def system_prefers_dark() -> bool:
         return False
 
 
-def pick_palette(mode: str = "auto") -> Palette:
+def pick_palette(mode: str = "auto", system_dark: bool | None = None) -> Palette:
     if mode == "dark":
         return DARK
     if mode == "light":
         return LIGHT
-    return DARK if system_prefers_dark() else LIGHT
+    return DARK if (system_prefers_dark() if system_dark is None else system_dark) else LIGHT
 
 
 # Type scale (pixels). One dominant size for the system state; everything else subordinate.
@@ -158,6 +215,15 @@ def stylesheet(p: Palette) -> str:
         font-size: {TITLE_PX}px;
     }}
     QLineEdit:focus {{ border: 2px solid {p.focus}; padding: 9px 11px; }}
+    QComboBox {{
+        background: {p.surface}; color: {p.text}; border: 1px solid {p.border}; border-radius: 8px;
+        padding: 6px 12px; font-size: {CAPTION_PX + 1}px; min-width: 150px;
+    }}
+    QComboBox:focus {{ border: 2px solid {p.focus}; padding: 5px 11px; }}
+    QComboBox QAbstractItemView {{
+        background: {p.surface}; color: {p.text}; border: 1px solid {p.border};
+        selection-background-color: {p.accent}; selection-color: {p.accent_text}; padding: 4px;
+    }}
     QScrollArea {{ background: transparent; border: none; }}
     QScrollArea > QWidget > QWidget {{ background: transparent; }}
     QScrollBar:vertical {{ background: transparent; width: 12px; margin: 2px; }}
