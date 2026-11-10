@@ -1,0 +1,61 @@
+{
+ "_capture_note": "CONSTRUCTED (not captured) in the exact lsblk --json --bytes format of linux_wsl_lsblk.json, to cover partitions, USB disks, LUKS/LVM stacking, swap and mounted volumes. Values are invented.",
+ "blockdevices": [
+  {"name": "nvme0n1", "path": "/dev/nvme0n1", "kname": "nvme0n1", "pkname": null, "maj:min": "259:0", "type": "disk",
+   "size": 512110190592, "model": "Samsung SSD 980 PRO 500GB", "serial": "S5GXNX0T123456A", "wwn": "eui.002538b111b2c3d4",
+   "tran": "nvme", "ro": false, "rm": false, "hotplug": false, "pttype": "gpt", "ptuuid": "8a1d6f3e-1c2b-4d5e-9f00-112233445566",
+   "partuuid": null, "parttype": null, "partlabel": null, "fstype": null, "label": null, "uuid": null, "mountpoints": [null],
+   "fsused": null, "fsavail": null, "state": "live",
+   "children": [
+    {"name": "nvme0n1p1", "path": "/dev/nvme0n1p1", "kname": "nvme0n1p1", "pkname": "nvme0n1", "maj:min": "259:1", "type": "part",
+     "size": 1073741824, "model": null, "serial": null, "wwn": "eui.002538b111b2c3d4", "tran": "nvme", "ro": false, "rm": false,
+     "hotplug": false, "pttype": "gpt", "ptuuid": "8a1d6f3e-1c2b-4d5e-9f00-112233445566", "partuuid": "0b5f3e1a-0001-4c00-8000-000000000001",
+     "parttype": "c12a7328-f81f-11d2-ba4b-00a0c93ec93b", "partlabel": "EFI", "fstype": "vfat", "label": null, "uuid": "1A2B-3C4D",
+     "mountpoints": ["/boot/efi"], "fsused": 6291456, "fsavail": 1060000000, "state": null},
+    {"name": "nvme0n1p2", "path": "/dev/nvme0n1p2", "kname": "nvme0n1p2", "pkname": "nvme0n1", "maj:min": "259:2", "type": "part",
+     "size": 511035375616, "model": null, "serial": null, "wwn": "eui.002538b111b2c3d4", "tran": "nvme", "ro": false, "rm": false,
+     "hotplug": false, "pttype": "gpt", "ptuuid": "8a1d6f3e-1c2b-4d5e-9f00-112233445566", "partuuid": "0b5f3e1a-0002-4c00-8000-000000000002",
+     "parttype": "0fc63daf-8483-4772-8e79-3d69d8477de4", "partlabel": null, "fstype": "crypto_LUKS", "label": null,
+     "uuid": "5e6f7a8b-0000-4000-8000-00000000luks", "mountpoints": [null], "fsused": null, "fsavail": null, "state": null,
+     "children": [
+      {"name": "luks-root", "path": "/dev/mapper/luks-root", "kname": "dm-0", "pkname": "nvme0n1p2", "maj:min": "252:0", "type": "crypt",
+       "size": 511018598400, "model": null, "serial": null, "wwn": null, "tran": null, "ro": false, "rm": false, "hotplug": false,
+       "pttype": null, "ptuuid": null, "partuuid": null, "parttype": null, "partlabel": null, "fstype": "ext4", "label": null,
+       "uuid": "9d8c7b6a-0000-4000-8000-000000000root", "mountpoints": ["/"], "fsused": 120000000000, "fsavail": 360000000000, "state": "running"}
+     ]}
+   ]},
+  {"name": "sda", "path": "/dev/sda", "kname": "sda", "pkname": null, "maj:min": "8:0", "type": "disk",
+   "size": 4000787030016, "model": "WDC WD40EFRX-68N32N0", "serial": "WD-WCC7K1234567", "wwn": "0x50014ee2b1234567",
+   "tran": "usb", "ro": false, "rm": false, "hotplug": true, "pttype": "gpt", "ptuuid": "3f2e1d0c-aaaa-4bbb-8ccc-0123456789ab",
+   "partuuid": null, "parttype": null, "partlabel": null, "fstype": null, "label": null, "uuid": null, "mountpoints": [null],
+   "fsused": null, "fsavail": null, "state": "running",
+   "children": [
+    {"name": "sda1", "path": "/dev/sda1", "kname": "sda1", "pkname": "sda", "maj:min": "8:1", "type": "part",
+     "size": 4000785104896, "model": null, "serial": null, "wwn": "0x50014ee2b1234567", "tran": "usb", "ro": false, "rm": false,
+     "hotplug": true, "pttype": "gpt", "ptuuid": "3f2e1d0c-aaaa-4bbb-8ccc-0123456789ab", "partuuid": "7c6b5a49-0001-4000-8000-0000000000a1",
+     "parttype": "ebd0a0a2-b9e5-4433-87c0-68b6b72699c7", "partlabel": "Basic data partition", "fstype": "exfat", "label": "Photos",
+     "uuid": "64A2-1B3C", "mountpoints": ["/media/operator/Photos"], "fsused": 412000000000, "fsavail": 3588785104896, "state": null}
+   ]},
+  {"name": "sdb", "path": "/dev/sdb", "kname": "sdb", "pkname": null, "maj:min": "8:16", "type": "disk",
+   "size": 8001563222016, "model": "ST8000VN004-2M2101", "serial": "ZA1B2C3D", "wwn": "0x5000c500c1234567",
+   "tran": "usb", "ro": false, "rm": false, "hotplug": true, "pttype": null, "ptuuid": null,
+   "partuuid": null, "parttype": null, "partlabel": null, "fstype": null, "label": null, "uuid": null, "mountpoints": [null],
+   "fsused": null, "fsavail": null, "state": "running"},
+  {"name": "sdc", "path": "/dev/sdc", "kname": "sdc", "pkname": null, "maj:min": "8:32", "type": "disk",
+   "size": 2000398934016, "model": "ST2000DM008-2FR102", "serial": "WFL1ABCD", "wwn": "0x5000c500aaaabbbb",
+   "tran": "usb", "ro": false, "rm": false, "hotplug": true, "pttype": "gpt", "ptuuid": "aaaabbbb-cccc-4ddd-8eee-ffff00001111",
+   "partuuid": null, "parttype": null, "partlabel": null, "fstype": null, "label": null, "uuid": null, "mountpoints": [null],
+   "fsused": null, "fsavail": null, "state": "running",
+   "children": [
+    {"name": "sdc1", "path": "/dev/sdc1", "kname": "sdc1", "pkname": "sdc", "maj:min": "8:33", "type": "part",
+     "size": 2000397795328, "model": null, "serial": null, "wwn": "0x5000c500aaaabbbb", "tran": "usb", "ro": false, "rm": false,
+     "hotplug": true, "pttype": "gpt", "ptuuid": "aaaabbbb-cccc-4ddd-8eee-ffff00001111", "partuuid": "11112222-0001-4000-8000-0000000000c1",
+     "parttype": "0fc63daf-8483-4772-8e79-3d69d8477de4", "partlabel": null, "fstype": "ext4", "label": "spool",
+     "uuid": "2b3c4d5e-0000-4000-8000-0000000spool", "mountpoints": ["/var/lib/sentinel"], "fsused": 900000000000, "fsavail": 1000000000000, "state": null}
+   ]},
+  {"name": "sr0", "path": "/dev/sr0", "kname": "sr0", "pkname": null, "maj:min": "11:0", "type": "rom",
+   "size": 1073741312, "model": "DVD-RW", "serial": "X1", "wwn": null, "tran": "sata", "ro": false, "rm": true, "hotplug": true,
+   "pttype": null, "ptuuid": null, "partuuid": null, "parttype": null, "partlabel": null, "fstype": null, "label": null, "uuid": null,
+   "mountpoints": [null], "fsused": null, "fsavail": null, "state": "running"}
+ ]
+}
