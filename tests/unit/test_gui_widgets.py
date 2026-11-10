@@ -1,0 +1,333 @@
+"""Operator GUI rendering (PySide6, offscreen): exact banner text, no technical terms, read-only,
+keyboard access, administrator gate, 1366x768 layout."""
+
+from __future__ import annotations
+
+import hashlib
+import os
+import re
+import time
+from pathlib import Path
+
+import pytest
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+pytest.importorskip("PySide6")
+
+from conftest import base_config_dict  # noqa: E402
+from gui_support import SCENARIOS, base_measurements, populate_ledger, scenario, status_doc, write_doc  # noqa: E402
+from sentinel.alerts import Severity, make_alert  # noqa: E402
+from sentinel.config import load_config_dict  # noqa: E402
+from sentinel.gui import admin_pin  # noqa: E402
+from sentinel.gui.window import prepare_qt_environment  # noqa: E402
+
+prepare_qt_environment()
+
+from PySide6.QtCore import Qt  # noqa: E402
+from PySide6.QtTest import QTest  # noqa: E402
+from PySide6.QtWidgets import QAbstractButton, QApplication, QLabel, QWidget  # noqa: E402
+
+from sentinel.gui.theme import DARK, LIGHT  # noqa: E402
+from sentinel.gui.window import MainWindow, apply_app_style  # noqa: E402
+
+# Terms that must never appear on operator screens (brief §4, requirement U1/U7).
+FORBIDDEN = re.compile(
+    r"rtsp|ffmpeg|ffprobe|codec|h\.?264|h\.?265|hevc|mpeg|\.ts\b|sqlite|\.db\b|\.json\b|\.toml\b|tcp://|udp://|"
+    r"[A-Za-z]:\\|\\\\|/var/|/etc/|/home/|/tmp/|spool|stderr|exit code|traceback|exception|errno",
+    re.IGNORECASE)
+
+
+@pytest.fixture(scope="module")
+def app() -> QApplication:
+    a = QApplication.instance() or QApplication([])
+    apply_app_style(a)  # type: ignore[arg-type]
+    return a  # type: ignore[return-value]
+
+
+def make_cfg(tmp: Path):  # noqa: ANN201
+    d = base_config_dict(tmp)
+    d["camera"]["name"] = "Camera 1"
+    d["recording"]["display_timezone"] = "America/New_York"
+    return load_config_dict(d, base_dir=tmp)
+
+
+def open_window(app: QApplication, tmp: Path, name: str | None = None, doc: dict | None = None,
+                dark: bool = False) -> MainWindow:
+    cfg = make_cfg(tmp)
+    now = time.time()
+    last_end = None
+    if name is not None:
+        doc, last_end = scenario(name, now)
+    if doc is not None:
+        write_doc(cfg.data_path / "status.json", doc)
+    populate_ledger(cfg.data_path / "sentinel.db", now, end_at=last_end,
+                    open_gap_reason=((doc or {}).get("open_gap") or {}).get("reason"))
+    win = MainWindow(cfg, DARK if dark else LIGHT, export_available=False, auto_refresh=False)
+    win.resize(1366, 768)
+    win.show()
+    app.processEvents()
+    return win
+
+
+def visible_texts(root: QWidget) -> list[str]:
+    out: list[str] = []
+    for w in root.findChildren(QWidget):
+        if not w.isVisibleTo(root):
+            continue
+        if isinstance(w, QLabel):
+            out.append(w.text())
+        elif isinstance(w, QAbstractButton):
+            out.append(w.text())
+        if hasattr(w, "visible_texts"):
+            out.extend(w.visible_texts())
+        out.append(w.toolTip())
+        out.append(w.accessibleName())
+        out.append(w.accessibleDescription())
+    return [t for t in out if t]
+
+
+def operator_texts(win: MainWindow, app: QApplication) -> list[str]:
+    texts = visible_texts(win.topbar) + visible_texts(win.dashboard)
+    win.show_timeline()
+    app.processEvents()
+    win.timeline_page.bar.repaint()
+    texts += visible_texts(win.timeline_page)
+    win.show_exports()
+    app.processEvents()
+    texts += visible_texts(win.exports_page)
+    win.show_admin()                       # the PIN screen is operator-reachable too
+    app.processEvents()
+    texts += visible_texts(win.lock_page)
+    win.show_dashboard()
+    texts.append(win.windowTitle())
+    return texts
+
+
+# ---------------------------------------------------------------------------- banner text
+@pytest.mark.parametrize("name", SCENARIOS)
+def test_banner_shows_exact_alert_message(app: QApplication, tmp_path: Path, name: str) -> None:
+    win = open_window(app, tmp_path, name)
+    try:
+        v = win.view
+        assert v is not None
+        doc = win.read.doc if win.read else None
+        d = win.dashboard
+        if v.stale:
+            expected = make_alert("X-001", Severity.CRITICAL).message
+            assert d.hero.message.text() == expected and d.hero.message.isVisibleTo(d)
+            assert d.hero.chip.text() == "Error X-001"
+        elif doc["banner"] and v.banner_takes_over:
+            assert d.hero.message.text() == doc["alert"]["message"] and d.hero.message.isVisibleTo(d)
+            assert d.hero.chip.text() == f"Error {doc['alert']['code']}"
+            assert d.hero.buttons.primary.isVisibleTo(d) and d.hero.buttons.primary.text() == "Save diagnostic report"
+        elif doc["banner"]:
+            assert d.band.isVisibleTo(d) and d.band.message.text() == doc["alert"]["message"]
+            assert d.band.word.text()                       # words, not only colour
+            assert d.band.icon.isVisibleTo(d)               # and an icon
+        else:
+            assert d.hero.supporting.text() == doc["alert"]["message"]
+            assert d.hero.chip.text() == f"Error {doc['alert']['code']}"
+        if name == "recording_test_camera":
+            assert d.band.isVisibleTo(d) and d.band.alert and d.band.alert.code == "Z-001"
+            assert d.hero.headline.text() == "Recording normally"
+    finally:
+        win.close()
+
+
+def test_z001_strip_visible_under_more_severe_alert(app: QApplication, tmp_path: Path) -> None:
+    from sentinel.models import StorageLevel
+    m = base_measurements(simulated=True, storage_level=StorageLevel.CRITICAL, ffmpeg_running=False,
+                          media_seen_this_run=False, seconds_since_media_advance=None)
+    win = open_window(app, tmp_path, doc=status_doc(m, time.time()))
+    try:
+        d = win.dashboard
+        assert d.hero.chip.text() == "Error S-002"
+        assert d.test_strip.isVisibleTo(d) and d.test_strip.alert and d.test_strip.alert.code == "Z-001"
+        assert d.test_strip.message.text() == make_alert("Z-001", Severity.WARNING).message
+    finally:
+        win.close()
+
+
+# ---------------------------------------------------------------------------- no technical terms
+@pytest.mark.parametrize("name", SCENARIOS)
+def test_operator_screens_have_no_technical_terms(app: QApplication, tmp_path: Path, name: str) -> None:
+    win = open_window(app, tmp_path, name)
+    try:
+        texts = operator_texts(win, app)
+        assert any("Prepare Review Drive" in t for t in texts)
+        bad = [t for t in texts if FORBIDDEN.search(t)]
+        assert not bad, bad
+    finally:
+        win.close()
+
+
+def test_technical_detail_in_status_never_reaches_operator(app: QApplication, tmp_path: Path) -> None:
+    """Paths, URLs and FFmpeg output in detail fields stay on the administrator page."""
+    m = base_measurements(storage_error=r"[WinError 5] Access is denied: 'C:\\sentinel\\spool'",
+                          ffmpeg_running=False, media_seen_this_run=False, seconds_since_media_advance=None,
+                          last_end_reason="ffmpeg_error", outage_seconds=900.0)
+    doc = status_doc(m, time.time())
+    doc["recording"]["note"] = "rtsp://192.0.2.10/stream ffmpeg exited; segment seg_000001.ts codec h264"
+    doc["integrity"]["ledger_error"] = "sqlite3.OperationalError: /var/lib/sentinel/data/sentinel.db locked"
+    win = open_window(app, tmp_path, doc=doc)
+    try:
+        bad = [t for t in operator_texts(win, app) if FORBIDDEN.search(t)]
+        assert not bad, bad
+        assert win.dashboard.hero.chip.text() == "Error S-003"
+    finally:
+        win.close()
+
+
+def test_x001_problem_text_with_path_is_not_shown(app: QApplication, tmp_path: Path) -> None:
+    cfg_tmp = tmp_path
+    win = open_window(app, cfg_tmp, doc=None)      # no status.json at all
+    try:
+        assert win.read is not None and win.read.problem
+        texts = operator_texts(win, app)
+        assert not [t for t in texts if FORBIDDEN.search(t)]
+        assert win.dashboard.hero.chip.text() == "Error X-001"
+    finally:
+        win.close()
+
+
+def test_single_unreadable_read_is_tolerated_once_then_x001(app: QApplication, tmp_path: Path) -> None:
+    win = open_window(app, tmp_path, "recording_test_camera")
+    try:
+        assert win.view is not None and not win.view.stale
+        (win.cfg.data_path / "status.json").write_text("{ half-written", "utf-8")
+        win.refresh()
+        assert not win.view.stale and win.view.headline == "Recording normally"
+        win.refresh()
+        assert win.view.stale and win.view.banner is not None and win.view.banner.code == "X-001"
+    finally:
+        win.close()
+
+
+# ---------------------------------------------------------------------------- read-only
+def _digest(paths: list[Path]) -> dict[str, str]:
+    return {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in paths if p.exists()}
+
+
+def test_gui_never_writes_ledger_or_status(app: QApplication, tmp_path: Path) -> None:
+    win = open_window(app, tmp_path, "r003_critical")
+    data = win.cfg.data_path
+    watched = [data / "sentinel.db", data / "sentinel.db-wal", data / "status.json"]
+    before = _digest(watched)
+    try:
+        for _ in range(3):
+            win.refresh()
+        operator_texts(win, app)
+        win.show_timeline()
+        win.show_exports()
+        app.processEvents()
+        assert _digest(watched) == before
+        # Only SQLite's own shared-memory/WAL companions may appear (created by any reader); the GUI
+        # creates no other file in the data folder.
+        names = {p.name for p in data.iterdir()}
+        assert names <= {"sentinel.db", "sentinel.db-wal", "sentinel.db-shm", "status.json"}
+    finally:
+        win.close()
+
+
+# ---------------------------------------------------------------------------- buttons, keyboard, layout
+def test_exactly_three_routine_buttons_and_no_stop(app: QApplication, tmp_path: Path) -> None:
+    win = open_window(app, tmp_path, "recording_test_camera")
+    try:
+        d = win.dashboard
+        assert [b.title for b in (d.btn_prepare, d.btn_timeline, d.btn_exports)] == \
+               ["Prepare Review Drive", "View Recording Status", "View Previous Exports"]
+        texts = " ".join(visible_texts(d)).lower()
+        assert "stop recording" not in texts and "stop" not in [t.lower() for t in visible_texts(d)]
+        assert not d.btn_prepare.isEnabled() and "not installed" in d.btn_prepare.description.lower()
+    finally:
+        win.close()
+
+
+def test_keyboard_navigation(app: QApplication, tmp_path: Path) -> None:
+    win = open_window(app, tmp_path, "recording_test_camera")
+    try:
+        win.activateWindow()
+        win.dashboard.btn_timeline.setFocus()
+        QTest.keyClick(win.dashboard.btn_timeline, Qt.Key.Key_Return)
+        app.processEvents()
+        QTest.qWait(250)
+        assert win.stack.currentWidget() is win.timeline_page
+        QTest.keyClick(win.timeline_page, Qt.Key.Key_Escape)
+        app.processEvents()
+        assert win.stack.currentWidget() is win.dashboard
+        for b in (win.dashboard.btn_timeline, win.dashboard.btn_exports, win.dashboard.btn_admin):
+            assert b.focusPolicy() & Qt.FocusPolicy.TabFocus
+    finally:
+        win.close()
+
+
+@pytest.mark.parametrize("name", SCENARIOS)
+@pytest.mark.parametrize("dark", [False, True])
+def test_layout_fits_1366x768(app: QApplication, tmp_path: Path, name: str, dark: bool) -> None:
+    """At 1366x768 the status area and all three routine buttons are fully visible without scrolling."""
+    win = open_window(app, tmp_path, name, dark=dark)
+    try:
+        d = win.dashboard
+        for w in (d.hero, d.btn_prepare, d.btn_timeline, d.btn_exports, d.btn_admin):
+            r = w.rect()
+            bottom_right = w.mapTo(win, r.bottomRight())
+            assert w.isVisibleTo(win)
+            assert bottom_right.y() <= win.height() and bottom_right.x() <= win.width(), (w, bottom_right)
+        assert d.hero.headline.font().pixelSize() >= 30
+        assert min(lbl.font().pixelSize() for lbl in d.findChildren(QLabel) if lbl.isVisibleTo(d)) >= 14
+    finally:
+        win.close()
+
+
+# ---------------------------------------------------------------------------- timeline sentences
+def test_timeline_sentences_are_plain_words() -> None:
+    from datetime import UTC, datetime
+    from zoneinfo import ZoneInfo
+
+    from sentinel.gui.ledger_view import Span, SpanKind
+    from sentinel.gui.widgets import span_sentence
+    t = datetime(2026, 11, 9, 14, 5, tzinfo=UTC).timestamp()
+    now = t + 3 * 3600
+    title, detail = span_sentence(Span(t, t + 240, SpanKind.GAP, "camera disconnected"), ZoneInfo("UTC"), now)
+    assert title == "No recording 14:05 – 14:09"
+    assert detail.startswith("Camera disconnected · 4 min")
+    title, _ = span_sentence(Span(t, t + 22, SpanKind.GAP, "camera video froze"), ZoneInfo("UTC"), now)
+    assert title == "No recording 14:05:00 – 14:05:22"
+    title, detail = span_sentence(Span(t, now, SpanKind.GAP, "camera disconnected", ongoing=True),
+                                  ZoneInfo("UTC"), now)
+    assert title == "No recording since 14:05" and "so far" in detail
+
+
+# ---------------------------------------------------------------------------- administrator area
+def test_admin_area_requires_pin(app: QApplication, tmp_path: Path) -> None:
+    win = open_window(app, tmp_path, "recording_test_camera")
+    try:
+        win.show_admin()
+        assert win.stack.currentWidget() is win.lock_page and not win.lock_page.pin.isEnabled()
+        assert not win.admin_unlocked()
+        admin_pin.set_pin(win.cfg.data_path, "482915")
+        win.show_admin()
+        assert win.lock_page.pin.isEnabled()
+        win.lock_page.pin.setText("000000")
+        win.lock_page.btn.click()
+        assert not win.admin_unlocked() and "not correct" in win.lock_page.message.text()
+        win.lock_page.pin.setText("482915")
+        win.lock_page.btn.click()
+        assert win.admin_unlocked()
+        summary = win.admin_page.summary.toPlainText()
+        assert str(win.cfg.source_path or "(none)") in summary and "Open gaps" in summary
+        assert '"overall"' in win.admin_page.raw.toPlainText()
+        assert win.admin_page.events.rowCount() > 0
+        win.show_dashboard()                      # leaving locks it again
+        win.show_admin()
+        assert win.stack.currentWidget() is win.lock_page
+    finally:
+        win.close()
+
+
+def test_close_stops_only_the_window_timer(app: QApplication, tmp_path: Path) -> None:
+    cfg_win = open_window(app, tmp_path, "recording_test_camera")
+    cfg_win.timer.start()
+    assert cfg_win.timer.isActive()
+    cfg_win.close()
+    assert not cfg_win.timer.isActive()
