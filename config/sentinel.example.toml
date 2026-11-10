@@ -56,3 +56,12 @@ content_check = "sampled"
 sample_edge_frames = 30
 sample_spans = 3
 sample_span_frames = 30
+
+[drives]
+# "Erase and Set Up Drive" is OFF until the supervised dock test has been passed
+# (docs/branches/design-drive-prepare.md section 9). Detection and safe removal work either way.
+erase_enabled = false
+approved_filesystem = "ntfs"              # owner decision 2026-11-10
+foreign_data_authorization = "admin_only" # owner decision 2026-11-10 (admin_only | operator_with_serial | never)
+allowed_bus_types = ["USB"]
+min_size_gb = 128

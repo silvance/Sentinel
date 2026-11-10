@@ -92,7 +92,7 @@ the `DriveManager` interface.
 
 ### 2.5 Administrator interface — Phase 4/5
 Separate window, separate OS group (`sentinel-admin`), polkit-gated actions for anything
-destructive (retention changes, deleting quarantined data, reformat is **never** offered).
+destructive (retention changes, deleting quarantined data). Erasing a drive is offered only as **Erase and Set Up Drive** (`sentinel.drives`), with the guards in docs/branches/design-drive-prepare.md: never automatic, never for system/recording/Sentinel-evidence drives, and switched off by default (`[drives] erase_enabled = false`).
 
 ## 3. Process & IPC model
 

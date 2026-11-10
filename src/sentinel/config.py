@@ -15,6 +15,8 @@ from typing import Any
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from .drives.policy import DrivePolicy, DrivePolicyError, load_policy
+
 
 class ConfigError(ValueError):
     """Raised for any invalid configuration. Message is safe to show to an administrator."""
@@ -110,6 +112,7 @@ class AppConfig:
     service: ServiceConfig = field(default_factory=ServiceConfig)
     export: ExportConfig = field(default_factory=ExportConfig)
     source_path: str | None = None
+    drives: DrivePolicy = field(default_factory=DrivePolicy)   # [drives]; validated by sentinel.drives.policy
 
     @property
     def spool_path(self) -> Path:
@@ -215,9 +218,18 @@ def _validate(cfg: AppConfig) -> None:
         raise ConfigError("[export] sample_edge_frames and sample_span_frames must be >= 1, sample_spans >= 0")
 
 
+def _build_drives(raw: Any) -> DrivePolicy:
+    if raw is not None and not isinstance(raw, dict):
+        raise ConfigError("[drives] must be a table")
+    try:
+        return load_policy(raw)
+    except DrivePolicyError as exc:
+        raise ConfigError(str(exc)) from None
+
+
 def load_config_dict(raw: dict[str, Any], base_dir: Path | None = None, source: str | None = None) -> AppConfig:
     base_dir = base_dir or Path.cwd()
-    unknown = sorted(set(raw) - {"camera", "recording", "storage", "tools", "service", "export"})
+    unknown = sorted(set(raw) - {"camera", "recording", "storage", "tools", "service", "export", "drives"})
     if unknown:
         raise ConfigError(f"unknown section(s): {', '.join(unknown)}")
     if "camera" not in raw or "storage" not in raw:
@@ -230,6 +242,7 @@ def load_config_dict(raw: dict[str, Any], base_dir: Path | None = None, source: 
         service=_build(ServiceConfig, "service", raw.get("service"), base_dir),
         export=_build(ExportConfig, "export", raw.get("export"), base_dir),
         source_path=source,
+        drives=_build_drives(raw.get("drives")),
     )
     _validate(cfg)
     return cfg

@@ -1,0 +1,41 @@
+{
+ "_capture_note": "CONSTRUCTED (not captured) in the exact ENUM_SCRIPT JSON format of windows_dev_host.json: a USB dock disk with an MBR partition table (Signature set, Guid null) and one exFAT partition, plus the same model in a second bay with a different signature. Values are invented.",
+ "schema": 1,
+ "ps_version": "5.1.26100.9711",
+ "disks": [
+  {"Number": 6, "FriendlyName": "ST4000DM004-2CV104", "Model": "ST4000DM004-2CV104", "SerialNumber": "000000000000",
+   "UniqueId": null, "BusType": "USB", "Size": 4000787030016, "PartitionStyle": "MBR", "Guid": null, "Signature": 3735928559,
+   "IsSystem": false, "IsBoot": false, "IsOffline": false, "IsReadOnly": false, "HealthStatus": "Healthy",
+   "OperationalStatus": "Online", "Path": "\\\\?\\usbstor#disk&ven_st4000dm&prod_004-2cv104#000000000000&0#{53f56307-b6bf-11d0-94f2-00a0c91efb8b}",
+   "Location": "Integrated : Adapter 0 : Port 0"},
+  {"Number": 8, "FriendlyName": "ST4000DM004-2CV104", "Model": "ST4000DM004-2CV104", "SerialNumber": "000000000000",
+   "UniqueId": null, "BusType": 7, "Size": 4000787030016, "PartitionStyle": 1, "Guid": null, "Signature": 305419896,
+   "IsSystem": false, "IsBoot": false, "IsOffline": false, "IsReadOnly": false, "HealthStatus": 0,
+   "OperationalStatus": "Online", "Path": "\\\\?\\usbstor#disk&ven_st4000dm&prod_004-2cv104#000000000000&1#{53f56307-b6bf-11d0-94f2-00a0c91efb8b}",
+   "Location": "Integrated : Adapter 0 : Port 1"}
+ ],
+ "partitions": [
+  {"DiskNumber": 6, "PartitionNumber": 1, "DriveLetter": "K", "Guid": null, "GptType": null, "MbrType": 7, "Type": "IFS",
+   "Size": 4000785104896, "Offset": 1048576, "IsSystem": false, "IsBoot": false, "IsHidden": false,
+   "AccessPaths": ["K:\\", "\\\\?\\Volume{a1b2c3d4-0000-11f1-8000-000000000006}\\"]},
+  {"DiskNumber": 8, "PartitionNumber": 1, "DriveLetter": "L", "Guid": null, "GptType": null, "MbrType": 7, "Type": "IFS",
+   "Size": 4000785104896, "Offset": 1048576, "IsSystem": false, "IsBoot": false, "IsHidden": false,
+   "AccessPaths": ["L:\\", "\\\\?\\Volume{a1b2c3d4-0000-11f1-8000-000000000008}\\"]}
+ ],
+ "volumes": [
+  {"UniqueId": "\\\\?\\Volume{a1b2c3d4-0000-11f1-8000-000000000006}\\", "Path": "\\\\?\\Volume{a1b2c3d4-0000-11f1-8000-000000000006}\\",
+   "DriveLetter": "K", "FileSystem": "exFAT", "FileSystemLabel": "BACKUP", "Size": 4000785104896, "SizeRemaining": 4000785000000,
+   "HealthStatus": "Healthy", "DriveType": "Fixed", "OperationalStatus": "OK"},
+  {"UniqueId": "\\\\?\\Volume{a1b2c3d4-0000-11f1-8000-000000000008}\\", "Path": "\\\\?\\Volume{a1b2c3d4-0000-11f1-8000-000000000008}\\",
+   "DriveLetter": "L", "FileSystem": "exFAT", "FileSystemLabel": "BACKUP", "Size": 4000785104896, "SizeRemaining": 4000785000000,
+   "HealthStatus": "Healthy", "DriveType": "Fixed", "OperationalStatus": "OK"}
+ ],
+ "win32_volumes": [
+  {"DeviceID": "\\\\?\\Volume{a1b2c3d4-0000-11f1-8000-000000000006}\\", "SerialNumber": 1450500608, "PageFilePresent": false, "BootVolume": false, "SystemVolume": false},
+  {"DeviceID": "\\\\?\\Volume{a1b2c3d4-0000-11f1-8000-000000000008}\\", "SerialNumber": 2882400001, "PageFilePresent": false, "BootVolume": false, "SystemVolume": false}
+ ],
+ "disk_drives": [
+  {"Index": 6, "PNPDeviceID": "USBSTOR\\DISK&VEN_ST4000DM&PROD_004-2CV104\\000000000000&0", "SerialNumber": "000000000000", "InterfaceType": "USB"},
+  {"Index": 8, "PNPDeviceID": "USBSTOR\\DISK&VEN_ST4000DM&PROD_004-2CV104\\000000000000&1", "SerialNumber": "000000000000", "InterfaceType": "USB"}
+ ]
+}

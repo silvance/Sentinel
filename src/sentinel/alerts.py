@@ -69,6 +69,30 @@ CATALOG: dict[str, AlertDef] = {d.code: d for d in [
     AlertDef("E-006", "A recording on this system could not be read for export", SUPPORT, False),
     AlertDef("E-007", "The export stopped because of a software problem",
              "Do not remove the drive. " + SUPPORT, False),
+    # M-: removable Media (archive / review drives). "D-" is already the recording Database.
+    # The destructive action is called "Erase and Set Up Drive" so it cannot be confused with the
+    # export action "Prepare Review Drive" (U4).
+    # None of these stop recording: recording never writes to removable drives (R3).
+    AlertDef("M-001", "The inserted drive is empty and must be set up before use",
+             "Press Erase and Set Up Drive.", False),
+    AlertDef("M-002", "The inserted drive uses the wrong format and must be set up before use",
+             "Press Erase and Set Up Drive.", False),
+    AlertDef("M-003", "The inserted drive contains other files",
+             "Erasing it will delete them. Do not erase it unless you are sure the files are not needed. "
+             "Contact technical support if unsure.", False),
+    AlertDef("M-004", "The inserted drive cannot be used", "Remove it and use a different drive.", False),
+    AlertDef("M-005", "Drive setup failed",
+             "Do not use this drive. " + SUPPORT, False),
+    AlertDef("M-006", "The drive changed before it could be erased",
+             "Nothing was erased. Check the drive and try again.", False),
+    AlertDef("M-007", "The drive could not be safely removed",
+             "Do not unplug the drive yet. Close any open files on it and try again. "
+             "If this continues, contact technical support.", False),
+    AlertDef("M-008", "Drive checks are unavailable", SUPPORT, False),
+    AlertDef("M-009", "This drive holds Sentinel recordings and will not be erased",
+             "Contact technical support.", False),
+    AlertDef("M-010", "Setting up drives is not enabled on this system yet",
+             "Contact technical support.", False),
     AlertDef("Z-001", "A test camera is configured. These recordings are not evidence",
              "Contact technical support before any operational use.", False),
 ]}

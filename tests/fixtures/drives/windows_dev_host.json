@@ -1,0 +1,549 @@
+{
+ "_capture_note": "REAL read-only output of sentinel.drives.windows_enum.ENUM_SCRIPT on the development host (Windows 11 Home 10.0.26200, non-elevated), re-captured 2026-11-09 after adding Signature and volume SerialNumber. Do not edit.",
+ "disk_drives": [
+  {
+   "Index": 5,
+   "InterfaceType": "SCSI",
+   "PNPDeviceID": "SCSI\\DISK&VEN_NVME&PROD_JAJP600M4TB\\5&339562AE&0&000000",
+   "SerialNumber": "0000_0000_0000_0000_00E0_4C70_B6D7_55E0."
+  },
+  {
+   "Index": 7,
+   "InterfaceType": "SCSI",
+   "PNPDeviceID": "SCSI\\DISK&VEN_MSFT&PROD_VIRTUAL_DISK\\2&1F4ADFFE&0&000001",
+   "SerialNumber": null
+  },
+  {
+   "Index": 3,
+   "InterfaceType": "SCSI",
+   "PNPDeviceID": "SCSI\\DISK&VEN_NVME&PROD_WD_BLACK_SN770_2\\5&42E9322&0&000000",
+   "SerialNumber": "E823_8FA6_BF53_0001_001B_448B_4EF1_2823."
+  },
+  {
+   "Index": 2,
+   "InterfaceType": "SCSI",
+   "PNPDeviceID": "SCSI\\DISK&VEN_NVME&PROD_SHPP41-2000GM\\5&1F89821&0&000000",
+   "SerialNumber": "ACE4_2E00_352E_167B_2EE4_AC00_0000_0001."
+  },
+  {
+   "Index": 0,
+   "InterfaceType": "IDE",
+   "PNPDeviceID": "SCSI\\DISK&VEN_SAMSUNG&PROD_SSD_870_EVO_2TB\\4&11742CA2&0&040000",
+   "SerialNumber": "S6PNNM0TB00861W"
+  },
+  {
+   "Index": 4,
+   "InterfaceType": "SCSI",
+   "PNPDeviceID": "SCSI\\DISK&VEN_NVME&PROD_CT4000P3SSD8\\5&3EAF689&0&000000",
+   "SerialNumber": "6479_A777_3000_0009."
+  },
+  {
+   "Index": 1,
+   "InterfaceType": "IDE",
+   "PNPDeviceID": "SCSI\\DISK&VEN_&PROD_ST3000DM008-2DM1\\4&11742CA2&0&060000",
+   "SerialNumber": "            Z505GDE8"
+  }
+ ],
+ "disks": [
+  {
+   "BusType": "SATA",
+   "FriendlyName": "ST3000DM008-2DM166",
+   "Guid": "{d568b998-3b25-4a4a-953c-70cef520b91f}",
+   "HealthStatus": "Healthy",
+   "IsBoot": false,
+   "IsOffline": false,
+   "IsReadOnly": false,
+   "IsSystem": false,
+   "Location": "Integrated : Bus 0 : Device 23 : Function 0 : Adapter 0 : Port 6",
+   "Model": "ST3000DM008-2DM166",
+   "Number": 1,
+   "OperationalStatus": "Online",
+   "PartitionStyle": "GPT",
+   "Path": "\\\\?\\scsi#disk&ven_&prod_st3000dm008-2dm1#4&11742ca2&0&060000#{53f56307-b6bf-11d0-94f2-00a0c91efb8b}",
+   "SerialNumber": "            Z505GDE8",
+   "Signature": null,
+   "Size": 3000592982016,
+   "UniqueId": "5000C500B4074486"
+  },
+  {
+   "BusType": "File Backed Virtual",
+   "FriendlyName": "Msft Virtual Disk",
+   "Guid": "{3a182634-ecaf-4d9c-9ce0-9e61ec7a093a}",
+   "HealthStatus": "Healthy",
+   "IsBoot": false,
+   "IsOffline": false,
+   "IsReadOnly": false,
+   "IsSystem": false,
+   "Location": "C:\\Program Files\\Bitdefender\\Bitdefender Security\\BdDci4_Virtual_Disk_Classic.vhd",
+   "Model": "Virtual Disk    ",
+   "Number": 7,
+   "OperationalStatus": "Online",
+   "PartitionStyle": "GPT",
+   "Path": "\\\\?\\scsi#disk&ven_msft&prod_virtual_disk#2&1f4adffe&0&000001#{53f56307-b6bf-11d0-94f2-00a0c91efb8b}",
+   "SerialNumber": null,
+   "Signature": null,
+   "Size": 33554432,
+   "UniqueId": "600224803426183AAFEC9E61EC7A093A"
+  },
+  {
+   "BusType": "NVMe",
+   "FriendlyName": "CT4000P3SSD8",
+   "Guid": "{b54331f2-64d3-4106-b0b3-a0006a69a728}",
+   "HealthStatus": "Healthy",
+   "IsBoot": false,
+   "IsOffline": false,
+   "IsReadOnly": false,
+   "IsSystem": false,
+   "Location": "PCI Slot 24 : Bus 7 : Device 0 : Function 0 : Adapter 4",
+   "Model": "CT4000P3SSD8",
+   "Number": 4,
+   "OperationalStatus": "Online",
+   "PartitionStyle": "GPT",
+   "Path": "\\\\?\\scsi#disk&ven_nvme&prod_ct4000p3ssd8#5&3eaf689&0&000000#{53f56307-b6bf-11d0-94f2-00a0c91efb8b}",
+   "SerialNumber": "6479_A777_3000_0009.",
+   "Signature": null,
+   "Size": 4000787030016,
+   "UniqueId": "eui.6479A77730000009"
+  },
+  {
+   "BusType": "NVMe",
+   "FriendlyName": "JAJP600M4TB",
+   "Guid": "{266166e8-1a9a-42f1-860a-2a3f65fc3a93}",
+   "HealthStatus": "Healthy",
+   "IsBoot": false,
+   "IsOffline": false,
+   "IsReadOnly": false,
+   "IsSystem": false,
+   "Location": "PCI Slot 12 : Bus 10 : Device 0 : Function 0 : Adapter 5",
+   "Model": "JAJP600M4TB",
+   "Number": 5,
+   "OperationalStatus": "Online",
+   "PartitionStyle": "GPT",
+   "Path": "\\\\?\\scsi#disk&ven_nvme&prod_jajp600m4tb#5&339562ae&0&000000#{53f56307-b6bf-11d0-94f2-00a0c91efb8b}",
+   "SerialNumber": "0000_0000_0000_0000_00E0_4C70_B6D7_55E0.",
+   "Signature": null,
+   "Size": 4096805658624,
+   "UniqueId": "eui.000000000000000000E04C70B6D755E0"
+  },
+  {
+   "BusType": "NVMe",
+   "FriendlyName": "SHPP41-2000GM",
+   "Guid": "{e6772891-b215-4c46-8872-efd564f78c56}",
+   "HealthStatus": "Healthy",
+   "IsBoot": true,
+   "IsOffline": false,
+   "IsReadOnly": false,
+   "IsSystem": true,
+   "Location": "Integrated : Bus 4 : Device 0 : Function 0 : Adapter 2",
+   "Model": "SHPP41-2000GM",
+   "Number": 2,
+   "OperationalStatus": "Online",
+   "PartitionStyle": "GPT",
+   "Path": "\\\\?\\scsi#disk&ven_nvme&prod_shpp41-2000gm#5&1f89821&0&000000#{53f56307-b6bf-11d0-94f2-00a0c91efb8b}",
+   "SerialNumber": "ACE4_2E00_352E_167B_2EE4_AC00_0000_0001.",
+   "Signature": null,
+   "Size": 2000398934016,
+   "UniqueId": "eui.ACE42E00352E167B2EE4AC0000000001"
+  },
+  {
+   "BusType": "NVMe",
+   "FriendlyName": "WD_BLACK SN770 2TB",
+   "Guid": "{bd279c3b-f9b9-11ed-b5b5-bc091b0fc6c9}",
+   "HealthStatus": "Healthy",
+   "IsBoot": false,
+   "IsOffline": false,
+   "IsReadOnly": false,
+   "IsSystem": false,
+   "Location": "PCI Slot 28 : Bus 5 : Device 0 : Function 0 : Adapter 3",
+   "Model": "WD_BLACK SN770 2TB",
+   "Number": 3,
+   "OperationalStatus": "Online",
+   "PartitionStyle": "GPT",
+   "Path": "\\\\?\\scsi#disk&ven_nvme&prod_wd_black_sn770_2#5&42e9322&0&000000#{53f56307-b6bf-11d0-94f2-00a0c91efb8b}",
+   "SerialNumber": "E823_8FA6_BF53_0001_001B_448B_4EF1_2823.",
+   "Signature": null,
+   "Size": 2000398934016,
+   "UniqueId": "eui.E8238FA6BF530001001B448B4EF12823"
+  },
+  {
+   "BusType": "SATA",
+   "FriendlyName": "Samsung SSD 870 EVO 2TB",
+   "Guid": "{ccb36426-442c-42b0-8cf0-245903464f08}",
+   "HealthStatus": "Healthy",
+   "IsBoot": false,
+   "IsOffline": false,
+   "IsReadOnly": false,
+   "IsSystem": false,
+   "Location": "Integrated : Bus 0 : Device 23 : Function 0 : Adapter 0 : Port 4",
+   "Model": "Samsung SSD 870 EVO 2TB",
+   "Number": 0,
+   "OperationalStatus": "Online",
+   "PartitionStyle": "GPT",
+   "Path": "\\\\?\\scsi#disk&ven_samsung&prod_ssd_870_evo_2tb#4&11742ca2&0&040000#{53f56307-b6bf-11d0-94f2-00a0c91efb8b}",
+   "SerialNumber": "S6PNNM0TB00861W",
+   "Signature": null,
+   "Size": 2000398934016,
+   "UniqueId": "500253F8C2B00399"
+  }
+ ],
+ "partitions": [
+  {
+   "AccessPaths": [
+    "E:\\",
+    "\\\\?\\Volume{1c9e2003-1f3f-417c-b622-a0b6c0512615}\\"
+   ],
+   "DiskNumber": 1,
+   "DriveLetter": "E",
+   "GptType": "{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}",
+   "Guid": "{1c9e2003-1f3f-417c-b622-a0b6c0512615}",
+   "IsBoot": false,
+   "IsHidden": false,
+   "IsSystem": false,
+   "MbrType": null,
+   "Offset": 1048576,
+   "PartitionNumber": 1,
+   "Size": 3000591450112,
+   "Type": "Basic"
+  },
+  {
+   "AccessPaths": [
+    "\\\\?\\Volume{ba5fbc33-b5dd-4468-b9fb-349269ef43b8}\\"
+   ],
+   "DiskNumber": 7,
+   "DriveLetter": null,
+   "GptType": "{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}",
+   "Guid": "{ba5fbc33-b5dd-4468-b9fb-349269ef43b8}",
+   "IsBoot": false,
+   "IsHidden": false,
+   "IsSystem": false,
+   "MbrType": null,
+   "Offset": 32768,
+   "PartitionNumber": 1,
+   "Size": 33488896,
+   "Type": "Basic"
+  },
+  {
+   "AccessPaths": [
+    "F:\\",
+    "\\\\?\\Volume{5901b7ae-881f-4ce2-9931-60cf5a407dab}\\"
+   ],
+   "DiskNumber": 4,
+   "DriveLetter": "F",
+   "GptType": "{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}",
+   "Guid": "{5901b7ae-881f-4ce2-9931-60cf5a407dab}",
+   "IsBoot": false,
+   "IsHidden": false,
+   "IsSystem": false,
+   "MbrType": null,
+   "Offset": 1048576,
+   "PartitionNumber": 1,
+   "Size": 4000785104896,
+   "Type": "Basic"
+  },
+  {
+   "AccessPaths": [
+    "G:\\",
+    "\\\\?\\Volume{7029cacc-4dba-4fe1-b220-697b51caa9db}\\"
+   ],
+   "DiskNumber": 5,
+   "DriveLetter": "G",
+   "GptType": "{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}",
+   "Guid": "{7029cacc-4dba-4fe1-b220-697b51caa9db}",
+   "IsBoot": false,
+   "IsHidden": false,
+   "IsSystem": false,
+   "MbrType": null,
+   "Offset": 1048576,
+   "PartitionNumber": 1,
+   "Size": 4096804257792,
+   "Type": "Basic"
+  },
+  {
+   "AccessPaths": [
+    "\\\\?\\Volume{dccf3bdc-5eda-4cff-b32f-749e5495b003}\\"
+   ],
+   "DiskNumber": 2,
+   "DriveLetter": null,
+   "GptType": "{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}",
+   "Guid": "{dccf3bdc-5eda-4cff-b32f-749e5495b003}",
+   "IsBoot": false,
+   "IsHidden": true,
+   "IsSystem": true,
+   "MbrType": null,
+   "Offset": 1048576,
+   "PartitionNumber": 1,
+   "Size": 209715200,
+   "Type": "System"
+  },
+  {
+   "AccessPaths": null,
+   "DiskNumber": 2,
+   "DriveLetter": null,
+   "GptType": "{e3c9e316-0b5c-4db8-817d-f92df00215ae}",
+   "Guid": "{7e88bf3c-6173-4145-8329-086f8b75ca19}",
+   "IsBoot": false,
+   "IsHidden": true,
+   "IsSystem": false,
+   "MbrType": null,
+   "Offset": 210763776,
+   "PartitionNumber": 2,
+   "Size": 16777216,
+   "Type": "Reserved"
+  },
+  {
+   "AccessPaths": [
+    "C:\\",
+    "\\\\?\\Volume{17af65b4-223e-4c82-9361-18f8b22cfaa6}\\"
+   ],
+   "DiskNumber": 2,
+   "DriveLetter": "C",
+   "GptType": "{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}",
+   "Guid": "{17af65b4-223e-4c82-9361-18f8b22cfaa6}",
+   "IsBoot": true,
+   "IsHidden": false,
+   "IsSystem": false,
+   "MbrType": null,
+   "Offset": 227540992,
+   "PartitionNumber": 3,
+   "Size": 1999239118848,
+   "Type": "Basic"
+  },
+  {
+   "AccessPaths": [
+    "\\\\?\\Volume{ccb89549-3050-46e0-bfe0-b21ca441d247}\\"
+   ],
+   "DiskNumber": 2,
+   "DriveLetter": null,
+   "GptType": "{de94bba4-06d1-4d40-a16a-bfd50179d6ac}",
+   "Guid": "{ccb89549-3050-46e0-bfe0-b21ca441d247}",
+   "IsBoot": false,
+   "IsHidden": true,
+   "IsSystem": false,
+   "MbrType": null,
+   "Offset": 1999466659840,
+   "PartitionNumber": 4,
+   "Size": 931135488,
+   "Type": "Recovery"
+  },
+  {
+   "AccessPaths": [
+    "H:\\",
+    "\\\\?\\Volume{19e4335c-c68c-433c-95ac-3ea673f7f235}\\"
+   ],
+   "DiskNumber": 3,
+   "DriveLetter": "H",
+   "GptType": "{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}",
+   "Guid": "{19e4335c-c68c-433c-95ac-3ea673f7f235}",
+   "IsBoot": false,
+   "IsHidden": false,
+   "IsSystem": false,
+   "MbrType": null,
+   "Offset": 1048576,
+   "PartitionNumber": 1,
+   "Size": 2000397795328,
+   "Type": "Basic"
+  },
+  {
+   "AccessPaths": [
+    "D:\\",
+    "\\\\?\\Volume{eca2b351-2ac6-4c03-8589-3caf83ab9192}\\"
+   ],
+   "DiskNumber": 0,
+   "DriveLetter": "D",
+   "GptType": "{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}",
+   "Guid": "{eca2b351-2ac6-4c03-8589-3caf83ab9192}",
+   "IsBoot": false,
+   "IsHidden": false,
+   "IsSystem": false,
+   "MbrType": null,
+   "Offset": 1048576,
+   "PartitionNumber": 1,
+   "Size": 2000397795328,
+   "Type": "Basic"
+  }
+ ],
+ "ps_version": "5.1.26100.9711",
+ "schema": 1,
+ "volumes": [
+  {
+   "DriveLetter": "C",
+   "DriveType": "Fixed",
+   "FileSystem": "NTFS",
+   "FileSystemLabel": "",
+   "HealthStatus": "Healthy",
+   "OperationalStatus": "OK",
+   "Path": "\\\\?\\Volume{17af65b4-223e-4c82-9361-18f8b22cfaa6}\\",
+   "Size": 1999239114752,
+   "SizeRemaining": 804072300544,
+   "UniqueId": "\\\\?\\Volume{17af65b4-223e-4c82-9361-18f8b22cfaa6}\\"
+  },
+  {
+   "DriveLetter": "H",
+   "DriveType": "Fixed",
+   "FileSystem": "NTFS",
+   "FileSystemLabel": "WD_Black 2TB",
+   "HealthStatus": "Healthy",
+   "OperationalStatus": "OK",
+   "Path": "\\\\?\\Volume{19e4335c-c68c-433c-95ac-3ea673f7f235}\\",
+   "Size": 2000397791232,
+   "SizeRemaining": 671793000448,
+   "UniqueId": "\\\\?\\Volume{19e4335c-c68c-433c-95ac-3ea673f7f235}\\"
+  },
+  {
+   "DriveLetter": "E",
+   "DriveType": "Fixed",
+   "FileSystem": "NTFS",
+   "FileSystemLabel": "HDD",
+   "HealthStatus": "Healthy",
+   "OperationalStatus": "OK",
+   "Path": "\\\\?\\Volume{1c9e2003-1f3f-417c-b622-a0b6c0512615}\\",
+   "Size": 3000591446016,
+   "SizeRemaining": 2996091686912,
+   "UniqueId": "\\\\?\\Volume{1c9e2003-1f3f-417c-b622-a0b6c0512615}\\"
+  },
+  {
+   "DriveLetter": "P",
+   "DriveType": "Removable",
+   "FileSystem": "exFAT",
+   "FileSystemLabel": "pCloud Drive",
+   "HealthStatus": "Healthy",
+   "OperationalStatus": "OK",
+   "Path": "\\\\?\\Volume{2c3be760-9ed9-11f1-88f7-bc091b0fc6c9}\\",
+   "Size": 2199023255552,
+   "SizeRemaining": 2029386436608,
+   "UniqueId": "\\\\?\\Volume{2c3be760-9ed9-11f1-88f7-bc091b0fc6c9}\\"
+  },
+  {
+   "DriveLetter": "F",
+   "DriveType": "Fixed",
+   "FileSystem": "NTFS",
+   "FileSystemLabel": "Crucial 4TB",
+   "HealthStatus": "Healthy",
+   "OperationalStatus": "OK",
+   "Path": "\\\\?\\Volume{5901b7ae-881f-4ce2-9931-60cf5a407dab}\\",
+   "Size": 4000785100800,
+   "SizeRemaining": 3233851338752,
+   "UniqueId": "\\\\?\\Volume{5901b7ae-881f-4ce2-9931-60cf5a407dab}\\"
+  },
+  {
+   "DriveLetter": "G",
+   "DriveType": "Fixed",
+   "FileSystem": "NTFS",
+   "FileSystemLabel": "Solidigm 4TB",
+   "HealthStatus": "Healthy",
+   "OperationalStatus": "OK",
+   "Path": "\\\\?\\Volume{7029cacc-4dba-4fe1-b220-697b51caa9db}\\",
+   "Size": 4096804253696,
+   "SizeRemaining": 3164191649792,
+   "UniqueId": "\\\\?\\Volume{7029cacc-4dba-4fe1-b220-697b51caa9db}\\"
+  },
+  {
+   "DriveLetter": null,
+   "DriveType": "Fixed",
+   "FileSystem": "NTFS",
+   "FileSystemLabel": "Bitdefender Virtual Disk",
+   "HealthStatus": "Healthy",
+   "OperationalStatus": "OK",
+   "Path": "\\\\?\\Volume{ba5fbc33-b5dd-4468-b9fb-349269ef43b8}\\",
+   "Size": 33488384,
+   "SizeRemaining": 23223808,
+   "UniqueId": "\\\\?\\Volume{ba5fbc33-b5dd-4468-b9fb-349269ef43b8}\\"
+  },
+  {
+   "DriveLetter": null,
+   "DriveType": "Fixed",
+   "FileSystem": "NTFS",
+   "FileSystemLabel": "",
+   "HealthStatus": "Healthy",
+   "OperationalStatus": "OK",
+   "Path": "\\\\?\\Volume{ccb89549-3050-46e0-bfe0-b21ca441d247}\\",
+   "Size": 931131392,
+   "SizeRemaining": 88817664,
+   "UniqueId": "\\\\?\\Volume{ccb89549-3050-46e0-bfe0-b21ca441d247}\\"
+  },
+  {
+   "DriveLetter": "D",
+   "DriveType": "Fixed",
+   "FileSystem": "NTFS",
+   "FileSystemLabel": "SSD",
+   "HealthStatus": "Healthy",
+   "OperationalStatus": "OK",
+   "Path": "\\\\?\\Volume{eca2b351-2ac6-4c03-8589-3caf83ab9192}\\",
+   "Size": 2000397791232,
+   "SizeRemaining": 2000142598144,
+   "UniqueId": "\\\\?\\Volume{eca2b351-2ac6-4c03-8589-3caf83ab9192}\\"
+  }
+ ],
+ "win32_volumes": [
+  {
+   "BootVolume": false,
+   "DeviceID": "\\\\?\\Volume{eca2b351-2ac6-4c03-8589-3caf83ab9192}\\",
+   "PageFilePresent": false,
+   "SerialNumber": 3591353759,
+   "SystemVolume": false
+  },
+  {
+   "BootVolume": false,
+   "DeviceID": "\\\\?\\Volume{1c9e2003-1f3f-417c-b622-a0b6c0512615}\\",
+   "PageFilePresent": false,
+   "SerialNumber": 3896364451,
+   "SystemVolume": false
+  },
+  {
+   "BootVolume": true,
+   "DeviceID": "\\\\?\\Volume{17af65b4-223e-4c82-9361-18f8b22cfaa6}\\",
+   "PageFilePresent": true,
+   "SerialNumber": 818484969,
+   "SystemVolume": false
+  },
+  {
+   "BootVolume": false,
+   "DeviceID": "\\\\?\\Volume{ccb89549-3050-46e0-bfe0-b21ca441d247}\\",
+   "PageFilePresent": false,
+   "SerialNumber": 280027296,
+   "SystemVolume": false
+  },
+  {
+   "BootVolume": false,
+   "DeviceID": "\\\\?\\Volume{19e4335c-c68c-433c-95ac-3ea673f7f235}\\",
+   "PageFilePresent": false,
+   "SerialNumber": 1151273733,
+   "SystemVolume": false
+  },
+  {
+   "BootVolume": false,
+   "DeviceID": "\\\\?\\Volume{5901b7ae-881f-4ce2-9931-60cf5a407dab}\\",
+   "PageFilePresent": false,
+   "SerialNumber": 3528371946,
+   "SystemVolume": false
+  },
+  {
+   "BootVolume": false,
+   "DeviceID": "\\\\?\\Volume{7029cacc-4dba-4fe1-b220-697b51caa9db}\\",
+   "PageFilePresent": false,
+   "SerialNumber": 4236041428,
+   "SystemVolume": false
+  },
+  {
+   "BootVolume": false,
+   "DeviceID": "\\\\?\\Volume{ba5fbc33-b5dd-4468-b9fb-349269ef43b8}\\",
+   "PageFilePresent": false,
+   "SerialNumber": 3131111768,
+   "SystemVolume": false
+  },
+  {
+   "BootVolume": false,
+   "DeviceID": "\\\\?\\Volume{dccf3bdc-5eda-4cff-b32f-749e5495b003}\\",
+   "PageFilePresent": false,
+   "SerialNumber": 1154003084,
+   "SystemVolume": true
+  },
+  {
+   "BootVolume": false,
+   "DeviceID": "\\\\?\\Volume{2c3be760-9ed9-11f1-88f7-bc091b0fc6c9}\\",
+   "PageFilePresent": false,
+   "SerialNumber": 1409414134,
+   "SystemVolume": false
+  }
+ ]
+}
