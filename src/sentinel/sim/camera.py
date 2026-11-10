@@ -19,6 +19,9 @@ Faults:
     restart_encoder()  new encoder process: stream timestamps restart (camera reboot)
     corrupt(n)      overwrite the next n TS packets' payloads with random bytes
     clock_rate=     (constructor) camera clock runs fast/slow: stream time = rate x real time
+    motion=         (constructor) a still grey scene with light sensor noise in which a box moves
+                    only during the given (start_s, end_s) windows of stream time; for testing
+                    motion-triggered recording. None (default) = the moving test pattern.
 
 CLI: ``python -m sentinel.sim.camera --port 8554`` then type a fault name and Enter.
 """
@@ -42,7 +45,7 @@ CHUNK_PACKETS = 7  # 1316 bytes, the conventional UDP/TS payload size
 class SimulatedCamera:
     def __init__(self, port: int = 0, host: str = "127.0.0.1", size: str = "640x480", fps: int = 15,
                  bitrate: str = "800k", gop: int | None = None, ffmpeg: str = "ffmpeg",
-                 clock_rate: float = 1.0) -> None:
+                 clock_rate: float = 1.0, motion: list[tuple[float, float]] | None = None) -> None:
         """``clock_rate``: camera clock speed relative to real time (1.01 = camera clock 1 % fast:
         each real second carries 1.01 s of stream time). Frames are still produced and sent in
         real time (``-re``); only their timestamps are scaled (``setpts``). Measured with FFmpeg
@@ -53,6 +56,7 @@ class SimulatedCamera:
         self.host, self.port = host, port
         self.size, self.fps, self.bitrate = size, fps, bitrate
         self.clock_rate = clock_rate
+        self.motion = motion
         self.gop = gop or fps          # one keyframe per second by default
         self.ffmpeg = ffmpeg
         self._clients: list[socket.socket] = []
@@ -134,8 +138,15 @@ class SimulatedCamera:
 
     # ------------------------------------------------------------------ internals
     def _start_encoder(self) -> None:
-        argv = [self.ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-re",
-                "-f", "lavfi", "-i", f"testsrc2=size={self.size}:rate={self.fps}"]
+        argv = [self.ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-re", "-f", "lavfi", "-i"]
+        if self.motion is None:
+            argv.append(f"testsrc2=size={self.size}:rate={self.fps}")
+        else:
+            windows = "+".join(f"between(t,{a:g},{b:g})" for a, b in self.motion) or "0"
+            # overlay (not drawbox) so the box position is re-evaluated every frame
+            argv.append(f"color=c=0x606060:size={self.size}:rate={self.fps}[bg];"
+                        f"color=c=white:size=120x160:rate={self.fps}[box];"
+                        f"[bg][box]overlay=x='mod(t*240,W-w)':y=H/3:enable='{windows}',noise=alls=6:allf=t[out0]")
         if self.clock_rate != 1.0:
             # Camera clock drift: fine timebase so scaled timestamps are not rounded to frame
             # ticks; passthrough so FFmpeg does not drop/duplicate frames to restore the rate.

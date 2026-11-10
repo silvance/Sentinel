@@ -8,6 +8,9 @@ To start Sentinel or check that it is recording:
 The Sentinel screen shows the recorder status. "Recording normally" means
 everything is working. You can close the screen; recording continues.
 
+"Watching for motion" means: outside recording hours Sentinel records only when
+something moves. This is normal; no action is needed.
+
 Leaving the computer unattended: press "Lock this computer" (or Windows key + L).
 Recording continues while the computer is locked. Do not close the lid or put
 the computer to sleep.
@@ -39,6 +42,7 @@ For the installing technician
       Sentinel.exe admin-pin            set the administrator PIN of the screen
       Sentinel.exe schedule             show when a recording schedule records/pauses
       Sentinel.exe drives list          list drives (prepare/eject: administrator only)
+      Sentinel.exe motion-test          show what counts as motion (tune [motion])
       Sentinel.exe export run --config <file> --target E:\   export to a review drive
 * This build does NOT start automatically when Windows starts. Until the Windows
   service is installed, someone must double-click Sentinel.exe after every restart.

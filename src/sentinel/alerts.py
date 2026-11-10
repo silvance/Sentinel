@@ -125,6 +125,12 @@ CATALOG: dict[str, AlertDef] = {d.code: d for d in [
     # Planned pause ([schedule]); not a fault. The status message names the resume time.
     AlertDef("P-001", "Recording is paused by the recording schedule",
              "Recording resumes automatically at the scheduled time. No action is needed.", False),
+    # Motion period ([schedule] action "motion"): waiting for motion. Planned, not a fault.
+    AlertDef("P-003", "Waiting for motion",
+             "Outside the recording hours, recording starts by itself when motion is detected. "
+             "No action is needed.", False),
+    AlertDef("W-001", "Motion detection is not working, so the recorder records all the time",
+             "Recording continues. " + SUPPORT, False),
     # Set up in advance ("setup --camera-later"); the technician adds the camera on site (set-camera).
     AlertDef("P-002", "Not recording: the camera has not been added yet",
              "Recording starts once the installing technician adds the camera. If the camera should "

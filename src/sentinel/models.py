@@ -37,6 +37,7 @@ class RunEndReason(StrEnum):
     TIMELINE_DISCONTINUITY = "timeline_discontinuity"  # stream time fell behind real time (lost footage)
     INTERNAL_ERROR = "internal_error"        # unexpected recorder error; run closed and retried
     SCHEDULED_PAUSE = "scheduled_pause"      # [schedule] says pause: run closed normally, resumes on schedule
+    MOTION_IDLE = "motion_idle"              # motion period, no motion for keep_recording_s: closed normally
 
 
 class OverallStatus(StrEnum):
@@ -49,6 +50,7 @@ class OverallStatus(StrEnum):
     STOPPED = "STOPPED"                      # service shut down cleanly
     PAUSED = "PAUSED"                        # not recording because the recording schedule says so (P-001)
     CAMERA_NOT_SET_UP = "CAMERA_NOT_SET_UP"  # set up with "camera later"; camera not added yet (P-002)
+    WATCHING = "WATCHING"                    # motion period, no recent motion: waiting for motion (P-003)
 
 
 class CameraLink(StrEnum):

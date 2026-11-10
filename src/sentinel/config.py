@@ -17,6 +17,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .drives.policy import DrivePolicy, DrivePolicyError, load_policy
 from .paths import TOOL_NAMES, absolute_tool, default_storage_dirs, default_tool
+from .motion import MotionConfig, MotionConfigError
+from .motion import validate as validate_motion
 from .schedule import ScheduleConfig, ScheduleError, parse_schedule
 
 
@@ -180,6 +182,7 @@ class AppConfig:
     archive: ArchiveConfig = field(default_factory=ArchiveConfig)
     retention: RetentionConfig = field(default_factory=RetentionConfig)
     schedule: ScheduleConfig = field(default_factory=ScheduleConfig)   # [schedule] (sentinel.schedule); off by default
+    motion: MotionConfig = field(default_factory=MotionConfig)         # [motion]: used by schedule action "motion"
 
     @property
     def spool_path(self) -> Path:
@@ -362,7 +365,7 @@ def _build_drives(raw: Any) -> DrivePolicy:
 def load_config_dict(raw: dict[str, Any], base_dir: Path | None = None, source: str | None = None) -> AppConfig:
     base_dir = base_dir or Path.cwd()
     unknown = sorted(set(raw) - {"camera", "recording", "storage", "tools", "service", "export", "drives",
-                                 "archive", "retention", "schedule"})
+                                 "archive", "retention", "schedule", "motion"})
     if unknown:
         raise ConfigError(f"unknown section(s): {', '.join(unknown)}")
     if "camera" not in raw:
@@ -389,11 +392,13 @@ def load_config_dict(raw: dict[str, Any], base_dir: Path | None = None, source: 
         drives=_build_drives(raw.get("drives")),
         archive=_build(ArchiveConfig, "archive", raw.get("archive"), base_dir),
         retention=_build(RetentionConfig, "retention", raw.get("retention"), base_dir),
+        motion=_build(MotionConfig, "motion", raw.get("motion"), base_dir),
     )
     _validate(cfg)
     try:
+        validate_motion(cfg.motion)
         sched = parse_schedule(raw.get("schedule"), cfg.recording.display_timezone)
-    except ScheduleError as exc:
+    except (ScheduleError, MotionConfigError) as exc:
         raise ConfigError(str(exc)) from None
     return replace(cfg, schedule=sched)
 

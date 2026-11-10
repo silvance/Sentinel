@@ -51,6 +51,8 @@ OVERALL_CASES: dict[OverallStatus, dict] = {
     OverallStatus.CAMERA_NOT_SET_UP: dict(ffmpeg_running=False, media_seen_this_run=False,
                                           seconds_since_media_advance=None, camera_pending=True,
                                           outage_seconds=86_400.0),
+    OverallStatus.WATCHING: dict(ffmpeg_running=False, media_seen_this_run=False, seconds_since_media_advance=None,
+                                 motion_idle=True, outage_seconds=36_000.0, attempts=3),
 }
 EXPECTED_HEADLINE: dict[OverallStatus, tuple[str, Tone]] = {
     OverallStatus.RECORDING: ("Recording normally", Tone.OK),
@@ -62,6 +64,7 @@ EXPECTED_HEADLINE: dict[OverallStatus, tuple[str, Tone]] = {
     OverallStatus.STOPPED: ("Not recording", Tone.CRITICAL),
     OverallStatus.PAUSED: ("Paused by schedule", Tone.INFO),       # planned: no outage alert, no escalation
     OverallStatus.CAMERA_NOT_SET_UP: ("Not recording: camera not added yet", Tone.WARNING),
+    OverallStatus.WATCHING: ("Watching for motion", Tone.INFO),                 # planned: no outage alert
 }
 
 

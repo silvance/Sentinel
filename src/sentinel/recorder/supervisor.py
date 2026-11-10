@@ -109,6 +109,8 @@ class LiveState:
     pause_since_epoch: float | None = None
     resume_epoch: float | None = None          # next scheduled start (None: none scheduled)
     resumed_mono: float | None = None          # when the last scheduled pause ended
+    # motion-triggered recording ([schedule] action "motion", sentinel.motion)
+    motion_idle: bool = False                  # waiting for motion (not recording)
 
 
 @dataclass
@@ -122,9 +124,10 @@ class RecordingSupervisor:
     def __init__(self, cfg: AppConfig, ledger: Ledger, platform: Platform, storage: StorageMonitor,
                  finalizer: Finalizer, input_url: str, stop_event: threading.Event,
                  clock: Clock | None = None, ffmpeg_version: str | None = None,
-                 tick: Callable[[], None] | None = None, schedule: Any = None) -> None:
+                 tick: Callable[[], None] | None = None, schedule: Any = None, motion: Any = None) -> None:
         self.cfg = cfg
         self.schedule = schedule             # sentinel.schedule.RecordingSchedule, or None (always record)
+        self.motion = motion                 # sentinel.motion.MotionDetector when the schedule uses "motion"
         self.ledger = ledger
         self.platform = platform
         self.storage = storage
@@ -150,8 +153,9 @@ class RecordingSupervisor:
             return
         consecutive_internal = 0
         while not self.stop_event.is_set():
-            if self._schedule_says_pause():
-                self._pause_for_schedule()
+            pause = self._pause_reason()
+            if pause is not None:
+                self._pause(pause)
                 continue
             sample = self.storage.sample()
             if sample.level.value == "critical":
@@ -178,7 +182,7 @@ class RecordingSupervisor:
                 outcome = RunOutcome(RunEndReason.INTERNAL_ERROR, None, 0.0)
             if self.stop_event.is_set():
                 break
-            if outcome.reason is RunEndReason.SCHEDULED_PAUSE:
+            if outcome.reason in (RunEndReason.SCHEDULED_PAUSE, RunEndReason.MOTION_IDLE):
                 continue                       # planned: no retry delay; the loop top pauses
             delay = self.backoff.next_delay(outcome.media_seconds)
             log.warning("run ended (%s, exit %s, %.1fs media); retrying in %.1fs",
@@ -216,14 +220,69 @@ class RecordingSupervisor:
             self.stop_event.wait(self.cfg.service.poll_interval_s)
 
     # ------------------------------------------------------------------ recording schedule
-    def _schedule_says_pause(self) -> bool:
+    def _pause_reason(self) -> RunEndReason | None:
+        """Why not to record now (None = record). Fail safe: anything that cannot be evaluated records."""
         if self.schedule is None:
-            return False
+            return None
         try:
-            return not self.schedule.should_record(self.clock.wall())
-        except Exception:      # fail safe: a schedule that cannot be evaluated never stops recording
-            log.exception("recording schedule could not be evaluated; recording")
-            return False
+            mode = self.schedule.mode_at(self.clock.wall())
+            if mode == "pause":
+                return RunEndReason.SCHEDULED_PAUSE
+            if mode == "motion" and self.motion is not None and not self.motion.recording_wanted():
+                return RunEndReason.MOTION_IDLE
+            return None
+        except Exception:
+            log.exception("recording schedule / motion state could not be evaluated; recording")
+            return None
+
+    def _schedule_says_pause(self) -> bool:
+        return self._pause_reason() is not None
+
+    def _pause(self, reason: RunEndReason) -> None:
+        if reason is RunEndReason.MOTION_IDLE:
+            self._wait_for_motion()
+        else:
+            self._pause_for_schedule()
+
+    def _wait_for_motion(self) -> None:
+        """Motion period and nothing has moved for keep_recording_s: record nothing until the
+        detector sees motion (or stops working: fail safe), or the schedule changes."""
+        wall = self.clock.wall()
+        with self.live.lock:
+            self.live.motion_idle = True
+            self.live.pause_since_epoch = wall
+        log.info("motion period: no motion for %.0f s; waiting for motion", self.cfg.motion.keep_recording_s)
+        try:
+            self.ledger.add_event("audit", "motion", "motion_standby",
+                                  "No motion: recording stopped until motion is detected",
+                                  {"keep_recording_s": self.cfg.motion.keep_recording_s})
+        except Exception:
+            log.exception("could not record motion_standby event")
+        while not self.stop_event.is_set() and self._pause_reason() is RunEndReason.MOTION_IDLE:
+            self._tick()
+            self.stop_event.wait(min(0.2, self.cfg.service.poll_interval_s))
+        with self.live.lock:
+            self.live.motion_idle = False
+            if not self.stop_event.is_set():
+                self.live.resumed_mono = self.clock.mono()
+        if self.stop_event.is_set():
+            return
+        m = self.motion
+        snap = m.snapshot() if m is not None else {}
+        why = ("motion_detected" if snap.get("seconds_since_motion") is not None
+               and snap["seconds_since_motion"] <= self.cfg.motion.keep_recording_s
+               else "detector_not_working" if m is not None and not m.healthy() else "schedule_changed")
+        log.info("recording again (%s)", why)
+        try:
+            self.ledger.add_event("audit", "motion", "motion_record",
+                                  {"motion_detected": "Motion detected: recording",
+                                   "detector_not_working": "Motion detection not working: recording (fail safe)",
+                                   "schedule_changed": "Recording schedule changed: recording"}[why],
+                                  {"why": why, "waiting_since_utc": iso_utc(wall),
+                                   "motion_utc": iso_utc(snap["last_motion_epoch"]) if snap.get("last_motion_epoch")
+                                   else None, "changed_percent": snap.get("last_score_percent")})
+        except Exception:
+            log.exception("could not record motion_record event")
 
     def _pause_for_schedule(self) -> None:
         """Wait while the schedule says pause. The run that was recording has already ended with
@@ -246,7 +305,7 @@ class RecordingSupervisor:
         except Exception:
             log.exception("could not record schedule_pause event")
         next_refresh = self.clock.mono() + 60.0
-        while not self.stop_event.is_set() and self._schedule_says_pause():
+        while not self.stop_event.is_set() and self._pause_reason() is RunEndReason.SCHEDULED_PAUSE:
             if self.clock.mono() >= next_refresh:   # a clock change may move the resume time
                 next_refresh = self.clock.mono() + 60.0
                 resume = s.next_change(self.clock.wall())
@@ -401,10 +460,13 @@ class RecordingSupervisor:
                     reason = RunEndReason.GRACEFUL_STOP
                     self._stop_ffmpeg(proc, graceful=True)
                     break
-                if self._schedule_says_pause():
-                    # Planned pause: close the current file normally (same as a graceful stop).
-                    reason = RunEndReason.SCHEDULED_PAUSE
-                    log.info("run %s: recording schedule says pause; stopping recording cleanly", run_id)
+                pause = self._pause_reason()
+                if pause is not None:
+                    # Planned pause or no motion: close the current file normally (as a graceful stop).
+                    reason = pause
+                    log.info("run %s: %s; stopping recording cleanly", run_id,
+                             "recording schedule says pause" if pause is RunEndReason.SCHEDULED_PAUSE
+                             else f"no motion for {self.cfg.motion.keep_recording_s:.0f} s")
                     self._stop_ffmpeg(proc, graceful=True)
                     break
 
@@ -508,7 +570,8 @@ class RecordingSupervisor:
         # During a long outage every retry is a run with no media; the open gap's attempt
         # counter records those, so they do not each need an event (days of retries).
         if media_s > 0 or segs or self.ledger.open_gap(self.cfg.camera.id) is None:
-            level = "info" if reason in (RunEndReason.GRACEFUL_STOP, RunEndReason.SCHEDULED_PAUSE) else "warning"
+            level = "info" if reason in (RunEndReason.GRACEFUL_STOP, RunEndReason.SCHEDULED_PAUSE,
+                                         RunEndReason.MOTION_IDLE) else "warning"
             self.ledger.add_event(level, "recorder", f"run_end_{reason}", f"Recording run ended: {reason}",
                                   {"run_id": run_id, "exit_code": exit_code, "last_message": last_line,
                                    "media_seconds": media_s})

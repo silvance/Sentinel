@@ -6,7 +6,7 @@ for one-off date ranges such as holidays ("dates").
 
     [schedule]
     enabled = true
-    default = "record"             # outside every listed period: "record" or "pause"
+    default = "record"             # outside every listed period: "record", "pause" or "motion"
     timezone = ""                  # "" = [recording] display_timezone
 
     [[schedule.weekly]]            # every Saturday and Sunday, all day
@@ -26,15 +26,19 @@ for one-off date ranges such as holidays ("dates").
     start = "2026-12-24 18:00"
     end = "2026-12-27"             # a date alone: the END of that day
 
+Actions: "record" records all the time; "pause" records nothing; "motion" records only when motion
+is detected, for ``[motion] keep_recording_s`` after the last motion (each new motion restarts that
+timer; sentinel.motion). Typical use: record = working hours, default = "motion".
+
 Rules (all checked when the configuration is loaded; a schedule that breaks one is refused):
 
 * Precedence: a ``dates`` period overrides ``weekly`` periods, which override ``default``.
 * ``days`` are mon..sun, or "weekdays", "weekend", "daily". Times are 24-hour "HH:MM" (or
   "HH:MM:SS"); "24:00" is allowed as an end. A weekly period whose end is not after its start runs
   past midnight into the next day; ``days`` names the day it starts. Start = end is refused.
-* Periods at the same level may overlap only if they agree (two weekly periods that say "record"
-  and "pause" for the same time are refused, and so are two such date periods).
-* A schedule that would never record is refused.
+* Periods at the same level may overlap only if they agree (two weekly periods with different
+  actions for the same time are refused, and so are two such date periods).
+* A schedule that would never record is refused ("motion" counts as recording).
 * Times are local wall-clock times in ``timezone``. Daylight-saving changes follow the wall
   clock: "06:00" is 06:00 local time on both sides of a change. Following the wall clock also
   means a wrong or changed system clock moves the schedule (alerts T-001/T-002 report clock
@@ -56,8 +60,8 @@ from datetime import date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-RECORD, PAUSE = "record", "pause"
-ACTIONS = (RECORD, PAUSE)
+RECORD, PAUSE, MOTION = "record", "pause", "motion"
+ACTIONS = (RECORD, PAUSE, MOTION)
 DAY_NAMES = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 DAY_GROUPS = {"weekdays": (0, 1, 2, 3, 4), "weekend": (5, 6), "daily": (0, 1, 2, 3, 4, 5, 6)}
 DAY = 86400
@@ -141,7 +145,7 @@ def _datetime(value: Any, where: str, is_end: bool) -> datetime:
 def _action(raw: dict, where: str) -> str:
     a = raw.get("action")
     if a not in ACTIONS:
-        raise ScheduleError(f'{where}: action must be "record" or "pause", not {a!r}')
+        raise ScheduleError(f'{where}: action must be "record", "pause" or "motion", not {a!r}')
     return a
 
 
@@ -189,7 +193,7 @@ def parse_schedule(raw: Any, default_timezone: str) -> ScheduleConfig:
         raise ScheduleError("[schedule] enabled must be true or false")
     default = raw.get("default", RECORD)
     if default not in ACTIONS:
-        raise ScheduleError('[schedule] default must be "record" or "pause"')
+        raise ScheduleError('[schedule] default must be "record", "pause" or "motion"')
     tz = raw.get("timezone", "") or default_timezone
     if not isinstance(tz, str):
         raise ScheduleError("[schedule] timezone must be text")
@@ -229,19 +233,20 @@ def _check_conflicts(cfg: ScheduleConfig) -> None:
     for i, (s1, e1, a1, t1) in enumerate(flat):
         for s2, e2, a2, t2 in flat[i + 1:]:
             if a1 != a2 and s1 < e2 and s2 < e1:
-                raise ScheduleError(f"{t1} and {t2} overlap but one records and the other pauses; "
+                raise ScheduleError(f"{t1} and {t2} overlap but set different actions ({a1} / {a2}); "
                                     "change one so they no longer overlap")
     for i, p in enumerate(cfg.dates):
         for q in cfg.dates[i + 1:]:
             if p.action != q.action and p.start < q.end and q.start < p.end:
-                raise ScheduleError(f"{p.text} and {q.text} overlap but one records and the other pauses")
+                raise ScheduleError(f"{p.text} and {q.text} overlap but set different actions "
+                                    f"({p.action} / {q.action})")
     if not cfg.enabled:
         return
     # Would it ever record? (weekly coverage, ignoring dates that can only add "record" time)
-    if any(d.action == RECORD for d in cfg.dates):
+    if any(d.action != PAUSE for d in cfg.dates):
         return
     pause = _merge([(s, e) for s, e, a, _ in flat if a == PAUSE])
-    record = [(s, e) for s, e, a, _ in flat if a == RECORD]
+    record = [(s, e) for s, e, a, _ in flat if a != PAUSE]
     if record:
         return
     if cfg.default == PAUSE or pause == [(0, WEEK)]:
@@ -262,9 +267,14 @@ def _merge(iv: Iterable[tuple[int, int]]) -> list[tuple[int, int]]:
 # ---------------------------------------------------------------------- evaluation
 @dataclass(frozen=True)
 class ScheduleState:
-    record: bool
+    mode: str                        # "record" | "pause" | "motion"
     source: str                      # "default" | "weekly" | "dates"
     period: str = ""                 # which period decided (technician wording), "" for the default
+
+    @property
+    def record(self) -> bool:
+        """Records unconditionally (motion periods record only on motion)."""
+        return self.mode == RECORD
 
 
 class RecordingSchedule:
@@ -278,20 +288,29 @@ class RecordingSchedule:
 
     def state_at(self, epoch: float) -> ScheduleState:
         if not self.cfg.enabled:
-            return ScheduleState(True, "default")
+            return ScheduleState(RECORD, "default")
         local = datetime.fromtimestamp(epoch, self.tz)
         naive = local.replace(tzinfo=None)
         for d in self.cfg.dates:
             if d.start <= naive < d.end:
-                return ScheduleState(d.action == RECORD, "dates", d.text)
+                return ScheduleState(d.action, "dates", d.text)
         sow = local.weekday() * DAY + local.hour * 3600 + local.minute * 60 + local.second
         for s, e, w in self._weekly:
             if s <= sow < e:
-                return ScheduleState(w.action == RECORD, "weekly", w.text)
-        return ScheduleState(self.cfg.default == RECORD, "default")
+                return ScheduleState(w.action, "weekly", w.text)
+        return ScheduleState(self.cfg.default, "default")
+
+    def mode_at(self, epoch: float) -> str:
+        return self.state_at(epoch).mode
 
     def should_record(self, epoch: float) -> bool:
+        """True only where the schedule records unconditionally ("record")."""
         return self.state_at(epoch).record
+
+    @property
+    def uses_motion(self) -> bool:
+        c = self.cfg
+        return c.enabled and (c.default == MOTION or any(p.action == MOTION for p in (*c.weekly, *c.dates)))
 
     def _local_epoch(self, naive: datetime) -> float:
         return naive.replace(tzinfo=self.tz).timestamp()
@@ -325,20 +344,20 @@ class RecordingSchedule:
         return sorted(out)
 
     def next_change(self, epoch: float, horizon_days: int = 400) -> float | None:
-        """First moment after ``epoch`` when recording starts or stops; None if none is scheduled."""
-        now = self.should_record(epoch)
+        """First moment after ``epoch`` when the action changes; None if no change is scheduled."""
+        now = self.mode_at(epoch)
         for t in self._candidates(epoch, horizon_days):
-            if self.should_record(t) != now:
+            if self.mode_at(t) != now:
                 return t
         return None
 
-    def plan(self, epoch: float, days: int = 14) -> list[tuple[float, float | None, bool]]:
-        """(from, until, record) intervals from ``epoch`` for ``days`` days, for technicians to check."""
+    def plan(self, epoch: float, days: int = 14) -> list[tuple[float, float | None, str]]:
+        """(from, until, action) intervals from ``epoch`` for ``days`` days, for technicians to check."""
         out = []
         t, end = epoch, epoch + days * DAY
         while t < end:
             nxt = self.next_change(t)
-            out.append((t, nxt, self.should_record(t)))
+            out.append((t, nxt, self.mode_at(t)))
             if nxt is None:
                 break
             t = nxt
@@ -364,8 +383,11 @@ def render_plan(schedule: RecordingSchedule, epoch: float, days: int = 14) -> st
     if not cfg.enabled:
         return "The recording schedule is off: the recorder records all the time."
     lines = [f"Recording schedule (times in {cfg.timezone}), next {days} days:"]
-    for start, until, record in schedule.plan(epoch, days):
-        what = "RECORD" if record else "PAUSE "
+    if schedule.uses_motion:
+        lines.append("  (MOTION = record only when motion is detected, then keep recording for "
+                     "[motion] keep_recording_s after the last motion)")
+    for start, until, mode in schedule.plan(epoch, days):
+        what = {RECORD: "RECORD", PAUSE: "PAUSE ", MOTION: "MOTION"}[mode]
         lines.append(f"  {what}  from {schedule.format_local(start)}  "
                      f"until {schedule.format_local(until) if until else '(no change scheduled)'}")
     return "\n".join(lines)

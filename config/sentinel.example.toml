@@ -112,7 +112,7 @@ expected_swap_days = 5             # alert L-001 if storage will run out before 
 # Precedence: [[schedule.dates]] > [[schedule.weekly]] > default. Times are local in `timezone`.
 [schedule]
 enabled = false
-default = "record"                 # outside every listed period: "record" or "pause"
+default = "record"                 # outside every listed period: "record", "pause" or "motion"
 timezone = ""                      # "" = [recording] display_timezone
 
 # Example (change or remove before enabling): pause every weekend.
@@ -127,3 +127,25 @@ end = "24:00"                      # an end before the start runs past midnight
 # action = "record"
 # start = "2026-12-24 18:00"
 # end = "2026-12-27"
+
+# Example "work hours, motion the rest of the time" (instead of the weekend example above):
+#   default = "motion"
+#   [[schedule.weekly]]
+#   action = "record"
+#   days = ["weekdays"]
+#   start = "07:00"
+#   end = "18:00"
+
+# Motion-triggered recording, used where the schedule says action = "motion" (sentinel/motion.py).
+# Recording starts when motion is seen and continues for keep_recording_s after the LAST motion
+# (each new motion restarts the timer). Recording starts a few seconds after motion begins; nothing
+# before it is kept. If detection stops working, the recorder records all the time (W-001).
+# Tune on site with: Sentinel.exe motion-test   (walk through the scene while it runs)
+[motion]
+stream_path = ""                   # camera's low-resolution second stream path (recommended; from the
+                                   # camera documentation); "" = key frames of the main stream
+keep_recording_s = 120             # 10..3600
+changed_percent = 1.0              # share of the picture that must change
+pixel_threshold = 25               # brightness change that counts (0-255)
+min_frames = 2                     # analysed frames in a row
+analysis_fps = 4                   # second stream only

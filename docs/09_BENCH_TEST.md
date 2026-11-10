@@ -73,6 +73,17 @@ length and reason, and nothing else.
 | 4.3 | After the pause. | Resumes on its own; one gap, reason "paused by the recording schedule (planned)". | |
 | 4.4 | Remove the test period; restart the service. | — | |
 
+## 4a. Motion-triggered recording (only if the schedule uses "motion")
+
+| # | Step | Expected | Result |
+|---|---|---|---|
+| 4a.1 | `Sentinel.exe motion-test --seconds 120` in daylight: stand still out of view, then walk through. | Empty scene never MOTION; walking through always MOTION. Settings noted. | |
+| 4a.2 | Same at night / lights off (IR). | As 4a.1; note the IR switch (it may trigger once). | |
+| 4a.3 | Set a 30-minute `[[schedule.dates]]` motion period starting now; restart the service; stay out of view 5 min. | "Watching for motion", P-003; nothing recorded. | |
+| 4a.4 | Walk through once, note the clock time; leave. | Recording starts; check the first frame: how many seconds after you entered? Record it. | |
+| 4a.5 | Walk through again before `keep_recording_s` ends. | Same recording continues; stops `keep_recording_s` after your last movement. | |
+| 4a.6 | Unplug the camera for 1 minute during the motion period. | W-001 and/or R-alerts; after reconnecting, back to watching. | |
+
 ## 5. Archive drive and retention
 
 | # | Step | Expected | Result |

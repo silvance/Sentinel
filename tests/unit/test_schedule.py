@@ -79,7 +79,7 @@ def test_next_change_and_plan() -> None:
     assert s.next_change(at("2026-11-09 12:00")) == at("2026-11-09 20:00")
     assert s.next_change(at("2026-11-13 21:00")) == at("2026-11-16 00:00")   # Friday night + weekend
     plan = s.plan(at("2026-11-09 12:00"), days=2)
-    assert [p[2] for p in plan] == [True, False, True, False, True]
+    assert [p[2] for p in plan] == ["record", "pause", "record", "pause", "record"]
     assert plan[1][0] == at("2026-11-09 20:00") and plan[1][1] == at("2026-11-10 06:00")
     text = render_plan(s, at("2026-11-09 12:00"), days=1)
     assert "PAUSE   from Mon 09 Nov 2026 20:00  until Tue 10 Nov 2026 06:00" in text
@@ -106,7 +106,7 @@ def test_daylight_saving_follows_the_wall_clock() -> None:
     ({"weekly": [{"action": "pause", "days": ["mon"], "start": "8am", "end": "09:00"}]}, "24-hour"),
     ({"weekly": [{"action": "pause", "days": ["mon"], "start": "24:00", "end": "09:00"}]}, "only allowed as an end"),
     ({"weekly": [{"action": "pause", "days": ["funday"], "start": "08:00", "end": "09:00"}]}, "unknown day"),
-    ({"weekly": [{"action": "stop", "days": ["mon"], "start": "08:00", "end": "09:00"}]}, "record\" or \"pause"),
+    ({"weekly": [{"action": "stop", "days": ["mon"], "start": "08:00", "end": "09:00"}]}, "\"pause\" or \"motion"),
     ({"weekly": [{"action": "pause", "days": ["mon"], "start": "08:00"}]}, "missing end"),
     ({"weekly": [{"action": "pause", "days": ["mon"], "start": "08:00", "end": "09:00", "x": 1}]}, "unknown key"),
     ({"weekly": [{"action": "pause", "days": ["mon"], "start": "08:00", "end": "12:00"},

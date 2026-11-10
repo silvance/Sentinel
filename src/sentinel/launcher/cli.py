@@ -14,6 +14,7 @@ Technician / support commands (same executable):
     Sentinel.exe admin-pin [--config FILE]             set the operator screen's administrator PIN
     Sentinel.exe export run --config FILE --target DRIVE   export new recordings to a review drive
     Sentinel.exe drives list|classify|prepare|eject ...  identify and prepare drives (administrator)
+    Sentinel.exe motion-test [--seconds N]             show what counts as motion (tune [motion])
     Sentinel.exe stop [--timeout S] [--config FILE]    graceful stop of the background recorder
     Sentinel.exe status [--json] | check-config | diagnostics [--out DIR] | schedule [--days N]
     Sentinel.exe about [--verify]                      version, paths, bundled tools, build manifest
@@ -372,6 +373,8 @@ def build_parser() -> argparse.ArgumentParser:
     add("check-config", "validate the configuration and tools")
     p = add("schedule", "show when the recording schedule records and pauses (technician)")
     p.add_argument("--days", type=int, default=14)
+    p = add("motion-test", "watch the camera and show what counts as motion, to tune [motion] (technician)")
+    p.add_argument("--seconds", type=float, default=60.0)
     p = add("diagnostics", "write a diagnostic report for support")
     p.add_argument("--out")
     p = add("about", "version, folders, bundled tools and build manifest")
@@ -421,6 +424,19 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_stop(args)
     if args.cmd == "about":
         return cmd_about(args)
+    if args.cmd == "motion-test":
+        cfg_path = _resolve(args.config)
+        if cfg_path is None:
+            print("No configuration file found (run 'setup' first).")
+            return EXIT_CONFIG
+        try:
+            cfg = load_config(cfg_path)
+        except ConfigError as exc:
+            print(f"configuration error: {exc}")
+            return EXIT_CONFIG
+        from ..motion import run_motion_test
+
+        return run_motion_test(cfg, args.seconds)
     extra: list[str] = []
     if args.cmd == "status" and args.json:
         extra.append("--json")

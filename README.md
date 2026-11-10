@@ -29,7 +29,9 @@ FFmpeg 9.0.1, simulated camera). Release preparation (branch `release-prep`): th
 `Sentinel.exe`; set up in advance without the camera (`setup --camera-later`, then `set-camera` on site;
 P-002 until then); review export and drive tools reachable from `Sentinel.exe` (`export`, `drives`);
 third-party licences and the LGPL source offer in the build (`licences/`, `packaging/fetch_sources.py`);
-a printable bench-test, soak and dry-run checklist ([docs/09](docs/09_BENCH_TEST.md)).
+a printable bench-test, soak and dry-run checklist ([docs/09](docs/09_BENCH_TEST.md)); motion-triggered
+recording outside set hours (schedule action `motion`, `[motion]`, `Sentinel.exe motion-test`;
+[docs/branches/motion-recording.md](docs/branches/motion-recording.md)).
 
 ## Not yet done
 Anything on the real camera, real removable drives, an administrator service install, Linux

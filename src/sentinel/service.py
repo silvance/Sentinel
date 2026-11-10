@@ -59,6 +59,7 @@ from .ledger_timing import insert_clock_observation
 from .recorder.supervisor import RecordingSupervisor
 from .recorder.timebase import ClockStepDetector, read_clock_pair
 from .status import Measurements, StatusDocument, apply_alerts, evaluate, fatal_status_document, write_status
+from .motion import MotionDetector, detection_url
 from .schedule import RecordingSchedule, pause_message, render_plan
 from .storage.monitor import DiskUsage, StorageMonitor
 from .timesync import query_os_time_sync, sntp_offset
@@ -143,6 +144,8 @@ class RecorderService:
         self._archive_view: Any = None               # sentinel.archive.status.RecorderArchiveView when enabled
         # [schedule]: planned pauses (sentinel.schedule); None = record all the time.
         self.schedule = RecordingSchedule(cfg.schedule) if cfg.schedule.enabled else None
+        # Schedule action "motion": Sentinel's own motion detector (sentinel.motion).
+        self.motion: MotionDetector | None = None
         # Unattended laptop: keep Windows from idle-sleeping, check the power plan (sentinel.power).
         self.keep_awake: KeepAwake | None = None
         self._power: dict[str, Any] = {}
@@ -231,10 +234,17 @@ class RecorderService:
         self.keep_awake = KeepAwake().start()
         if self.schedule is not None:
             log.info("recording schedule is on:\n%s", render_plan(self.schedule, self.clock.wall(), days=7))
+        if self.schedule is not None and self.schedule.uses_motion and not cfg.camera.pending:
+            url = detection_url(url_with_credentials(cfg.camera.url, creds), cfg.motion.stream_path)
+            self.motion = MotionDetector(cfg.tools.ffmpeg, url, cfg.motion, cfg.camera.transport,
+                                         cfg.camera.input_format, self.platform.low_priority_popen_kwargs()).start()
+            log.info("motion detection on (%s; keep recording %.0f s after the last motion)",
+                     f"second stream {cfg.motion.stream_path}" if cfg.motion.stream_path else "main stream key frames",
+                     cfg.motion.keep_recording_s)
         self.supervisor = RecordingSupervisor(
             cfg, self.ledger, self.platform, self.storage, self.finalizer,
             url_with_credentials(cfg.camera.url, creds), self.stop_event, clock=self.clock,
-            ffmpeg_version=version, tick=self._tick, schedule=self.schedule)
+            ffmpeg_version=version, tick=self._tick, schedule=self.schedule, motion=self.motion)
         self._write_status(force=True)
         self.platform.notify("READY=1")
         exit_code = EXIT_OK
@@ -266,6 +276,8 @@ class RecorderService:
                 self.retention.stop()
             if self.keep_awake is not None:
                 self.keep_awake.stop()
+            if self.motion is not None:
+                self.motion.stop()
             if not drained:
                 log.error("finaliser did not drain before shutdown; recovery will complete it on next start")
             if self.integrity.alive:
@@ -285,6 +297,16 @@ class RecorderService:
                 self._clock_obs_thread.join(30)
             self.ledger.close()
         return exit_code
+
+    def _motion_broken(self) -> bool:
+        """W-001: a motion period is in force but the detector gets no pictures (it then records)."""
+        m, s = self.motion, self.schedule
+        if m is None or s is None:
+            return False
+        try:
+            return s.mode_at(self.clock.wall()) == "motion" and not m.healthy() and not m.warming_up()
+        except Exception:
+            return False
 
     def _audit_start(self) -> None:
         assert self.ledger is not None
@@ -502,10 +524,12 @@ class RecorderService:
         attempts, unstable, last_end = 0, 0, None
         clock_anomaly = now < self._clock_anomaly_until
         paused, resume_epoch, resumed_mono, pause_since = False, None, None, None
+        motion_idle = False
         if sup is not None:
             with sup.live.lock:
                 lv = sup.live
                 paused, resume_epoch, resumed_mono = lv.scheduled_pause, lv.resume_epoch, lv.resumed_mono
+                motion_idle = lv.motion_idle
                 pause_since = lv.pause_since_epoch
                 ffmpeg_running, media_seen, in_backoff = lv.ffmpeg_running, lv.media_seen, lv.in_backoff
                 since_adv = (now - lv.last_advance_mono) if lv.last_advance_mono is not None else None
@@ -597,7 +621,7 @@ class RecorderService:
         candidates = []
         if last_media is not None:
             candidates.append(now - last_media)
-        gap_is_pause = bool(gap and gap.get("reason") == "scheduled_pause")
+        gap_is_pause = bool(gap and gap.get("reason") in ("scheduled_pause", "motion_idle"))
         if gap and gap.get("seconds") is not None and not gap_is_pause:   # a planned pause is not an outage
             candidates.append(gap["seconds"])
         if not candidates:
@@ -622,7 +646,8 @@ class RecorderService:
             corrupt_recent=corrupt_recent, verify_problem=verify_problem, verify_critical=verify_critical,
             ledger_altered=ledger_altered, ledger_unprotected=ledger_unprotected, simulated=cfg.camera.development_source,
             scheduled_pause=paused, resumed_s=(now - resumed_mono) if resumed_mono is not None else None,
-            camera_pending=cfg.camera.pending)
+            camera_pending=cfg.camera.pending, motion_idle=motion_idle,
+            motion_broken=self._motion_broken())
         d = evaluate(m, rec.stall_timeout_s, rec.segment_seconds, rec.connect_timeout_s, rec.escalate_after_s)
         if self.schedule is not None:
             for a in d.alerts:
@@ -651,6 +676,11 @@ class RecorderService:
                             "next_change_utc": iso_utc(nxt) if nxt else None,
                             "next_change_text": self.schedule.format_local(nxt) if nxt else None,
                             "next_change_is": ("record" if paused else "pause") if nxt else None}
+        if self.motion is not None and self.schedule is not None:
+            doc.motion = {**self.motion.snapshot(), "mode_now": self.schedule.mode_at(self.clock.wall()),
+                          "waiting": motion_idle,
+                          "source": f"second stream {cfg.motion.stream_path}" if cfg.motion.stream_path
+                          else "main stream key frames"}
         alerts = list(d.alerts)
         if self._power_risks:
             h = make_alert("H-001", Severity.WARNING, detail={"risks": list(self._power_risks)})
@@ -863,6 +893,7 @@ def banner(doc: dict | None, problem: str | None) -> str:
         body = alert["message"]
     else:
         title = {"RECORDING": "RECORDING NORMALLY", "STARTING": "STARTING", "PAUSED": "PAUSED BY SCHEDULE",
+                 "WATCHING": "WATCHING FOR MOTION",
                  "CAMERA_NOT_SET_UP": "NOT RECORDING: CAMERA NOT ADDED YET"}.get(
             (doc or {}).get("overall", ""), str((doc or {}).get("overall", "UNKNOWN")))
         body = alert["message"] if alert else "No problems detected."

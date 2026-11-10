@@ -52,6 +52,8 @@ class Measurements:
     scheduled_pause: bool = False               # the recording schedule says pause (planned; P-001)
     resumed_s: float | None = None              # seconds since a scheduled pause ended (reconnect grace)
     camera_pending: bool = False                # set up with "camera later"; no camera yet (P-002)
+    motion_idle: bool = False                   # motion period, waiting for motion (planned; P-003)
+    motion_broken: bool = False                 # motion period but the detector gets no pictures (W-001)
 
 
 @dataclass
@@ -108,6 +110,8 @@ def evaluate(m: Measurements, stall_timeout_s: float, segment_seconds: float, co
         alerts.append(make_alert("T-002", Severity.WARNING))
     if m.unstable_restarts >= 5:
         alerts.append(make_alert("R-004", Severity.WARNING, detail={"restarts_10min": m.unstable_restarts}))
+    if m.motion_broken:
+        alerts.append(make_alert("W-001", Severity.WARNING))
     if m.simulated:
         # First among equal-severity alerts, so the single-alert banner shows "not evidence"
         # rather than another warning (e.g. T-002 on a host whose time service is stopped).
@@ -117,12 +121,16 @@ def evaluate(m: Measurements, stall_timeout_s: float, segment_seconds: float, co
     paused = False
     fatal = bool(m.component_errors) or bool(m.storage_error)
     pending = False
+    watching = False
     if flowing and not sealing_ok:
         alerts.append(make_alert("R-005", Severity.CRITICAL))
     elif m.camera_pending and not fatal:
         # Prepared in advance; nothing to connect to, so no outage alert and no escalation.
         pending = True
         alerts.append(make_alert("P-002", Severity.NOTICE))
+    elif m.motion_idle and not flowing and not fatal:
+        watching = True
+        alerts.append(make_alert("P-003", Severity.NOTICE))
     elif m.scheduled_pause and not flowing and not fatal:
         # Planned: no outage alert and no escalation. The recorder fills in the resume time.
         paused = True
@@ -150,6 +158,8 @@ def evaluate(m: Measurements, stall_timeout_s: float, segment_seconds: float, co
         overall = OverallStatus.STORAGE_FULL
     elif paused:
         overall = OverallStatus.PAUSED
+    elif watching and m.storage_level is not StorageLevel.CRITICAL:
+        overall = OverallStatus.WATCHING
     elif flowing and sealing_ok:
         overall = OverallStatus.STORAGE_WARNING if m.storage_level is StorageLevel.WARNING else OverallStatus.RECORDING
     elif flowing:
@@ -198,6 +208,7 @@ class StatusDocument:
     retention: dict[str, Any] = field(default_factory=dict)  # local retention (sentinel.retention): oldest kept, last pass
     schedule: dict[str, Any] = field(default_factory=dict)   # recording schedule: enabled, paused, resume time
     power: dict[str, Any] = field(default_factory=dict)      # keep-awake and power-plan check (sentinel.power)
+    motion: dict[str, Any] = field(default_factory=dict)     # motion-triggered recording (sentinel.motion)
 
 
 def fatal_status_document(code: str, camera_id: str, service: dict[str, Any] | None = None,

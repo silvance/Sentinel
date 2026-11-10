@@ -25,7 +25,7 @@ from ..alerts import Severity, make_alert
 from ..service import banner
 from ..status import read_status
 
-HEALTHY = ("RECORDING", "STORAGE_WARNING", "PAUSED")   # PAUSED: planned (recording schedule)
+HEALTHY = ("RECORDING", "STORAGE_WARNING", "PAUSED", "WATCHING")   # PAUSED: planned (recording schedule)
 CLOSE_NOTE = "Recording continues in the background when this window is closed."
 
 
