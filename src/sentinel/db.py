@@ -9,12 +9,16 @@ Integrity rules enforced here, not by callers:
   events) is ONE transaction, so a crash can never leave a sealed segment whose gaps are lost;
 * integrity fields of a sealed segment are write-once (NULL -> value only);
 * "latest" / ordering queries use insertion order (rowid), never wall-clock text, so a clock
-  change cannot reorder history.
+  change cannot reorder history;
+* every change to a covered row (runs, sealed segments, gaps, events) appends a hash-chain
+  entry in the same transaction (``ledgerchain``), so edits made outside this class are
+  detectable. Every write path below goes through ``_chained`` / ``_chain_insert``.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import threading
 import time
@@ -25,8 +29,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from . import ledgerchain as chain
 from .clock import iso_utc, parse_iso_utc
 from .models import ALLOWED_TRANSITIONS, TERMINAL_STATES, GapKind, SegmentState
+
+log = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 1
 
@@ -134,6 +141,22 @@ CREATE TABLE IF NOT EXISTS events (
 );
 """
 
+# Tamper-evidence hash chain (sentinel/ledgerchain.py; format in its docstring and docs/07).
+# Append-only: one entry per change to a covered row, written in the SAME transaction as the
+# change. Kept as its own block so other schema additions do not interleave with it.
+CHAIN_DDL = """
+CREATE TABLE IF NOT EXISTS ledger_chain (
+    seq               INTEGER PRIMARY KEY,    -- 0 = genesis; contiguous
+    kind              TEXT NOT NULL,          -- copy of record.kind (look-up only)
+    ref_table         TEXT,                   -- copy of record.table (look-up only)
+    ref_key           TEXT,                   -- copy of record.key (look-up only)
+    record            TEXT NOT NULL,          -- canonical JSON: exactly the text that was hashed
+    prev_hash         TEXT NOT NULL,          -- entry_hash of seq-1 (64 zeros for genesis)
+    entry_hash        TEXT NOT NULL           -- SHA-256(prev_hash || record), lowercase hex
+);
+CREATE INDEX IF NOT EXISTS ix_chain_ref ON ledger_chain(ref_table, ref_key, seq);
+"""
+
 # Columns that may be written once (NULL -> value) on a sealed segment, never changed after.
 WRITE_ONCE = frozenset({
     "sha256", "size_bytes", "rel_path", "start_utc", "end_utc", "duration_s",
@@ -175,6 +198,8 @@ class Ledger:
     def __init__(self, path: Path, readonly: bool = False) -> None:
         self.path = Path(path)
         self._lock = threading.RLock()
+        self.chain_discrepancies = 0     # rows found changed outside the recorder (this process)
+        self.chain_failures = 0          # chain entries that could not be written (this process)
         if readonly:
             uri = f"{self.path.resolve().as_uri()}?mode=ro"
             self._conn = sqlite3.connect(uri, uri=True, check_same_thread=False, isolation_level=None)
@@ -209,12 +234,73 @@ class Ledger:
     def _migrate(self) -> None:
         with self._lock:
             self._conn.executescript(DDL)
+            self._conn.executescript(CHAIN_DDL)
             row = self._conn.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()
             if row is None:
                 self._conn.execute("INSERT INTO schema_meta(key, value) VALUES ('schema_version', ?)",
                                    (str(SCHEMA_VERSION),))
             elif int(row["value"]) > SCHEMA_VERSION:
                 raise RuntimeError(f"ledger schema {row['value']} is newer than this software ({SCHEMA_VERSION})")
+            # New ledger, or one created before tamper evidence existed: start the chain with a
+            # genesis entry and adopt the rows already present (docs/07).
+            chain.ensure_genesis(self._conn, self.path.parent / chain.ANCHOR_LOG_NAME)
+
+    # ------------------------------------------------------------------ hash chain
+    def chain_head(self) -> chain.ChainHead | None:
+        with self._lock:
+            return chain.head_in(self._conn)
+
+    def _chain_guard(self, c: sqlite3.Connection, what: str, fn: Any) -> None:
+        """Run chain bookkeeping inside a savepoint. A chain failure must never stop evidence
+        from being recorded: the change is committed without its entry, the failure is counted
+        (operator alert V-003) and verification reports the unlogged row."""
+        c.execute("SAVEPOINT chain_entry")
+        try:
+            fn()
+        except Exception:
+            c.execute("ROLLBACK TO chain_entry")
+            c.execute("RELEASE chain_entry")
+            self.chain_failures += 1
+            log.critical("could not write recording-log chain entry (%s)", what, exc_info=True)
+        else:
+            c.execute("RELEASE chain_entry")
+
+    @contextmanager
+    def _chained(self, c: sqlite3.Connection, table: str, keys: Iterable[Any]) -> Iterator[None]:
+        """Track covered rows around a write in the caller's transaction (see ledgerchain)."""
+        tracked: list[chain.Tracked] | None = None
+        try:
+            tracked = [chain.track(c, table, k) for k in keys]
+        except Exception:
+            self.chain_failures += 1
+            log.critical("could not read recording-log chain before a write to %s", table, exc_info=True)
+        yield
+        if tracked is None:
+            return
+        found: list[chain.Discrepancy] = []
+
+        def work() -> None:
+            now = _now_iso()
+            for t in tracked:
+                d = chain.record_change(c, t, now)
+                if d is not None:
+                    found.append(d)
+            for d in found:
+                log.critical("ledger %s row %s was changed outside the recorder (expected log entry %s)",
+                             d.table, d.key, d.expected_entry)
+                cur = c.execute("INSERT INTO events(ts_utc, severity, category, code, message, detail) "
+                                "VALUES (?,?,?,?,?,?)",
+                                (now, "error", "integrity", "ledger_discrepancy",
+                                 "A recording log record was changed outside the recording software",
+                                 _j({"table": d.table, "key": d.key, "expected_entry": d.expected_entry,
+                                     "discrepancy_entry": d.seq})))
+                chain.record_insert(c, "events", cur.lastrowid, now)
+
+        self._chain_guard(c, f"{table} update", work)
+        self.chain_discrepancies += len(found)
+
+    def _chain_insert(self, c: sqlite3.Connection, table: str, key: Any) -> None:
+        self._chain_guard(c, f"{table} insert", lambda: chain.record_insert(c, table, key, _now_iso()))
 
     def query(self, sql: str, params: Iterable[Any] = ()) -> list[sqlite3.Row]:
         with self._lock:
@@ -229,10 +315,10 @@ class Ledger:
             self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
     # ------------------------------------------------------------------ events
-    @staticmethod
-    def _event_in(c: sqlite3.Connection, e: EventSpec) -> None:
-        c.execute("INSERT INTO events(ts_utc, severity, category, code, message, detail) VALUES (?,?,?,?,?,?)",
-                  (_now_iso(), e.severity, e.category, e.code, e.message, _j(e.detail)))
+    def _event_in(self, c: sqlite3.Connection, e: EventSpec) -> None:
+        cur = c.execute("INSERT INTO events(ts_utc, severity, category, code, message, detail) VALUES (?,?,?,?,?,?)",
+                        (_now_iso(), e.severity, e.category, e.code, e.message, _j(e.detail)))
+        self._chain_insert(c, "events", cur.lastrowid)
 
     def add_event(self, severity: str, category: str, code: str, message: str,
                   detail: dict[str, Any] | None = None) -> None:
@@ -243,14 +329,14 @@ class Ledger:
     def create_run(self, **cols: Any) -> None:
         keys = ", ".join(cols)
         marks = ", ".join("?" for _ in cols)
-        with self.tx() as c:
+        with self.tx() as c, self._chained(c, "recording_runs", [cols.get("run_id")]):
             c.execute(f"INSERT INTO recording_runs({keys}) VALUES ({marks})", tuple(cols.values()))
 
     def update_run(self, run_id: str, **cols: Any) -> None:
         if not cols:
             return
         sets = ", ".join(f"{k}=?" for k in cols)
-        with self.tx() as c:
+        with self.tx() as c, self._chained(c, "recording_runs", [run_id]):
             c.execute(f"UPDATE recording_runs SET {sets} WHERE run_id=?", (*cols.values(), run_id))
 
     def get_run(self, run_id: str) -> sqlite3.Row | None:
@@ -266,8 +352,10 @@ class Ledger:
 
     def mark_run_clock_anomaly(self, run_id: str) -> None:
         with self.tx() as c:
-            c.execute("UPDATE recording_runs SET clock_anomaly=1 WHERE run_id=?", (run_id,))
-            c.execute("UPDATE segments SET clock_anomaly=1, updated_utc=? WHERE run_id=?", (_now_iso(), run_id))
+            seg_ids = [r[0] for r in c.execute("SELECT segment_id FROM segments WHERE run_id=?", (run_id,))]
+            with self._chained(c, "recording_runs", [run_id]), self._chained(c, "segments", seg_ids):
+                c.execute("UPDATE recording_runs SET clock_anomaly=1 WHERE run_id=?", (run_id,))
+                c.execute("UPDATE segments SET clock_anomaly=1, updated_utc=? WHERE run_id=?", (_now_iso(), run_id))
 
     # ------------------------------------------------------------------ segments
     def insert_segment(self, *, camera_id: str, run_id: str, seq: int, rel_path: str,
@@ -279,7 +367,7 @@ class Ledger:
         base.update(cols)
         keys = ", ".join(base)
         marks = ", ".join("?" for _ in base)
-        with self.tx() as c:
+        with self.tx() as c, self._chained(c, "segments", [seg_id]):
             c.execute(f"INSERT INTO segments({keys}) VALUES ({marks})", tuple(base.values()))
         return seg_id
 
@@ -313,10 +401,11 @@ class Ledger:
                     raise IllegalTransition(f"sealed segment field(s) are write-once: {', '.join(locked)}")
             cols["updated_utc"] = _now_iso()
             sets = ", ".join(f"{k}=?" for k in cols)
-            c.execute(f"UPDATE segments SET {sets} WHERE segment_id=?", (*cols.values(), segment_id))
+            with self._chained(c, "segments", [segment_id]):
+                c.execute(f"UPDATE segments SET {sets} WHERE segment_id=?", (*cols.values(), segment_id))
 
     def transition(self, segment_id: str, new_state: SegmentState, **cols: Any) -> None:
-        with self.tx() as c:
+        with self.tx() as c, self._chained(c, "segments", [segment_id]):
             self._transition_in(c, segment_id, new_state, cols)
 
     @staticmethod
@@ -343,16 +432,20 @@ class Ledger:
             seg = c.execute("SELECT camera_id, run_id FROM segments WHERE segment_id=?", (segment_id,)).fetchone()
             if seg is None:
                 raise KeyError(segment_id)
-            self._transition_in(c, segment_id, new_state, cols)
-            c.execute("UPDATE segments SET clock_anomaly=1 WHERE segment_id=? AND "
-                      "(SELECT clock_anomaly FROM recording_runs r WHERE r.run_id=segments.run_id)=1", (segment_id,))
+            # The segment's chain entry (file SHA-256, times, state) is part of THIS transaction.
+            with self._chained(c, "segments", [segment_id]):
+                self._transition_in(c, segment_id, new_state, cols)
+                c.execute("UPDATE segments SET clock_anomaly=1 WHERE segment_id=? AND "
+                          "(SELECT clock_anomaly FROM recording_runs r WHERE r.run_id=segments.run_id)=1",
+                          (segment_id,))
             now = _now_iso()
             for g in internal_gaps:
-                c.execute("INSERT INTO recording_gaps(camera_id, kind, start_utc, end_utc, duration_s, reason, "
-                          "prev_segment_id, next_segment_id, detail, opened_utc, closed_utc) "
-                          "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                          (seg["camera_id"], str(GapKind.WITHIN_SEGMENT), g.start_utc, g.end_utc, g.duration_s,
-                           g.reason, segment_id, segment_id, _j(g.detail), now, now))
+                cur = c.execute("INSERT INTO recording_gaps(camera_id, kind, start_utc, end_utc, duration_s, reason, "
+                                "prev_segment_id, next_segment_id, detail, opened_utc, closed_utc) "
+                                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                                (seg["camera_id"], str(GapKind.WITHIN_SEGMENT), g.start_utc, g.end_utc,
+                                 g.duration_s, g.reason, segment_id, segment_id, _j(g.detail), now, now))
+                self._chain_insert(c, "recording_gaps", cur.lastrowid)
             closed = None
             if close_gap_at:
                 closed = self._close_gap_in(c, seg["camera_id"], close_gap_at, segment_id, seg["run_id"])
@@ -417,8 +510,9 @@ class Ledger:
             row = c.execute("SELECT gap_id FROM recording_gaps WHERE camera_id=? AND kind=? AND end_utc IS NULL",
                             (camera_id, str(GapKind.BETWEEN_RUNS))).fetchone()
             if row is not None:
-                c.execute("UPDATE recording_gaps SET attempts=attempts+1, ended_run_id=? WHERE gap_id=?",
-                          (ended_run_id, row["gap_id"]))
+                with self._chained(c, "recording_gaps", [row["gap_id"]]):
+                    c.execute("UPDATE recording_gaps SET attempts=attempts+1, ended_run_id=? WHERE gap_id=?",
+                              (ended_run_id, row["gap_id"]))
                 c.execute("UPDATE recording_runs SET gap_recorded=1 WHERE run_id=?", (ended_run_id,))
                 return int(row["gap_id"])
             cur = c.execute(
@@ -426,11 +520,11 @@ class Ledger:
                 "start_basis, detail, opened_utc) VALUES (?,?,?,?,?,?,?,?,?)",
                 (camera_id, str(GapKind.BETWEEN_RUNS), start_utc, reason, prev_segment_id, ended_run_id,
                  start_basis, _j(detail), _now_iso()))
+            self._chain_insert(c, "recording_gaps", cur.lastrowid)
             c.execute("UPDATE recording_runs SET gap_recorded=1 WHERE run_id=?", (ended_run_id,))
             return int(cur.lastrowid or 0)
 
-    @staticmethod
-    def _close_gap_in(c: sqlite3.Connection, camera_id: str, end_utc: str, next_segment_id: str,
+    def _close_gap_in(self, c: sqlite3.Connection, camera_id: str, end_utc: str, next_segment_id: str,
                       next_run_id: str) -> sqlite3.Row | None:
         row = c.execute("SELECT * FROM recording_gaps WHERE camera_id=? AND kind=? AND end_utc IS NULL",
                         (camera_id, str(GapKind.BETWEEN_RUNS))).fetchone()
@@ -447,9 +541,10 @@ class Ledger:
             duration = parse_iso_utc(end_utc) - parse_iso_utc(row["start_utc"])
             if duration < 0:
                 anomaly = 1  # time went backwards between runs: clock was changed
-        c.execute("UPDATE recording_gaps SET end_utc=?, duration_s=?, next_segment_id=?, closed_utc=?, "
-                  "clock_anomaly=? WHERE gap_id=?",
-                  (end_utc, duration, next_segment_id, _now_iso(), anomaly, row["gap_id"]))
+        with self._chained(c, "recording_gaps", [row["gap_id"]]):
+            c.execute("UPDATE recording_gaps SET end_utc=?, duration_s=?, next_segment_id=?, closed_utc=?, "
+                      "clock_anomaly=? WHERE gap_id=?",
+                      (end_utc, duration, next_segment_id, _now_iso(), anomaly, row["gap_id"]))
         return c.execute("SELECT * FROM recording_gaps WHERE gap_id=?", (row["gap_id"],)).fetchone()
 
     def close_gap(self, camera_id: str, end_utc: str, next_segment_id: str, next_run_id: str) -> sqlite3.Row | None:
@@ -458,18 +553,23 @@ class Ledger:
 
     def flag_open_gap_clock_anomaly(self, camera_id: str) -> None:
         with self.tx() as c:
-            c.execute("UPDATE recording_gaps SET clock_anomaly=1 WHERE camera_id=? AND end_utc IS NULL", (camera_id,))
+            ids = [r[0] for r in c.execute("SELECT gap_id FROM recording_gaps WHERE camera_id=? AND end_utc IS NULL",
+                                           (camera_id,))]
+            with self._chained(c, "recording_gaps", ids):
+                c.execute("UPDATE recording_gaps SET clock_anomaly=1 WHERE camera_id=? AND end_utc IS NULL",
+                          (camera_id,))
 
     def add_internal_gap(self, camera_id: str, segment_id: str, start_utc: str | None, end_utc: str | None,
                          duration_s: float | None, reason: str = "timestamp_discontinuity",
                          detail: dict[str, Any] | None = None) -> None:
         now = _now_iso()
         with self.tx() as c:
-            c.execute("INSERT INTO recording_gaps(camera_id, kind, start_utc, end_utc, duration_s, reason, "
-                      "prev_segment_id, next_segment_id, detail, opened_utc, closed_utc) "
-                      "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                      (camera_id, str(GapKind.WITHIN_SEGMENT), start_utc, end_utc, duration_s,
-                       reason, segment_id, segment_id, _j(detail), now, now))
+            cur = c.execute("INSERT INTO recording_gaps(camera_id, kind, start_utc, end_utc, duration_s, reason, "
+                            "prev_segment_id, next_segment_id, detail, opened_utc, closed_utc) "
+                            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                            (camera_id, str(GapKind.WITHIN_SEGMENT), start_utc, end_utc, duration_s,
+                             reason, segment_id, segment_id, _j(detail), now, now))
+            self._chain_insert(c, "recording_gaps", cur.lastrowid)
 
     def gaps(self, camera_id: str) -> list[sqlite3.Row]:
         return self.query("SELECT * FROM recording_gaps WHERE camera_id=? ORDER BY gap_id", (camera_id,))

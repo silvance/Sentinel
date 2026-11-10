@@ -86,6 +86,8 @@ class ServiceConfig:
     log_level: str = "INFO"
     audit_interval_s: float = 600.0           # rolling re-verification of sealed segments
     janitor_interval_s: float = 60.0          # retry stuck segments, checkpoint ledger, tidy run dirs
+    chain_anchor_interval_s: float = 900.0    # copy the recording-log chain head to chain_heads.log
+    chain_verify_interval_s: float = 3600.0   # full recording-log chain verification (integrity worker)
     diagnostics_keep: int = 20
 
 
@@ -191,7 +193,8 @@ def _validate(cfg: AppConfig) -> None:
     if sto.critical_free_gb < 0 or sto.warning_free_gb < sto.critical_free_gb:
         raise ConfigError("[storage] require 0 <= critical_free_gb <= warning_free_gb")
     if any(v <= 0 for v in (cfg.service.poll_interval_s, cfg.service.status_interval_s,
-                            cfg.service.audit_interval_s, cfg.service.janitor_interval_s)):
+                            cfg.service.audit_interval_s, cfg.service.janitor_interval_s,
+                            cfg.service.chain_anchor_interval_s, cfg.service.chain_verify_interval_s)):
         raise ConfigError("[service] intervals must be positive")
     if cfg.service.log_level.upper() not in ("DEBUG", "INFO", "WARNING", "ERROR"):
         raise ConfigError("[service] log_level must be DEBUG, INFO, WARNING or ERROR")

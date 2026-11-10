@@ -7,6 +7,7 @@ One ZIP file, readable without Sentinel installed:
     events.csv             recent ledger events
     runs.csv / gaps.csv    recent recording runs and recording gaps
     segments.csv           recent segment metadata (states, times, hashes) - NO VIDEO
+    ledger_chain.json      recording-log hash-chain head and a fresh tamper check (ledgerchain)
     logs/recorder.log*     tails of the recorder log (credentials redacted again on export)
     config.toml            the configuration file (contains no credentials by design; redacted anyway)
     MANIFEST.sha256        SHA-256 of every file above
@@ -33,6 +34,7 @@ from .clock import compact_utc, iso_utc
 from .config import AppConfig
 from .credentials import redact
 from .db import Ledger
+from .ledgerchain import ANCHOR_LOG_NAME, append_anchor, current_chain_head, verify_ledger
 from .media.probe import ffmpeg_version
 
 log = logging.getLogger(__name__)
@@ -81,6 +83,7 @@ def build_report(cfg: AppConfig, reason: str = "requested", out_dir: Path | None
     counts: dict[str, int] = {}
     integrity = "ledger not found"
     open_gap = None
+    chain_head_line = chain_line = "ledger not found"
     if db_path.exists():
         led = Ledger(db_path, readonly=True)
         try:
@@ -100,8 +103,30 @@ def build_report(cfg: AppConfig, reason: str = "requested", out_dir: Path | None
                 "FROM segments ORDER BY rowid DESC LIMIT 1000")).encode("utf-8")
             g = led.open_gap(cfg.camera.id)
             open_gap = dict(g) if g else None
+            head = current_chain_head(led)
         finally:
             led.close()
+        # Every report carries the recording-log chain head (an external anchor once the report
+        # leaves the machine) and a fresh chain check. Files are not re-hashed here (slow).
+        try:
+            chain_rep = verify_ledger(db_path)
+            chain_doc = chain_rep.to_dict(max_findings=100)
+            chain_line = ("intact" if chain_rep.ok else
+                          f"ALTERED - first problem at entry {chain_rep.first.position}: {chain_rep.first.message}"
+                          if chain_rep.first else "ALTERED")
+        except Exception as exc:  # the report must still be written
+            log.exception("chain verification failed while building diagnostic report")
+            chain_doc, chain_line = {"error": str(exc)}, f"could not be checked ({exc})"
+        chain_doc["head_at_report"] = head.to_dict() if head else None
+        files["ledger_chain.json"] = json.dumps(chain_doc, indent=2, sort_keys=True).encode("utf-8")
+        if head is not None:
+            chain_head_line = f"entry {head.seq}, fingerprint {head.hash} (written {head.utc})"
+            try:
+                append_anchor(cfg.data_path / ANCHOR_LOG_NAME, head, "diagnostic_report")
+            except OSError as exc:      # e.g. run by an administrator account without write access
+                log.warning("could not append chain head to anchor log: %s", exc)
+        else:
+            chain_head_line = "none (this recording log has no tamper-evidence chain)"
 
     for name in ("recorder.log", "recorder.log.1"):
         p = cfg.log_path / name
@@ -134,6 +159,8 @@ def build_report(cfg: AppConfig, reason: str = "requested", out_dir: Path | None
         f"Open recording gap: {json.dumps(open_gap, default=str) if open_gap else 'none'}",
         f"Segments by state:  {json.dumps(counts)}",
         f"Ledger integrity:   {integrity}",
+        f"Recording log head: {chain_head_line}",
+        f"Recording log check: {chain_line}",
         "",
         "All alerts:",
         *[f"  - {a.get('code')} [{a.get('severity_name')}] {a.get('message')}"
