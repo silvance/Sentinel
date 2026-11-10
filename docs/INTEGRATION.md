@@ -377,3 +377,12 @@ other merges were already committed).
   real USB drives / dock: NOT EXECUTED (see the branch notes).
 * Owner decisions still open: enabling retention; enabling Erase and Set Up Drive after the dock
   test; status readers group membership; `time_reference_server`.
+
+## Full suite (head after merge 10)
+`"…\.venv\Scripts\python.exe" -m pytest tests -p no:cacheprovider` → **1001 passed, 2 failed**
+(16 min 47 s, machine shared with other agents): `test_recorder_faults.py::test_continuous_recording_segments_are_contiguous_hashed_sealed`
+(a segment carried a warning on a "healthy" stream — consistent with the time-accuracy
+`time_correction_limited` flag seen under load in the export test) and
+`::test_camera_offline_shows_interrupted_and_recovers` (timing-sensitive, flaky on `main` per
+several branch notes). Re-run of `test_recorder_faults.py` alone: **11 passed**. Not chased further
+(load-dependent); worth watching whether `time_correction_limited` appears on an idle machine.
