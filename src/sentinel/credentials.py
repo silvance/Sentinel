@@ -1,9 +1,16 @@
 """Camera credential handling and redaction.
 
-Credentials live in a separate TOML file readable only by the service account::
+Credentials live in a separate file readable only by the service account. Two formats:
 
-    username = "viewer"
-    password = "..."
+* plain TOML (Linux, and fallback on Windows)::
+
+      username = "viewer"
+      password = "..."
+
+* on Windows, the same TOML protected with DPAPI (written by
+  ``python -m sentinel.winsvc set-camera-credentials``): a first line starting with
+  :data:`DPAPI_MAGIC`, then the base64 DPAPI blob. Detected by content, so the configuration
+  only names the file (``credentials_file``) either way.
 
 They are injected into the RTSP URL only when building the FFmpeg argv, and every log
 record passes through :func:`redact`. See docs/02 risk B4 for the residual argv exposure.
@@ -11,11 +18,16 @@ record passes through :func:`redact`. See docs/02 risk B4 for the residual argv 
 
 from __future__ import annotations
 
+import base64
+import binascii
+import json
 import re
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote, urlsplit, urlunsplit
+
+DPAPI_MAGIC = b"SENTINEL-DPAPI-CREDENTIALS v1"
 
 
 class CredentialError(ValueError):
@@ -26,18 +38,57 @@ class CredentialError(ValueError):
 class Credentials:
     username: str
     password: str
+    protection: str = "plaintext"          # "plaintext" | "dpapi"
 
     def __repr__(self) -> str:  # never print secrets, even in tracebacks
-        return "Credentials(username='***', password='***')"
+        return f"Credentials(username='***', password='***', protection={self.protection!r})"
+
+
+def credentials_toml(username: str, password: str) -> str:
+    """Serialise credentials as the TOML credentials format (JSON string escapes are valid TOML)."""
+    return f"username = {json.dumps(username, ensure_ascii=False)}\npassword = {json.dumps(password, ensure_ascii=False)}\n"
+
+
+def _decrypt_dpapi_file(data: bytes, p: Path) -> str:
+    lines = data.splitlines()
+    if len(lines) < 2:
+        raise CredentialError(f"protected credentials file is incomplete: {p}")
+    try:
+        blob = base64.b64decode(b"".join(lines[1:]), validate=True)
+    except (binascii.Error, ValueError):
+        raise CredentialError(f"protected credentials file is damaged: {p}") from None
+    from .winsvc.dpapi import DpapiError, unprotect
+
+    try:
+        plain = unprotect(blob)
+    except DpapiError as exc:
+        raise CredentialError(f"protected credentials file cannot be decrypted on this computer: {p} "
+                              f"({exc.strerror or exc})") from None
+    try:
+        return plain.decode("utf-8")
+    except UnicodeDecodeError:
+        raise CredentialError(f"protected credentials file is damaged: {p}") from None
 
 
 def load_credentials(path: str | Path) -> Credentials:
     p = Path(path)
     try:
-        with p.open("rb") as fh:
-            raw = tomllib.load(fh)
+        data = p.read_bytes()
     except FileNotFoundError:
         raise CredentialError(f"credentials file not found: {p}") from None
+    except OSError as exc:
+        raise CredentialError(f"credentials file cannot be read: {p} ({exc.strerror})") from None
+    protection = "plaintext"
+    if data.startswith(DPAPI_MAGIC):
+        text = _decrypt_dpapi_file(data, p)
+        protection = "dpapi"
+    else:
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            raise CredentialError(f"credentials file is not valid TOML: {p}") from None
+    try:
+        raw = tomllib.loads(text)
     except tomllib.TOMLDecodeError:
         raise CredentialError(f"credentials file is not valid TOML: {p}") from None
     user, pw = raw.get("username"), raw.get("password")
@@ -46,7 +97,7 @@ def load_credentials(path: str | Path) -> Credentials:
     extra = set(raw) - {"username", "password"}
     if extra:
         raise CredentialError("credentials file has unexpected keys")
-    return Credentials(user, pw)
+    return Credentials(user, pw, protection)
 
 
 def url_with_credentials(url: str, creds: Credentials | None) -> str:
