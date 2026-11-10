@@ -47,10 +47,27 @@ def _record(tmp_path: Path, clock_rate: float, seconds: float, clock: DriftingCl
     return h
 
 
+def _recording_runs(h: Harness) -> list[dict]:
+    """Runs that recorded footage. On a saturated machine the first connection attempt can time out
+    before any video arrives (the recorder then simply retries); such a leading attempt is not a
+    restart of recording and has nothing to do with time accuracy, so it is set aside here, but
+    only if it recorded nothing."""
+    with_footage = {s["run_id"] for s in h.segments()}
+    runs = h.runs()
+    first = next((i for i, r in enumerate(runs) if r["run_id"] in with_footage), len(runs))
+    for r in runs[:first]:
+        assert r["end_reason"] == "connect_timeout", f"unexpected run before recording began: {r['end_reason']}"
+    return runs[first:]
+
+
+def _run(h: Harness) -> dict:
+    return _recording_runs(h)[0]
+
+
 def _errors(h: Harness) -> tuple[list[float], list[float]]:
     """Per sealed segment after segment 0 (see module docstring):
     (new end_utc - reception, old single-anchor end - reception)."""
-    run = h.runs()[0]
+    run = _run(h)
     anchor = parse_iso_utc(run["anchor_utc"])
     new, old = [], []
     for s in h.segments("FINALIZED")[1:]:
@@ -61,7 +78,7 @@ def _errors(h: Harness) -> tuple[list[float], list[float]]:
 
 
 def _common_checks(h: Harness) -> list[dict]:
-    runs = h.runs()
+    runs = _recording_runs(h)
     assert len(runs) == 1, f"slow drift must not restart recording: {[r['end_reason'] for r in runs]}"
     assert runs[0]["end_reason"] == "graceful_stop"
     assert runs[0]["time_method"] == "reception_tracking_v1"
@@ -95,7 +112,7 @@ def test_slow_camera_and_drifting_pc_clock_stay_on_reception_time(tmp_path: Path
     # The single-anchor scheme would have drifted: about -1.5 % of elapsed time by the end.
     assert old[-1] < -1.5, f"old scheme error only {old[-1]:+.3f} s"
     assert old[-1] < old[len(old) // 2] < old[1]
-    run = h.runs()[0]
+    run = _run(h)
     assert run["camera_drift_ppm"] == pytest.approx(-10000, abs=1500)       # camera slow
     assert run["host_clock_drift_ppm"] == pytest.approx(5000, abs=300)      # wall fast vs monotonic
     assert run["time_correction_s"] == pytest.approx(0.015 * run["last_stream_time_s"], abs=0.5)
@@ -129,7 +146,7 @@ def test_absorbed_freeze_is_still_a_gap_under_drift(tmp_path: Path) -> None:
     assert g[0]["duration_s"] == pytest.approx(12.0, abs=2.0)
     assert parse_iso_utc(g[0]["start_utc"]) == pytest.approx(t_freeze, abs=1.5)
     assert parse_iso_utc(g[0]["end_utc"]) == pytest.approx(t_resume, abs=1.5)
-    broken = h.runs()[0]
+    broken = _run(h)
     assert broken["end_reason"] == "timeline_discontinuity"
     assert broken["time_correction_limited_count"] == 0, "the absorbed jump leaked into the drift correction"
     assert broken["time_correction_s"] == pytest.approx(0.01 * broken["timeline_break_stream_s"], abs=0.3)
@@ -150,7 +167,7 @@ def test_fast_camera_stays_on_reception_time(tmp_path: Path) -> None:
     worst = max(new, key=abs)
     assert abs(worst) <= TOL_S, f"segment end strayed {worst:+.3f} s from reception time: {new}"
     assert old[-1] > 0.8, f"old scheme error only {old[-1]:+.3f} s"
-    run = h.runs()[0]
+    run = _run(h)
     assert run["camera_drift_ppm"] == pytest.approx(10000, abs=1500)        # camera fast
     assert abs(run["host_clock_drift_ppm"] or 0.0) < 300                    # real clocks: no exaggerated drift
 

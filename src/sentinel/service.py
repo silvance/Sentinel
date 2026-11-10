@@ -268,6 +268,9 @@ class RecorderService:
                 self.keep_awake.stop()
             if not drained:
                 log.error("finaliser did not drain before shutdown; recovery will complete it on next start")
+            if self.integrity.alive:
+                log.warning("video fingerprinting is still busy at shutdown; the unfinished segment is "
+                            "fingerprinted again at the next start")
             self.ledger.add_event("audit", "recorder", "service_stop", "Recorder service stopped",
                                   {"drained": drained, "exit_code": exit_code})
             self._anchor_chain("service_stop")

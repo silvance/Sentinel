@@ -27,7 +27,7 @@ from pathlib import Path
 
 from ..clock import iso_utc
 from ..config import AppConfig
-from ..db import Ledger
+from ..db import Ledger, LedgerClosed
 from ..hashing import sha256_file
 from ..ledgerchain import VerifyReport, verify_ledger
 from ..media.probe import ProbeError
@@ -104,6 +104,8 @@ class IntegrityWorker:
                 except queue.Empty:
                     continue
                 self.hash_segment(seg_id)
+            except LedgerClosed:
+                return                      # service stopped while this worker was busy
             except Exception as exc:
                 log.exception("integrity worker error")
                 self.recent_errors.append((time.monotonic(), f"{type(exc).__name__}: {exc}"))
@@ -126,6 +128,11 @@ class IntegrityWorker:
                                   f"Video content fingerprint could not be computed: {exc}",
                                   {"segment_id": segment_id})
             self.recent_errors.append((time.monotonic(), str(exc)))
+            return False
+        if self._stop.is_set():
+            # Shutting down: the result is discarded (the .partial sidecar is replaced next time)
+            # and this segment is fingerprinted again after the next start.
+            log.info("content hash of %s interrupted by shutdown; redone at next start", seg["rel_path"])
             return False
         fh_rel = fh_sha = None
         if frames_path is not None and tmp is not None:

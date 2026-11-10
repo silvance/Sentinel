@@ -339,6 +339,10 @@ WRITE_ONCE = frozenset({
 }) | TIMING_WRITE_ONCE
 
 
+class LedgerClosed(RuntimeError):
+    """The recording database was closed (service shutting down); nothing was written."""
+
+
 class IllegalTransition(RuntimeError):
     pass
 
@@ -472,6 +476,8 @@ class Ledger:
     @contextmanager
     def tx(self) -> Iterator[sqlite3.Connection]:
         with self._lock:
+            if self._conn is None:
+                raise LedgerClosed("the recording database is closed")
             self._conn.execute("BEGIN IMMEDIATE")
             try:
                 yield self._conn
@@ -616,6 +622,8 @@ class Ledger:
     def query(self, sql: str, params: Iterable[Any] = ()) -> list[sqlite3.Row]:
         if not self.readonly:
             with self._lock:
+                if self._conn is None:
+                    raise LedgerClosed("the recording database is closed")
                 return self._conn.execute(sql, tuple(params)).fetchall()
 
         def attempt() -> list[sqlite3.Row]:

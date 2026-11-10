@@ -25,12 +25,17 @@ removed archive drive is cleared from this computer when it runs low), and a
 click-to-run packaging build. Since then (2026-11-10): a recording schedule (pause/resume at set days and
 times, P-001), keep-awake and power settings for an unattended laptop (H-001), and a "Lock this computer"
 button (docs/branches/schedule-and-unattended.md). Full suite on the merged code: 1003 passed (Windows 11,
-FFmpeg 9.0.1, simulated camera).
+FFmpeg 9.0.1, simulated camera). Release preparation (branch `release-prep`): the operator screen in
+`Sentinel.exe`; set up in advance without the camera (`setup --camera-later`, then `set-camera` on site;
+P-002 until then); review export and drive tools reachable from `Sentinel.exe` (`export`, `drives`);
+third-party licences and the LGPL source offer in the build (`licences/`, `packaging/fetch_sources.py`);
+a printable bench-test, soak and dry-run checklist ([docs/09](docs/09_BENCH_TEST.md)).
 
 ## Not yet done
 Anything on the real camera, real removable drives, an administrator service install, Linux
 (except a WSL build), or Python 3.12; the operator screen cannot yet start
-an export (needs a request interface to the service). The operator screen is bundled in the build
+an export (needs a request interface to the service; a technician can run `Sentinel.exe export run`).
+The repository has no LICENSE file yet (pyproject.toml says Apache-2.0; the owner must confirm). The operator screen is bundled in the build
 (2026-11-10) but has not been looked at on a real display from the built program yet.
 
 ## Click-to-run program (branch design/single-executable)
