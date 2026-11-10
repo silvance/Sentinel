@@ -85,7 +85,16 @@ def test_gap_row_splits_file_even_if_times_touch() -> None:
     assert [len(g.segments) for g in group_segments(segs, [between], ZoneInfo("UTC"))] == [4, 2]
 
 
-@pytest.mark.parametrize("change", ["run", "seq", "time", "resolution", "codec"])
+def test_short_last_segment_followed_by_gap_stays_in_file() -> None:
+    # Regression (seen in integration): a 1-frame final segment, then the graceful-stop gap.
+    segs = _chain(_ep(2026, 11, 9, 14), 3, dur=2.0)
+    segs.append(_seg("R1-3", _ep(2026, 11, 9, 14, 0, 6.0), 0.033, "R1", 3))
+    gap = {"kind": "between_runs", "prev_segment_id": "R1-3", "next_segment_id": None,
+           "start_utc": segs[-1]["end_utc"], "end_utc": None, "reason": "graceful_stop"}
+    assert [len(g.segments) for g in group_segments(segs, [gap], ZoneInfo("UTC"))] == [4]
+
+
+@pytest.mark.parametrize("change",["run", "seq", "time", "resolution", "codec"])
 def test_non_contiguous_segments_start_new_file(change: str) -> None:
     segs = _chain(_ep(2026, 11, 9, 14), 4)
     s = segs[2]

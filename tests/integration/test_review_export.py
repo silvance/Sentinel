@@ -361,6 +361,13 @@ def test_ejector_is_called_and_safe_to_remove_shown(env: Env) -> None:
     assert env.batch(res.batch_id)["ejected"] == 1  # type: ignore[arg-type]
 
 
+def test_target_on_recording_storage_is_refused(env: Env) -> None:
+    t = env.drive("same")
+    res = ReviewExporter(env.cfg, t, ledger=env.ledger).run()      # allow_same_volume defaults to False
+    assert res.state == "FAILED" and res.code == "E-005" and "same volume" in (res.detail or "")
+    assert _files(t.root) == []
+
+
 def test_drive_full_before_start(env: Env) -> None:
     t = env.drive("small")
     res = env.export(t, io=FaultyIO(free=10 * 1024 * 1024))

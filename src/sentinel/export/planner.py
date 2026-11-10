@@ -126,11 +126,16 @@ def _joinable(g: Group, s: dict[str, Any], gaps: list[dict[str, Any]], tz: ZoneI
         return False
     if layout.hour_key(s_start, tz) != layout.hour_key(g.start, tz):
         return False
-    lo, hi = min(p_end, s_start) - tol / 2, max(p_end, s_start) + tol / 2
+    # The joint between the two segments, never reaching past the start of p or the end of s
+    # (a very short s followed by a gap must not look as if the gap were before it).
+    lo = max(parse_iso_utc(p["start_utc"]), min(p_end, s_start) - tol / 2)
+    hi = min(parse_iso_utc(s["end_utc"]), max(p_end, s_start) + tol / 2)
     for gap in gaps:
         if gap.get("kind") == "between_runs" and (gap.get("prev_segment_id") == p["segment_id"]
                                                   or gap.get("next_segment_id") == s["segment_id"]):
             return False
+        if gap.get("prev_segment_id") == s["segment_id"] or gap.get("next_segment_id") == p["segment_id"]:
+            continue   # a gap after s or before p is not between them
         g0, g1 = _t(gap.get("start_utc")), _t(gap.get("end_utc"))
         if g0 is None and g1 is None:
             continue
