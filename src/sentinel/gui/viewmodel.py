@@ -15,7 +15,8 @@ Rules (requirements U1, U7):
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -48,7 +49,8 @@ class StatusRead:
     doc: dict[str, Any] | None
     problem: str | None          # raw text from read_status; ADMINISTRATOR ONLY (may contain paths)
     kind: ReadKind
-    age_s: float | None          # heartbeat age when a document was read
+    age_s: float | None          # heartbeat age when a document was read (negative: heartbeat in the future)
+    frozen_s: float | None = None  # set when the heartbeat stopped changing (monotonic clock)
 
 
 def read_status_robust(path: Path, max_age_s: float = 15.0, attempts: int = 5,
@@ -58,11 +60,20 @@ def read_status_robust(path: Path, max_age_s: float = 15.0, attempts: int = 5,
     The recorder replaces the file atomically, but on Windows a read can still fail transiently
     (sharing violation) while ``os.replace`` runs. A failed read is retried a few times before it
     is reported as X-001, so a single unlucky refresh does not flash a false alarm.
+
+    ``read_status`` only flags a heartbeat that is too OLD. After the wall clock is set backwards a
+    dead recorder's heartbeat lies in the future (negative age) and would look fresh forever, so
+    here ``|age| > max_age_s`` is stale too. (A live recorder rewrites its heartbeat every ~2 s,
+    so after such a clock change this can show X-001 for at most one refresh.) A heartbeat that
+    stops changing is caught independently of any wall clock by :class:`HeartbeatWatch`.
     """
     doc: dict[str, Any] | None = None
     problem: str | None = None
     for i in range(max(1, attempts)):
-        doc, problem = read_status(path, max_age_s=max_age_s)
+        try:
+            doc, problem = read_status(path, max_age_s=max_age_s)
+        except (TypeError, ValueError, AttributeError) as exc:   # valid JSON, malformed document
+            doc, problem = None, f"status document malformed: {exc}"
         if doc is not None or not path.exists():
             break
         if i + 1 < attempts:
@@ -75,7 +86,39 @@ def read_status_robust(path: Path, max_age_s: float = 15.0, attempts: int = 5,
         age = None
     if problem:
         return StatusRead(doc, problem, ReadKind.STALE, age)
+    if age is None:
+        return StatusRead(doc, "heartbeat missing or not a number", ReadKind.STALE, None)
+    if abs(age) > max_age_s:
+        return StatusRead(doc, f"heartbeat is {-age:.0f} s in the future (wall clock changed?)", ReadKind.STALE, age)
     return StatusRead(doc, None, ReadKind.OK, age)
+
+
+class HeartbeatWatch:
+    """Detects a heartbeat that has stopped CHANGING, measured on the GUI's own monotonic clock.
+
+    Robust to any wall-clock change on either side: it never compares the heartbeat with the
+    current time, only notices that the value has not moved for longer than ``limit_s``.
+    """
+
+    def __init__(self, limit_s: float, mono: Callable[[], float] = time.monotonic) -> None:
+        self.limit_s = limit_s
+        self.mono = mono
+        self._value: Any = object()
+        self._changed_at: float | None = None
+
+    def observe(self, read: StatusRead) -> StatusRead:
+        if read.doc is None:
+            return read
+        now = self.mono()
+        value = read.doc.get("heartbeat_epoch")
+        if value != self._value or self._changed_at is None:
+            self._value, self._changed_at = value, now
+            return read
+        frozen = now - self._changed_at
+        if frozen > self.limit_s and read.kind is ReadKind.OK:
+            return replace(read, kind=ReadKind.STALE, frozen_s=frozen,
+                           problem=f"heartbeat unchanged for {frozen:.0f} s (monotonic)")
+        return read
 
 
 # --------------------------------------------------------------------------- view dataclasses
@@ -206,6 +249,11 @@ def _stale_detail(read: StatusRead, tz: ZoneInfo, now: float) -> str:
         hb_f = float(hb)
     except (TypeError, ValueError):
         return "The recorder has stopped reporting its status."
+    if read.frozen_s is not None:
+        # measured on this screen's own clock, so it is right even if the computer clock was changed
+        return f"The recorder's status has not changed for {tf.duration(read.frozen_s)}."
+    if hb_f > now:
+        return "The recorder's status shows a time later than this computer's clock, so it cannot be trusted."
     if doc.get("overall") == str(OverallStatus.STOPPED):
         return f"The recording service was shut down at {tf.when(hb_f, tz, now)}."
     return f"Last status update {tf.duration(now - hb_f)} ago, at {tf.when(hb_f, tz, now)}."
@@ -264,8 +312,10 @@ def drive_tile(export_available: bool) -> TileView:
     if not export_available:
         return TileView("Review drive", "Not available", Tone.NEUTRAL,
                         "The review-drive feature is not installed in this version.")
-    return TileView("Review drive", "Ready to use", Tone.NEUTRAL,
-                    "Press Prepare Review Drive to check and prepare a drive.")
+    # Installed but not connected to this screen (the GUI<->export interface is not defined yet).
+    return TileView("Review drive", "Not available here yet", Tone.NEUTRAL,
+                    "The review-drive feature cannot be started from this screen yet. "
+                    "Contact technical support to prepare a review drive.")
 
 
 def build_dashboard(read: StatusRead, *, tz: ZoneInfo, now: float | None = None,

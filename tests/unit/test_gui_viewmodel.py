@@ -21,7 +21,8 @@ from sentinel.gui import admin_pin, textfmt as tf
 from sentinel.gui.ledger_view import (SpanKind, build_timeline, load_exports, load_timeline, open_ledger,
                                       recording_since, snapshot)
 from sentinel.gui.report import save_diagnostic_report
-from sentinel.gui.viewmodel import (ReadKind, StatusRead, Tone, build_dashboard, read_status_robust)
+from sentinel.gui.viewmodel import (HeartbeatWatch, ReadKind, StatusRead, Tone, build_dashboard,
+                                    read_status_robust)
 from sentinel.models import OverallStatus, StorageLevel
 from sentinel.status import StatusDocument, apply_alerts, write_status
 
@@ -173,6 +174,51 @@ def test_stale_heartbeat_is_x001(tmp_path: Path) -> None:
     assert v.camera.value == "Unknown" and not v.live
 
 
+def test_heartbeat_in_the_future_is_x001(tmp_path: Path) -> None:
+    """Wall clock set backwards while the recorder is dead: negative age must not look fresh."""
+    p = tmp_path / "status.json"
+    write_doc(p, status_doc(base_measurements(), time.time(), heartbeat_age_s=-3600.0))
+    r = read_status_robust(p, max_age_s=15.0)
+    assert r.kind is ReadKind.STALE and r.age_s is not None and r.age_s < 0
+    v = build_dashboard(r, tz=TZ)
+    assert v.banner and v.banner.message == X001 and v.stale
+    assert "later than this computer's clock" in v.detail
+    # a heartbeat slightly in the future (within the limit) is normal clock jitter: still fresh
+    write_doc(p, status_doc(base_measurements(), time.time(), heartbeat_age_s=-2.0))
+    assert read_status_robust(p, max_age_s=15.0).kind is ReadKind.OK
+
+
+def test_malformed_heartbeat_is_x001_not_a_crash(tmp_path: Path) -> None:
+    p = tmp_path / "status.json"
+    doc = status_doc(base_measurements(), time.time())
+    doc["heartbeat_epoch"] = "not a number"
+    write_doc(p, doc)
+    r = read_status_robust(p, retry_sleep_s=0.0)
+    assert r.kind in (ReadKind.UNREADABLE, ReadKind.STALE)
+    assert build_dashboard(r, tz=TZ).banner.code == "X-001"
+
+
+def test_heartbeat_that_stops_changing_is_x001_on_monotonic_clock() -> None:
+    """Independent of any wall clock: the value simply stops moving."""
+    t = [0.0]
+    watch = HeartbeatWatch(15.0, mono=lambda: t[0])
+    doc = status_doc(base_measurements(), NOW)              # wall-clock fresh at every read
+    assert watch.observe(fresh(doc)).kind is ReadKind.OK
+    t[0] = 10.0
+    assert watch.observe(fresh(doc)).kind is ReadKind.OK
+    t[0] = 16.0
+    r = watch.observe(fresh(doc))
+    assert r.kind is ReadKind.STALE and r.frozen_s == pytest.approx(16.0)
+    v = build_dashboard(r, tz=TZ, now=NOW)
+    assert v.banner and v.banner.message == X001 and "has not changed for 16 s" in v.detail
+    doc2 = dict(doc, heartbeat_epoch=doc["heartbeat_epoch"] + 2)   # recorder alive again
+    t[0] = 17.0
+    assert watch.observe(fresh(doc2)).kind is ReadKind.OK
+    # a heartbeat that moves BACKWARDS (wall clock stepped back on a live recorder) is still a change
+    t[0] = 30.0
+    assert watch.observe(fresh(dict(doc, heartbeat_epoch=doc["heartbeat_epoch"] - 3600))).kind is ReadKind.OK
+
+
 def test_missing_and_unreadable_status_are_x001(tmp_path: Path) -> None:
     p = tmp_path / "status.json"
     r = read_status_robust(p)
@@ -320,6 +366,47 @@ def test_exports_none_yet_and_known_table(tmp_path: Path) -> None:
     led.close()
     ex = load_exports(db)
     assert ex.table == "export_batches" and ex.rows[0].outcome == "Completed" and ex.rows[0].drive == "SENTINEL_1"
+
+
+# The export branch's real schema (req/review-drive-export, src/sentinel/db.py EXPORT_DDL), reduced
+# to the columns this screen reads.
+EXPORT_BRANCH_DDL = """
+CREATE TABLE drives (drive_id TEXT PRIMARY KEY, label TEXT, identity TEXT NOT NULL,
+                     first_seen_utc TEXT NOT NULL, last_seen_utc TEXT NOT NULL);
+CREATE TABLE export_batches (batch_id TEXT PRIMARY KEY, purpose TEXT NOT NULL, camera_id TEXT NOT NULL,
+    drive_id TEXT NOT NULL REFERENCES drives(drive_id), state TEXT NOT NULL,
+    interval_start_utc TEXT NOT NULL, interval_end_utc TEXT NOT NULL, planned_utc TEXT NOT NULL,
+    finished_utc TEXT, error_code TEXT, error_detail TEXT, updated_utc TEXT NOT NULL);
+"""
+EXPORT_STATES = ["PLANNED", "COPYING", "VERIFYING", "MANIFEST", "EJECTING", "COMPLETE", "FAILED", "INTERRUPTED",
+                 "SOMETHING_NEW"]
+
+
+def test_exports_states_always_shown_in_plain_words(tmp_path: Path) -> None:
+    from sentinel.gui.ledger_view import EXPORT_OUTCOMES, OUTCOME_COMPLETED, OUTCOME_FAILED, OUTCOME_UNKNOWN
+    db = tmp_path / "sentinel.db"
+    led = Ledger(db)
+    for stmt in filter(str.strip, EXPORT_BRANCH_DDL.split(";")):
+        led.query(stmt)
+    with led.tx() as c:
+        c.execute("INSERT INTO drives VALUES ('d1', 'SENTINEL_1', '{}', ?, ?)", (iso_utc(NOW), iso_utc(NOW)))
+        for i, st in enumerate(EXPORT_STATES):
+            c.execute("INSERT INTO export_batches VALUES (?, 'review', 'CAM01', 'd1', ?, ?, ?, ?, ?, ?, ?, ?)",
+                      (f"b{i}", st, iso_utc(NOW - 7200), iso_utc(NOW - 3600), iso_utc(NOW - 600),
+                       iso_utc(NOW - 60) if st in ("COMPLETE", "FAILED") else None,
+                       "E-005" if st == "FAILED" else ("junk; C:\\x" if st == "INTERRUPTED" else None),
+                       "raw detail with C:\\path", iso_utc(NOW - 30)))
+    led.close()
+    ex = load_exports(db)
+    assert ex.table == "export_batches" and len(ex.rows) == len(EXPORT_STATES)
+    by_state = dict(zip(reversed(EXPORT_STATES), ex.rows))         # newest first
+    for st, row in by_state.items():
+        assert row.outcome in EXPORT_OUTCOMES and row.outcome.upper() != st
+        assert row.drive == "SENTINEL_1" and row.when_epoch is not None
+    assert by_state["COMPLETE"].outcome == OUTCOME_COMPLETED
+    assert by_state["FAILED"].outcome == OUTCOME_FAILED and by_state["FAILED"].error_code == "E-005"
+    assert by_state["INTERRUPTED"].error_code is None                # malformed code is not shown
+    assert by_state["SOMETHING_NEW"].outcome == OUTCOME_UNKNOWN
 
 
 def test_exports_unknown_schema_is_reported_not_guessed(tmp_path: Path) -> None:

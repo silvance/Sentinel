@@ -11,6 +11,7 @@ Pure builders (``build_timeline``) are separated from queries so they can be uni
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -282,27 +283,47 @@ def load_timeline(db_path: Path, camera_id: str, now: float, *, hours: float = 2
 
 
 # --------------------------------------------------------------------------- previous exports
+# Matches the export branch's ``export_batches`` (state PLANNED|COPYING|VERIFYING|MANIFEST|EJECTING|
+# COMPLETE|FAILED|INTERRUPTED, finished_utc/updated_utc/planned_utc, drive_id -> drives.label,
+# error_code E-0xx) and tolerates a few generic column names. Ledger strings are NEVER shown
+# directly: every state maps to a fixed plain-language outcome (unknown states included).
 EXPORT_TABLE_CANDIDATES = ("export_batches", "exports", "export_jobs")
-_TIME_COLS = ("completed_utc", "finished_utc", "ended_utc", "updated_utc", "created_utc", "started_utc")
+_TIME_COLS = ("finished_utc", "completed_utc", "ended_utc", "updated_utc", "planned_utc", "created_utc",
+              "started_utc")
 _STATE_COLS = ("state", "status")
 _DRIVE_COLS = ("drive_label", "label", "drive_name")
 _FROM_COLS = ("interval_start_utc", "from_utc", "range_start_utc")
 _TO_COLS = ("interval_end_utc", "to_utc", "range_end_utc")
-EXPORT_STATE_WORDS = {
-    "COMPLETE": "Completed",
-    "FAILED_ATTENTION": "Did not complete — needs attention",
-    "INTERRUPTED": "Interrupted — drive removed early",
-    "REJECTED": "Drive could not be used",
+OUTCOME_COMPLETED = "Completed"
+OUTCOME_FAILED = "Did not complete — needs attention"
+OUTCOME_INTERRUPTED = "Interrupted — the drive was removed before it finished"
+OUTCOME_REJECTED = "The drive could not be used"
+OUTCOME_NOT_FINISHED = "Not finished"
+OUTCOME_UNKNOWN = "Result not recognised by this screen"
+EXPORT_STATE_WORDS: dict[str, str] = {
+    "COMPLETE": OUTCOME_COMPLETED, "COMPLETED": OUTCOME_COMPLETED,
+    "FAILED": OUTCOME_FAILED, "FAILED_ATTENTION": OUTCOME_FAILED,
+    "INTERRUPTED": OUTCOME_INTERRUPTED,
+    "REJECTED": OUTCOME_REJECTED,
+    **{s: OUTCOME_NOT_FINISHED for s in ("PLANNED", "PLANNING", "CHECKING", "READY", "COPYING", "VERIFYING",
+                                          "MANIFEST", "EJECTING")},
 }
+EXPORT_OUTCOMES = frozenset(EXPORT_STATE_WORDS.values()) | {OUTCOME_UNKNOWN}
+_CODE_RE = re.compile(r"^[A-Z]-\d{3}$")
+
+
+def export_outcome(state: object) -> str:
+    return EXPORT_STATE_WORDS.get(str(state or "").strip().upper(), OUTCOME_UNKNOWN)
 
 
 @dataclass(frozen=True)
 class ExportRow:
     when_epoch: float | None
-    outcome: str
+    outcome: str                         # always one of EXPORT_OUTCOMES
     drive: str | None = None
     from_epoch: float | None = None
     to_epoch: float | None = None
+    error_code: str | None = None        # operator code such as "E-005", only if well-formed
 
 
 @dataclass(frozen=True)
@@ -320,9 +341,7 @@ def _first(cols: set[str], options: tuple[str, ...]) -> str | None:
 def load_exports(db_path: Path, limit: int = 200) -> ExportList:
     """List previous review-drive exports, if the export feature has created its tables.
 
-    The export schema belongs to the export branch (docs/04 §6). Until it is fixed this reader
-    looks for a known table name and well-known column names; if records exist that it cannot
-    interpret it says so instead of guessing.
+    If export records exist that this reader cannot interpret it says so instead of guessing.
     """
     try:
         with open_ledger(db_path) as led:
@@ -335,20 +354,28 @@ def load_exports(db_path: Path, limit: int = 200) -> ExportList:
                     return ExportList(next(n for n in names if "export" in n.lower()), readable=False)
                 return ExportList(None)
             cols = {r["name"] for r in led.query(f"PRAGMA table_info({table})")}
-            tcol, scol = _first(cols, _TIME_COLS), _first(cols, _STATE_COLS)
-            if tcol is None or scol is None:
+            tcols = [c for c in _TIME_COLS if c in cols]
+            scol = _first(cols, _STATE_COLS)
+            if not tcols or scol is None:
                 return ExportList(table, readable=False)
             dcol, fcol, ocol = _first(cols, _DRIVE_COLS), _first(cols, _FROM_COLS), _first(cols, _TO_COLS)
+            labels: dict[str, str] = {}
+            if dcol is None and "drive_id" in cols and "drives" in names:
+                dcols = {r["name"] for r in led.query("PRAGMA table_info(drives)")}
+                if {"drive_id", "label"} <= dcols:
+                    labels = {str(r["drive_id"]): str(r["label"]) for r in
+                              led.query("SELECT drive_id, label FROM drives WHERE label IS NOT NULL")}
             rows = led.query(f"SELECT * FROM {table} ORDER BY rowid DESC LIMIT ?", (limit,))
             out = []
             for r in rows:
-                state = str(r[scol] or "")
+                when = next((e for e in (_ep(r[c]) for c in tcols) if e is not None), None)
+                drive = (str(r[dcol]) if dcol and r[dcol] else
+                         labels.get(str(r["drive_id"])) if labels and r["drive_id"] is not None else None)
+                code = r["error_code"] if "error_code" in cols else None
                 out.append(ExportRow(
-                    when_epoch=_ep(r[tcol]),
-                    outcome=EXPORT_STATE_WORDS.get(state.upper(), "In progress or not finished"),
-                    drive=str(r[dcol]) if dcol and r[dcol] else None,
-                    from_epoch=_ep(r[fcol]) if fcol else None,
-                    to_epoch=_ep(r[ocol]) if ocol else None))
+                    when_epoch=when, outcome=export_outcome(r[scol]), drive=drive,
+                    from_epoch=_ep(r[fcol]) if fcol else None, to_epoch=_ep(r[ocol]) if ocol else None,
+                    error_code=code if isinstance(code, str) and _CODE_RE.fullmatch(code) else None))
             return ExportList(table, tuple(out))
     except sqlite3.Error:
         return ExportList(None, available=False)

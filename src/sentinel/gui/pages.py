@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QFrame, QHBoxLayout, QHeaderVi
 
 from . import textfmt as tf
 from .icons import TONE_ICON, Icon, IconWidget
-from .ledger_view import AdminData, ExportList, SpanKind, Timeline
+from .ledger_view import OUTCOME_COMPLETED, AdminData, ExportList, SpanKind, Timeline
 from .theme import BODY_PX, CAPTION_PX, SMALL_PX, TITLE_PX, VALUE_PX, Palette, font
 from .viewmodel import AlertView, DashboardView
 from .widgets import (ActionButton, AlertBand, InfoTile, LegendItem, SpanRow, StatusHero, TimelineBar, card,
@@ -57,7 +57,6 @@ class PageHeader(QWidget):
 
 # --------------------------------------------------------------------------- overview
 class DashboardPage(QWidget):
-    prepare = Signal()
     timeline = Signal()
     exports = Signal()
     admin = Signal()
@@ -105,15 +104,11 @@ class DashboardPage(QWidget):
                                          "What was recorded in the last 24 hours.")
         self.btn_exports = ActionButton(palette, Icon.HISTORY, "View Previous Exports",
                                         "Review drives prepared before.")
-        self.btn_prepare.clicked.connect(self.prepare)
         self.btn_timeline.clicked.connect(self.timeline)
         self.btn_exports.clicked.connect(self.exports)
         for b in (self.btn_prepare, self.btn_timeline, self.btn_exports):
             actions.addWidget(b, 1)
         lay.addLayout(actions)
-        self.action_feedback = label("", CAPTION_PX, name="secondary")
-        self.action_feedback.hide()
-        lay.addWidget(self.action_feedback)
 
         foot = QHBoxLayout()
         self.tz_label = label(tz_text, CAPTION_PX, wrap=False, name="tertiary")
@@ -134,6 +129,7 @@ class DashboardPage(QWidget):
         self.setTabOrder(self.btn_exports, self.btn_admin)
 
     def set_prepare_available(self, available: bool, reason: str = "") -> None:
+        # Only ever called with False in this build (see window.py); kept so integration can enable it.
         self.btn_prepare.setEnabled(available)
         self.btn_prepare.set_description("Copy recordings to a review drive." if available else reason)
 
@@ -306,7 +302,7 @@ class ExportsPage(QWidget):
             empty("None yet", detail)
             return
         for r in ex.rows:
-            ok = r.outcome == "Completed"
+            ok = r.outcome == OUTCOME_COMPLETED
             w = QWidget()
             row = QHBoxLayout(w)
             row.setContentsMargins(0, 10, 0, 10)
@@ -322,6 +318,8 @@ class ExportsPage(QWidget):
                 bits.append(f"Recordings from {tf.when(r.from_epoch, tz, now)} to {tf.when(r.to_epoch, tz, now)}")
             if r.drive:
                 bits.append(f"Drive {r.drive}")
+            if r.error_code:
+                bits.append(f"Error {r.error_code}")
             if bits:
                 col.addWidget(label(" · ".join(bits), CAPTION_PX, name="secondary"))
             row.addLayout(col, 1)

@@ -18,13 +18,13 @@ not part of this branch and the screen says so honestly instead of pretending.
 | Administrator area separate from operators | U5 | Stated; **PIN gate is my design choice** (§6) |
 | GUI reads only measured state (status.json + read-only ledger); closing it has zero effect on recording | U6, architecture §2.4 | Stated |
 | Banner shows exact `alert.message`, icon **and** words, code readable aloud, "Save diagnostic report" | U7 | Stated |
-| Stale/missing heartbeat ⇒ X-001 shown prominently | Architecture §2.4, status.py | Stated |
+| Stale/missing heartbeat ⇒ X-001 shown prominently (also: heartbeat in the future, heartbeat that stops changing) | Architecture §2.4, status.py | Stated; the two extra checks came from QA review |
 | Z-001 (test camera) always visible | Task brief | Stated |
 | 24 h recording timeline (recorded vs gaps, reason in plain words) | E3 (continuity) | Stated (task); layout is my design |
 | Display timezone with UTC alongside | E1 | Stated |
 | 1366×768, large fonts, keyboard, 2 s refresh, robust to status.json replacement | Task brief | Stated |
 | Light and dark themes (follows the OS) | Owner guidance | Design choice |
-| Prepare Review Drive launches `python -m sentinel.export run --config <toml>` only if that module exists | U4 | Stated; the `--config` argument is **my assumption** about the export CLI |
+| Prepare Review Drive | U4 | **Disabled in this build**, with honest text, also when `sentinel.export` is installed (QA finding 3.1/3.2; see "Prepare Review Drive: intended interface") |
 
 ## 3. What changed
 * `src/sentinel/gui/` (new):
@@ -101,14 +101,15 @@ simulator configuration (so Z-001 shows); the others use a production-style came
 | R-003 critical on a test camera (Z-001 strip stays visible) | ![](gui-screenshots/r003_critical_test_camera.png) |
 | View Recording Status (24 h timeline) | ![](gui-screenshots/r003_notice_timeline.png) |
 | View Previous Exports (none yet) | ![](gui-screenshots/recording_test_camera_exports.png) |
+| View Previous Exports with records (export branch schema, plain-word outcomes) | ![](gui-screenshots/r003_notice_exports_records.png) |
 | R-003 critical, dark theme | ![](gui-screenshots/r003_critical_dark.png) |
 
 ## 5. Tests (development host, Windows 11, Python 3.14.3, FFmpeg 9.0.1)
 
 | Command | Result |
 |---|---|
-| `python -m pytest tests/unit -q -p no:cacheprovider` | **168 passed** (50 existing + 118 new GUI tests), 0 failed — after the review fixes |
-| `python -m pytest tests/integration/test_gui_recorder.py -q -p no:cacheprovider` | **2 passed** (after the review fixes; also 3 earlier runs, each passed after fixing the test's own status read, see below) |
+| `python -m pytest tests/unit -q -p no:cacheprovider` | **175 passed** (50 existing + 125 new GUI tests), 0 failed — after the orchestrator and QA review fixes |
+| `python -m pytest tests/integration/test_gui_recorder.py -q -p no:cacheprovider` | **2 passed** (after the QA fixes; also earlier runs, each passed after fixing the test's own status read, see below) |
 | `python -m pytest tests/integration/test_service_process.py -q -p no:cacheprovider` | **1 passed, 1 failed** (`test_hard_kill_restart_recovery_and_graceful_stop`, `sqlite3.OperationalError: disk I/O error`) — **also fails on unmodified `main`** in the same session (main: 1 pass then 2 fails; this branch alone: 1 pass, 3 fails). Not caused by this branch (no recorder code changed); see §7. |
 
 What the new tests cover:
@@ -118,6 +119,13 @@ What the new tests cover:
 * stale heartbeat, missing file, unreadable file ⇒ X-001 with the exact X-001 message; raw problem
   text (may contain paths) not shown; one transient unreadable read tolerated once, twice ⇒ X-001;
   status.json replaced every ~5 ms while read continuously for 3 s ⇒ never X-001;
+* heartbeat in the future beyond the limit (wall clock set back) ⇒ X-001; small jitter is fine;
+  heartbeat that stops changing for longer than the limit on the GUI's own monotonic clock ⇒ X-001
+  (viewmodel and the real window, with a fake monotonic clock); malformed heartbeat ⇒ X-001, no crash;
+* Prepare Review Drive is disabled and launches nothing even with `export_available=True`;
+* previous exports in the export branch's real `export_batches`/`drives` schema: every state
+  (incl. an unknown one) shown as a fixed plain-word outcome, never the raw state; drive label
+  via `drives`; only a well-formed `E-0xx` code is shown;
 * operator screens (overview, timeline, exports, PIN screen, tooltips, accessible names) contain no
   `rtsp|ffmpeg|codec|h264|.ts|.db|.json|tcp://|C:\|/var/…` even when the status carries a storage
   error with a Windows path, an RTSP URL and an SQLite error;
@@ -154,17 +162,40 @@ retries. (The same race is why the GUI's reader retries.)
   would delete the user's files. The GUI builds in a temp folder and copies (with read-back check).
 * **One read-only SQLite connection per refresh**, closed after use: no long read transaction can
   hold back the recorder's WAL checkpoints; a ledger created after the GUI started is picked up.
-* **Previous exports**: the export schema does not exist yet. The reader looks for
-  `export_batches` / `exports` / `export_jobs` with well-known columns; if an export table exists
-  that it cannot interpret it says "cannot be shown" rather than guessing.
+* **Previous exports**: reads the export branch's `export_batches` (state, finished/updated/planned
+  time, interval, `error_code`) and `drives.label`; every state maps to a fixed plain-word outcome
+  ("Completed", "Did not complete — needs attention", "Interrupted — the drive was removed before it
+  finished", "Not finished", "Result not recognised by this screen"). If an export table exists that
+  it cannot interpret it says "cannot be shown" rather than guessing.
+* **Heartbeat checks** (in the GUI, `read_status` on main is unchanged): `|age| > limit` is stale, and
+  a heartbeat value that has not changed for longer than the limit on the GUI's monotonic clock is
+  stale regardless of any wall-clock change. Side effect: right after the wall clock is set back by
+  more than 15 s, a *live* recorder can show X-001 for one 2 s refresh until it writes its next
+  heartbeat (the recorder itself raises T-001 for such a clock change).
+
+### Prepare Review Drive: intended interface (for integration; not implemented here)
+The button is disabled ("Not yet available from this screen. Contact technical support.") until the
+GUI↔export interface is defined. The removed launch path could not work: the export CLI needs
+`--target <drive folder>` (drive selection belongs to the drives branch), prints its result only to a
+console, and a frozen build has no `python -m`. Proposed interface:
+1. **Request record, not a command.** The GUI writes one JSON request atomically to
+   `<data_dir>/requests/export-<uuid>.json` (`{"kind": "review_export", "requested_utc": …,
+   "operator": …}`), never the ledger and never a drive path. The GUI stays unprivileged and
+   read-only towards evidence.
+2. A long-running export/drive service (drives branch) picks the request up, selects the drive by
+   identity (docs/04 §4–5), runs the export and writes progress to `<data_dir>/export_status.json`
+   (the export branch already writes this file).
+3. The GUI renders `export_status.json` (Checking drive → Copying → Verifying → **Safe to remove**,
+   or the E-0xx message) using the same banner components; history comes from `export_batches`.
+4. If a command is preferred instead, it must be started through a `sentinel.platform` launcher that
+   resolves the frozen executable (e.g. `Sentinel.exe export …`) and captures its output; the GUI
+   must never assume `sys.executable -m`.
 
 ## 7. NOT executed / not verified
 * Python 3.12, Linux, real displays (all rendering was offscreen on Windows; high-DPI scaling and
   OS dark-mode detection on a real desktop not seen), screen readers.
-* `sentinel.export` does not exist, so the enabled Prepare Review Drive path (launching
-  `python -m sentinel.export run --config …`) has **never run**; its argument list is an assumption
-  to align with the export branch. In a frozen single-file build (U9) `sys.executable` is not
-  Python, so that launch line must change at packaging time.
+* The export-history reader was tested against the export branch's schema copied into tests, not
+  against that branch's code (it is not merged here).
 * `--set-admin-pin` interactive prompt (getpass) not exercised by a test; `set_pin` itself is.
 * "Choose another location…" folder dialog not exercised (offscreen); the save path behind it is.
 * Other integration files (`test_media_hashing`, `test_recorder_faults`, `test_unattended`) not
@@ -180,15 +211,25 @@ retries. (The same race is why the GUI's reader retries.)
    behaviour; tested that nothing else is written and the database bytes do not change). On Linux
    the GUI account needs read access to the data folder and write access for those two files, or
    the recorder must keep them present — to decide with the Linux permission model (docs/07).
-3. Architecture §2.4 says the GUI requests exports through a request queue; this task asked for
-   launching `python -m sentinel.export run`. The export branch must pick one.
+3. Prepare Review Drive is disabled until the GUI↔export interface above is agreed and built
+   (integration step with the export and drives branches).
 4. "Recording since" = end of the latest gap in the ledger (or first footage); the "today" wording
    uses the display timezone.
 5. The admin PIN file sits in the data folder; anyone who can write there can replace it (see §6:
    not a security boundary).
 
 ## 9. Recommendation
-**Merge after** the export branch confirms its CLI (`run --config`) and table names, or merge now
-with Prepare Review Drive disabled as it is (honest "Not installed in this version"). Nothing in this
-branch touches recording, all unit tests and the GUI/recorder integration tests pass, and the
-one failing integration test also fails on unmodified `main`.
+**Merge.** Prepare Review Drive is deliberately disabled with honest text until the
+interface above is agreed and built. Nothing in this branch touches recording, all unit tests
+and the GUI/recorder integration tests pass, and the one failing integration test also fails on
+unmodified `main`.
+
+## 10. Review findings
+| Finding | Status |
+|---|---|
+| Orchestrator: critical banner repeated "Recording stopped" | Fixed: title = catalogue headline, exact message below |
+| Orchestrator: Z-001 must be visible in every state | Fixed: persistent strip under the header, also from configuration |
+| QA 3.1/3.2 (high): Prepare Review Drive launched an export command that could not work (no `--target`, output discarded, false "window opening" text, no `-m` in a frozen build) | Fixed: launch path removed; button disabled with honest text even if export is installed; interface documented above |
+| QA 3.3 (medium): a wall clock set backwards hides a dead recorder (negative heartbeat age) | Fixed in the GUI viewmodel: a heartbeat age beyond the limit in either direction is stale, plus monotonic "heartbeat stopped changing" check; `read_status` on main unchanged |
+| QA 3.4 (low): Previous Exports showed raw ledger outcome strings | Fixed: fixed plain-word outcomes for every state (unknown included), drive label from `drives`, only well-formed error codes |
+| Remaining | One live-recorder X-001 flash of at most one refresh right after a >15 s backward clock change (documented in §6); the interface for Prepare Review Drive is still to be built |

@@ -301,6 +301,71 @@ def test_exactly_three_routine_buttons_and_no_stop(app: QApplication, tmp_path: 
         win.close()
 
 
+def test_prepare_review_drive_disabled_even_when_export_is_installed(app: QApplication, tmp_path: Path,
+                                                                     monkeypatch: pytest.MonkeyPatch) -> None:
+    """Until the GUI<->export interface exists, nothing may be launched from the button."""
+    import subprocess
+    launched: list = []
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: launched.append(a))
+    cfg = make_cfg(tmp_path, True)
+    write_doc(cfg.data_path / "status.json", status_doc(base_measurements(simulated=True), time.time()))
+    win = MainWindow(cfg, LIGHT, export_available=True, auto_refresh=False)
+    try:
+        b = win.dashboard.btn_prepare
+        assert not b.isEnabled() and "not yet available" in b.description.lower()
+        assert win.view is not None and win.view.drive.value == "Not available here yet"
+        b.click()
+        QTest.keyClick(b, Qt.Key.Key_Return)
+        app.processEvents()
+        assert launched == [] and not hasattr(win, "prepare_review_drive")
+    finally:
+        win.close()
+
+
+def test_frozen_heartbeat_shows_x001_whatever_the_wall_clock(app: QApplication, tmp_path: Path) -> None:
+    t = [0.0]
+    cfg = make_cfg(tmp_path, False)
+    write_doc(cfg.data_path / "status.json", status_doc(base_measurements(), time.time()))
+    win = MainWindow(cfg, LIGHT, export_available=False, auto_refresh=False, mono=lambda: t[0])
+    try:
+        assert win.view is not None and not win.view.stale
+        t[0] = win.max_age_s + 1                       # same heartbeat, monotonic time moved on
+        win.refresh()
+        assert win.view.stale and win.view.banner is not None and win.view.banner.code == "X-001"
+        assert "has not changed" in win.dashboard.hero.detail.text()
+    finally:
+        win.close()
+
+
+def test_exports_page_shows_plain_words_not_ledger_states(app: QApplication, tmp_path: Path) -> None:
+    from sentinel.clock import iso_utc
+    from sentinel.db import Ledger
+    win = open_window(app, tmp_path, "r003_notice")
+    try:
+        led = Ledger(win.cfg.data_path / "sentinel.db")
+        led.query("CREATE TABLE drives (drive_id TEXT PRIMARY KEY, label TEXT)")
+        led.query("CREATE TABLE export_batches (batch_id TEXT, drive_id TEXT, state TEXT, planned_utc TEXT, "
+                  "finished_utc TEXT, interval_start_utc TEXT, interval_end_utc TEXT, error_code TEXT)")
+        now = time.time()
+        with led.tx() as c:
+            c.execute("INSERT INTO drives VALUES ('d1', 'SENTINEL_1')")
+            for i, st in enumerate(("COMPLETE", "FAILED", "INTERRUPTED", "COPYING", "MYSTERY_STATE")):
+                c.execute("INSERT INTO export_batches VALUES (?, 'd1', ?, ?, ?, ?, ?, ?)",
+                          (f"b{i}", st, iso_utc(now - 900), iso_utc(now - 60), iso_utc(now - 7200),
+                           iso_utc(now - 3600), "E-005" if st == "FAILED" else None))
+        led.close()
+        win.show_exports()
+        app.processEvents()
+        texts = visible_texts(win.exports_page)
+        joined = " | ".join(texts)
+        for raw in ("COMPLETE", "FAILED", "INTERRUPTED", "COPYING", "MYSTERY_STATE", "_"):
+            assert raw not in joined.replace("SENTINEL_1", ""), (raw, joined)
+        assert "Completed" in joined and "Error E-005" in joined and "Drive SENTINEL_1" in joined
+        assert not [t for t in texts if FORBIDDEN.search(t)]
+    finally:
+        win.close()
+
+
 def test_keyboard_navigation(app: QApplication, tmp_path: Path) -> None:
     win = open_window(app, tmp_path, "recording_test_camera")
     try:

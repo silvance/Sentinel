@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import importlib.util
 import os
-import subprocess
 import sys
 import threading
 import time
@@ -25,12 +24,17 @@ from .ledger_view import (load_admin, load_exports, load_timeline, pretty_json, 
 from .pages import AdminLockPage, AdminPage, DashboardPage, ExportsPage, TimelinePage, band_alert
 from .report import ReportError, save_diagnostic_report
 from .theme import BODY_PX, CAPTION_PX, Palette, font, stylesheet
-from .viewmodel import DashboardView, ReadKind, StatusRead, build_dashboard, read_status_robust
+from .viewmodel import (DashboardView, HeartbeatWatch, ReadKind, StatusRead, build_dashboard,
+                        read_status_robust)
 from .widgets import TestCameraStrip, label
 
 W = QFont.Weight
 REFRESH_MS = 2000
 TIMELINE_EVERY = 5          # refresh the 24 h timeline every 5th tick (10 s) while it is open
+PREPARE_DISABLED_TEXT = {
+    False: "Not installed in this version.",
+    True: "Not yet available from this screen. Contact technical support.",
+}
 
 
 def export_installed() -> bool:
@@ -100,7 +104,8 @@ class MainWindow(QMainWindow):
     _report_done = Signal(str, bool)
 
     def __init__(self, cfg: AppConfig, palette: Palette, *, export_available: bool | None = None,
-                 clock: Callable[[], float] = time.time, auto_refresh: bool = True) -> None:
+                 clock: Callable[[], float] = time.time, auto_refresh: bool = True,
+                 mono: Callable[[], float] = time.monotonic) -> None:
         super().__init__()
         self.cfg = cfg
         self.p = palette
@@ -114,11 +119,11 @@ class MainWindow(QMainWindow):
         self.view: DashboardView | None = None
         self.read: StatusRead | None = None
         self._tick = 0
-        self._export_proc: subprocess.Popen[bytes] | None = None
         self._report_busy = False
         self.last_report_path: str | None = None
         self._last_good: StatusRead | None = None
         self._unreadable_streak = 0
+        self.heartbeat_watch = HeartbeatWatch(self.max_age_s, mono)
 
         cam_text = f"{cfg.camera.name} ({cfg.camera.id})" if cfg.camera.name else f"Camera {cfg.camera.id}"
         self.setWindowTitle(f"Sentinel \u2014 {cam_text}")
@@ -149,16 +154,14 @@ class MainWindow(QMainWindow):
         for w in (self.dashboard, self.timeline_page, self.exports_page, self.lock_page, self.admin_page):
             self.stack.addWidget(w)
 
-        if self.export_available and cfg.source_path:
-            self.dashboard.set_prepare_available(True)
-        elif self.export_available:
-            self.dashboard.set_prepare_available(False, "Not available: this screen was started without a "
-                                                       "configuration file.")
-        else:
-            self.dashboard.set_prepare_available(False, "Not installed in this version.")
+        # Prepare Review Drive stays DISABLED in this build, also when ``sentinel.export`` is installed:
+        # the GUI<->export interface (who selects the drive, how the request is made, how progress is
+        # shown) is not defined yet, and launching the export command line from here cannot work
+        # (it needs a target drive, prints only to a console, and a frozen build has no ``python -m``).
+        # See docs/branches/req-operator-gui.md "Prepare Review Drive: intended interface".
+        self.dashboard.set_prepare_available(False, PREPARE_DISABLED_TEXT[self.export_available])
 
         d = self.dashboard
-        d.prepare.connect(self.prepare_review_drive)
         d.timeline.connect(self.show_timeline)
         d.exports.connect(self.show_exports)
         d.admin.connect(self.show_admin)
@@ -189,7 +192,7 @@ class MainWindow(QMainWindow):
         now = self.clock()
         test_cam = self.cfg.camera.development_source     # the recorder's own Z-001 condition
         try:
-            read = read_status_robust(self.status_path, self.max_age_s)
+            read = self.heartbeat_watch.observe(read_status_robust(self.status_path, self.max_age_s))
             # One unreadable read (file being replaced at that instant, after in-call retries) is
             # tolerated once by keeping the previous good reading; two in a row (>= 2 s) is X-001.
             if read.kind is ReadKind.UNREADABLE and self._last_good is not None and self._unreadable_streak == 0:
@@ -301,28 +304,6 @@ class MainWindow(QMainWindow):
         self.admin_page.feedback.setText(f"Refreshed {tf.hm(self.clock(), self.tz, seconds=True)}")
 
     # ------------------------------------------------------------------ actions
-    def prepare_review_drive(self) -> None:
-        """Launch the separate export program. Export is NOT implemented in the GUI."""
-        fb = self.dashboard.action_feedback
-        if not (self.export_available and self.cfg.source_path):
-            return
-        if self._export_proc is not None and self._export_proc.poll() is None:
-            fb.setText("The review-drive window is already open.")
-            fb.show()
-            return
-        kwargs: dict = {}
-        if sys.platform == "win32":
-            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-        else:
-            kwargs["start_new_session"] = True
-        try:
-            self._export_proc = subprocess.Popen(
-                [sys.executable, "-m", "sentinel.export", "run", "--config", str(self.cfg.source_path)], **kwargs)
-            fb.setText("Opening the review-drive window\u2026")
-        except OSError:
-            fb.setText("The review-drive window could not be opened. Contact technical support.")
-        fb.show()
-
     def desktop_dir(self) -> Path:
         d = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DesktopLocation)
         p = Path(d) if d else Path.home()
