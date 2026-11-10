@@ -28,3 +28,6 @@ SERVICE_NAME = "SentinelRecorder"
 DISPLAY_NAME = "Sentinel Recorder"
 DESCRIPTION = ("Records the configured camera continuously and verifies the recordings. "
                "Stopping this service stops recording.")
+# Local group whose members (operator accounts) may READ the status folder. Created by install.
+OPERATORS_GROUP = "Sentinel Operators"
+OPERATORS_GROUP_COMMENT = "May read Sentinel recorder status (not recordings, not settings)"

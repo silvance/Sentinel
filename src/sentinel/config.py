@@ -71,6 +71,10 @@ class StorageConfig:
     log_dir: str
     warning_free_gb: float = 50.0
     critical_free_gb: float = 5.0
+    # Where operator-readable files go: status.json and a periodic read-only ledger snapshot.
+    # Default: data_dir (unchanged behaviour). On Windows the installer gives this folder a
+    # read-only entry for the "Sentinel Operators" group; data_dir itself stays service-only.
+    status_dir: str | None = None
 
 
 @dataclass(frozen=True)
@@ -114,6 +118,19 @@ class AppConfig:
     def log_path(self) -> Path:
         return Path(self.storage.log_dir)
 
+    @property
+    def status_dir_path(self) -> Path:
+        return Path(self.storage.status_dir) if self.storage.status_dir else self.data_path
+
+    @property
+    def status_path(self) -> Path:
+        return self.status_dir_path / "status.json"
+
+    @property
+    def ledger_snapshot_path(self) -> Path | None:
+        """Read-only ledger copy for operators; only when a separate status_dir is configured."""
+        return self.status_dir_path / "ledger-snapshot.db" if self.storage.status_dir else None
+
 
 def _build(cls: type, section: str, raw: dict[str, Any] | None, base_dir: Path) -> Any:
     raw = dict(raw or {})
@@ -139,8 +156,10 @@ def _build(cls: type, section: str, raw: dict[str, Any] | None, base_dir: Path) 
             raise ConfigError(f"[{section}] {name} must be text")
         kwargs[name] = value
     if cls is StorageConfig:
-        for key in ("spool_dir", "data_dir", "log_dir"):
+        for key in ("spool_dir", "data_dir", "log_dir", "status_dir"):
             if key not in kwargs:
+                if key == "status_dir":
+                    continue
                 raise ConfigError(f"[storage] {key} is required")
             p = Path(kwargs[key])
             kwargs[key] = str(p if p.is_absolute() else (base_dir / p).resolve())

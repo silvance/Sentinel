@@ -38,7 +38,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from . import __version__
-from .alerts import Severity, make_alert
+from .alerts import Severity
 from .clock import Clock, SystemClock, iso_utc, parse_iso_utc
 from .config import AppConfig, ConfigError, check_tools, load_config
 from .credentials import CredentialError, load_credentials, register_secret, url_with_credentials
@@ -47,13 +47,13 @@ from .diagnostics import build_report
 from .logging_setup import setup_logging
 from .media.probe import ffmpeg_version
 from .media.videohash import parse_version
-from .models import CameraLink, OverallStatus, SegmentState, StorageLevel
+from .models import SegmentState, StorageLevel
 from .platform import InstanceLockError, Platform, get_platform
 from .recorder.finalizer import MAX_FINALIZE_ATTEMPTS, Finalizer, SegmentJob
 from .recorder.integrity import IntegrityWorker
 from .recorder.recovery import Recovery
 from .recorder.supervisor import RecordingSupervisor
-from .status import Measurements, StatusDocument, apply_alerts, evaluate, write_status
+from .status import Measurements, StatusDocument, apply_alerts, evaluate, fatal_status_document, write_status
 from .storage.monitor import DiskUsage, StorageMonitor
 from .watchdog import LoopWatchdog
 
@@ -62,6 +62,14 @@ log = logging.getLogger("sentinel.service")
 EXIT_OK, EXIT_CONFIG, EXIT_LOCKED, EXIT_RUNTIME, EXIT_WATCHDOG = 0, 2, 3, 4, 5
 MIN_FFMPEG = (6, 0)          # tested on 9.0.1; RTSP -timeout semantics and -fps_mode need >= 5.1
 WATCHDOG_STEP_TIMEOUT_S = 5.0  # each best-effort action before a watchdog exit is bounded
+# Bounded stop when the operating system is shutting down. Worst case after the stop request:
+# FFmpeg stop (stop_grace_s 8 + wait 30 + reader joins 10 ≈ 50 s) + drain 45 + current job 60 +
+# integrity 10 ≈ 165 s, inside the 180 s Windows pre-shutdown window (winsvc.commands).
+SHUTDOWN_DRAIN_S = 45.0
+SHUTDOWN_JOB_S = 60.0
+SHUTDOWN_INTEGRITY_S = 10.0
+SHUTDOWN_BUDGET_S = 50.0 + SHUTDOWN_DRAIN_S + SHUTDOWN_JOB_S + SHUTDOWN_INTEGRITY_S
+LEDGER_SNAPSHOT_INTERVAL_S = 300.0
 
 
 def _bounded(name: str, fn: Callable[[], object], timeout_s: float) -> bool:
@@ -97,7 +105,7 @@ class RecorderService:
         self._last_status_mono = 0.0
         self._started_mono = self.clock.mono()
         self._fatal: list[str] = []                  # alert codes that prevent recording
-        self.status_path = cfg.data_path / "status.json"
+        self.status_path = cfg.status_path
         self.ledger: Ledger | None = None
         self.supervisor: RecordingSupervisor | None = None
         self.finalizer: Finalizer | None = None
@@ -111,6 +119,9 @@ class RecorderService:
         self._clock_anomaly_until: float = 0.0
         self._critical_codes: set[str] = set()
         self.last_report: str | None = None
+        self._terminal = False            # status says "cannot record" and the process is ending
+        self._system_shutdown = False     # stop because the OS is shutting down: bounded drain
+        self._next_snapshot = 0.0
 
     # ------------------------------------------------------------------
     def run(self) -> int:
@@ -165,6 +176,7 @@ class RecorderService:
             for p in problems:
                 log.error("cannot start recording: %s", p)
             self._fatal = ["C-001"]
+            self._terminal = True
             self._write_status(force=True)
             self.ledger.add_event("error", "recorder", "startup_failed", "; ".join(problems))
             self._maybe_report()
@@ -200,8 +212,15 @@ class RecorderService:
         finally:
             self.watchdog.stop()
             self.platform.notify("STOPPING=1")
-            drained = self.finalizer.stop()
-            self.integrity.stop()
+            if self._system_shutdown:
+                # The OS gives a bounded window (Windows pre-shutdown, SHUTDOWN_DRAIN_BUDGET_S).
+                # Whatever is not sealed in time stays unsealed on disk and is sealed by startup
+                # recovery at the next boot (the same path as a crash; nothing is lost or altered).
+                drained = self.finalizer.stop(drain_timeout=SHUTDOWN_DRAIN_S, job_timeout=SHUTDOWN_JOB_S)
+                self.integrity.stop(timeout=SHUTDOWN_INTEGRITY_S)
+            else:
+                drained = self.finalizer.stop()
+                self.integrity.stop()
             if not drained:
                 log.error("finaliser did not drain before shutdown; recovery will complete it on next start")
             self.ledger.add_event("audit", "recorder", "service_stop", "Recorder service stopped",
@@ -283,6 +302,13 @@ class RecorderService:
         if now >= self._next_checkpoint:
             self._next_checkpoint = now + 3600.0
             self.ledger.checkpoint()
+        snap = self.cfg.ledger_snapshot_path
+        if snap is not None and now >= self._next_snapshot:
+            self._next_snapshot = now + LEDGER_SNAPSHOT_INTERVAL_S
+            try:
+                self.ledger.write_snapshot(snap)
+            except Exception:
+                log.exception("could not write the operator ledger snapshot")
 
     # ------------------------------------------------------------------ status
     def _write_status(self, force: bool = False, stopping: bool = False) -> None:
@@ -421,7 +447,8 @@ class RecorderService:
             service={"version": __version__, "platform": self.platform.name,
                      "uptime_s": round(now - self._started_mono, 1), "simulated_camera": cfg.camera.development_source,
                      "clock_synchronized": self._ntp},
-            recording=live_d, storage=storage_d, integrity=integrity_d, last_segment=last_seg, open_gap=gap)
+            recording=live_d, storage=storage_d, integrity=integrity_d, last_segment=last_seg, open_gap=gap,
+            terminal=self._terminal)
         apply_alerts(doc, d.alerts)
         return doc
 
@@ -455,17 +482,14 @@ class RecorderService:
             faulthandler.dump_traceback(file=fh, all_threads=True)
 
     def _write_watchdog_status(self, age_s: float) -> None:
-        # Built without the supervisor's locks or the ledger: either may be what is hung.
-        alert = make_alert("R-006", Severity.CRITICAL, detail={"watchdog_stalled_s": round(age_s, 1)})
-        now = time.time()
-        doc = StatusDocument(
-            overall=str(OverallStatus.ERROR), camera_link=str(CameraLink.DISCONNECTED), messages=[alert.message],
-            camera_id=self.cfg.camera.id, generated_utc=iso_utc(now), heartbeat_epoch=now,
+        # Built without the supervisor's locks or the ledger: either may be what is hung. Not
+        # terminal: a restart is expected, so an old R-006 must turn into X-001.
+        doc = fatal_status_document(
+            "R-006", self.cfg.camera.id, terminal=False, detail={"watchdog_stalled_s": round(age_s, 1)},
             service={"version": __version__, "platform": self.platform.name,
                      "uptime_s": round(self.clock.mono() - self._started_mono, 1),
                      "simulated_camera": self.cfg.camera.development_source,
                      "clock_synchronized": self._ntp, "watchdog_exit": EXIT_WATCHDOG})
-        apply_alerts(doc, [alert])
         write_status(self.status_path, doc)
 
     def _watchdog_stop_ffmpeg(self) -> None:
@@ -483,6 +507,12 @@ class RecorderService:
             proc.wait(self.cfg.recording.stop_grace_s)
         except Exception:
             pass
+
+    def request_shutdown(self) -> None:
+        """Stop because the operating system is shutting down: same graceful FFmpeg stop, but the
+        verification backlog is drained only within SHUTDOWN_BUDGET_S (rest: recovery at boot)."""
+        self._system_shutdown = True
+        self.request_stop()
 
     def request_stop(self, *_: object) -> None:
         log.info("stop requested")
@@ -556,7 +586,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
     from .status import read_status
 
     cfg = load_config(args.config)
-    doc, problem = read_status(cfg.data_path / "status.json")
+    doc, problem = read_status(cfg.status_path)
     print(banner(doc, problem))
     if args.json and doc:
         print(json.dumps(doc, indent=2))

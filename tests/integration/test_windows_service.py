@@ -95,6 +95,7 @@ backoff_max_s = 2
 spool_dir = "spool"
 data_dir = "data"
 log_dir = "logs"
+status_dir = "status"
 warning_free_gb = 0
 critical_free_gb = 0
 
@@ -120,13 +121,15 @@ def test_service_host_preshutdown_stops_recorder_gracefully(tmp_path: Path) -> N
         with SimulatedCamera(fps=15) as cam:
             cfg_path = _write_config(tmp_path, cam.url)
             api = _ThreadedFakeScm()
-            host = ServiceHost("SentinelRecorder", lambda h: run_recorder_in_host(h, str(cfg_path), factory), api,
+            host = ServiceHost("SentinelRecorder", lambda h: run_recorder_in_host(h, str(cfg_path), factory,
+                                                                             code_check=lambda c, p: []), api,
                                checkpoint_interval_s=0.5)
             host.dispatch()
             data = tmp_path / "data"
+            status_dir = tmp_path / "status"
             wait_for(lambda: any(s.state == SERVICE_RUNNING for s in api.statuses), 20, what="RUNNING reported")
-            wait_for(lambda: (data / "status.json").exists()
-                     and json.loads((data / "status.json").read_text("utf-8")).get("last_segment"), 45,
+            wait_for(lambda: (status_dir / "status.json").exists()
+                     and json.loads((status_dir / "status.json").read_text("utf-8")).get("last_segment"), 45,
                      what="first sealed segment")
             assert api.handler is not None
             assert api.handler(SERVICE_CONTROL_PRESHUTDOWN, 0) == NO_ERROR      # Windows is shutting down
@@ -136,8 +139,16 @@ def test_service_host_preshutdown_stops_recorder_gracefully(tmp_path: Path) -> N
         states = [s.state for s in api.statuses]
         assert SERVICE_STOP_PENDING in states and states[-1] == SERVICE_STOPPED
         assert api.statuses[-1].win32_exit_code == NO_ERROR and host.exit_code == 0
-        st = json.loads((data / "status.json").read_text("utf-8"))
+        st = json.loads((status_dir / "status.json").read_text("utf-8"))
         assert st["overall"] == "STOPPED"
+        assert host.system_shutdown and not (data / "status.json").exists()
+        snap = status_dir / "ledger-snapshot.db"      # operator-readable copy written by the janitor
+        import sqlite3
+        sc = sqlite3.connect(f"{snap.resolve().as_uri()}?mode=ro&immutable=1", uri=True)
+        try:
+            assert sc.execute("SELECT COUNT(*) FROM events WHERE code='service_start'").fetchone()[0] >= 1
+        finally:
+            sc.close()
         from sentinel.db import Ledger
 
         led = Ledger(data / "sentinel.db", readonly=True)

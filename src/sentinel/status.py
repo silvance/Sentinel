@@ -165,6 +165,24 @@ class StatusDocument:
     last_segment: dict[str, Any] | None = None
     open_gap: dict[str, Any] | None = None
     schema: int = STATUS_SCHEMA
+    # True only for the last document a process writes when it cannot record at all (e.g. C-001
+    # at startup). Readers then show its alert even when the heartbeat is old, instead of the
+    # generic X-001 "not responding": the recorder *did* respond, with a reason.
+    terminal: bool = False
+
+
+def fatal_status_document(code: str, camera_id: str, service: dict[str, Any] | None = None,
+                          detail: dict[str, Any] | None = None, terminal: bool = True) -> StatusDocument:
+    """A status built without the ledger or any recorder state (startup failure, watchdog)."""
+    from .clock import iso_utc
+
+    alert = make_alert(code, Severity.CRITICAL, detail=detail)
+    now = time.time()
+    doc = StatusDocument(overall=str(OverallStatus.ERROR), camera_link=str(CameraLink.DISCONNECTED),
+                         messages=[alert.message], camera_id=camera_id, generated_utc=iso_utc(now),
+                         heartbeat_epoch=now, service=dict(service or {}), terminal=terminal)
+    apply_alerts(doc, [alert])
+    return doc
 
 
 def apply_alerts(doc: StatusDocument, alerts: list[Alert]) -> None:
@@ -202,6 +220,6 @@ def read_status(path: Path, max_age_s: float = 15.0) -> tuple[dict[str, Any] | N
     except (OSError, json.JSONDecodeError) as exc:
         return None, f"{x001} (Status unreadable: {exc})"
     age = time.time() - float(doc.get("heartbeat_epoch", 0))
-    if age > max_age_s:
+    if age > max_age_s and not (doc.get("terminal") and doc.get("alert")):
         return doc, f"{x001} (Last update {int(age)} s ago.)"
     return doc, None

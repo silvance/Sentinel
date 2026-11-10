@@ -101,6 +101,7 @@ class ServiceHost:
         self._checkpoint = 0
         self._stop_callbacks: list[Callable[[], None]] = []
         self.stop_requested = threading.Event()
+        self.system_shutdown = False                 # stop caused by SHUTDOWN/PRESHUTDOWN
         self.finished = threading.Event()
         self._stop_deadline_s = stop_deadline_s
         self._checkpoint_interval_s = checkpoint_interval_s
@@ -158,6 +159,7 @@ class ServiceHost:
         with self._lock:
             if self.stop_requested.is_set():
                 return
+            self.system_shutdown = control in (SERVICE_CONTROL_SHUTDOWN, SERVICE_CONTROL_PRESHUTDOWN)
             self.stop_requested.set()
             callbacks = list(self._stop_callbacks)
         log.info("service control %#x: stopping", control)
@@ -175,6 +177,11 @@ class ServiceHost:
         while not self.finished.wait(self._checkpoint_interval_s):
             if time.monotonic() >= deadline:
                 log.critical("service did not stop within %.0f s; ending the process", self._stop_deadline_s)
+                # Report STOPPED first: a process that vanishes while STOP_PENDING counts as a
+                # crash and would make the SCM restart a service that was asked to stop.
+                # Unsealed segments are completed by startup recovery at the next start.
+                self.exit_code = EXIT_STOP_TIMEOUT
+                self._report_stopped(EXIT_STOP_TIMEOUT)
                 self._exit_fn(EXIT_STOP_TIMEOUT)
                 return
             self._report(SERVICE_STOP_PENDING, wait_hint_ms=int(self._checkpoint_interval_s * 5000))

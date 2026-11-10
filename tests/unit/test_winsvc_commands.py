@@ -17,13 +17,14 @@ SVC_SID = "S-1-5-80-3978339998-2545952871-631246257-1716324596-627421672"
 FORBIDDEN = [r"C:\Windows", r"C:\Program Files", r"C:\ProgramData", r"C:\Users", r"C:\Users\op"]
 
 
-def _inputs(start: bool = True, creds: bool = True) -> InstallInputs:
+def _inputs(start: bool = True, creds: bool = True, readers: str = "group") -> InstallInputs:
     host = host_command(Path(r"C:\ProgramData\Sentinel\config\sentinel.toml"), frozen=True,
                         executable=r"C:\Program Files\Sentinel\sentinel-service.exe")
     return InstallInputs(Path(r"C:\ProgramData\Sentinel\config\sentinel.toml"),
                          (Path(r"D:\Sentinel\spool"), Path(r"C:\ProgramData\Sentinel\data"),
                           Path(r"C:\ProgramData\Sentinel\logs")),
-                         Path(r"C:\ProgramData\Sentinel\config\camera.dpapi") if creds else None, host, start=start)
+                         Path(r"C:\ProgramData\Sentinel\config\camera.dpapi") if creds else None, host, start=start,
+                         status_dir=Path(r"C:\ProgramData\Sentinel\status"), status_readers=readers)
 
 
 def test_service_name_constant_matches_platform_layer() -> None:
@@ -81,11 +82,42 @@ def test_install_plan_exact_commands() -> None:
     actions = [s.action for s in steps if s.action]
     assert actions == ["set_preshutdown_timeout", "make_dirs"]          # frozen build: no environment step
     pre = [s for s in steps if s.action == "set_preshutdown_timeout"][0]
-    assert pre.params == {"service": "SentinelRecorder", "timeout_ms": 120000}
+    assert pre.params == {"service": "SentinelRecorder", "timeout_ms": 180000}
+    assert ("net", "localgroup", "Sentinel Operators", "/add",
+            "/comment:May read Sentinel recorder status (not recordings, not settings)") in argvs
+    assert ("net", "localgroup", "Sentinel Operators") in argvs
+    assert ("icacls", r"C:\ProgramData\Sentinel\status", "/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F",
+            "*S-1-5-32-544:(OI)(CI)F", f"*{SVC_SID}:(OI)(CI)M", "Sentinel Operators:(OI)(CI)RX", "/Q") in argvs
+    by_argv = {s.argv: s for s in steps if s.argv}
+    assert not by_argv[("net", "localgroup", "Sentinel Operators")].may_fail       # group must exist
+    cred = [s for s in steps if s.argv and "camera.dpapi" in " ".join(s.argv)]
+    assert len(cred) == 1 and not cred[0].may_fail                                 # review 2.6: fatal
+    mk = [s for s in steps if s.action == "make_dirs"][0]
+    assert r"C:\ProgramData\Sentinel\status" in mk.params["paths"]
     # The service must exist before folder ACLs name its SID? Not required (SIDs are literal), but
     # the order is: register -> configure -> folders -> start.
     assert [s.argv[1] for s in steps if s.argv and s.argv[0] == "sc.exe"] == [
         "create", "description", "failure", "failureflag", "sidtype", "privs", "start"]
+
+
+def test_status_readers_users_option_and_status_dir_required() -> None:
+    steps = install_plan(_inputs(readers="users"), forbidden=FORBIDDEN)
+    argvs = [s.argv for s in steps if s.argv]
+    assert not any(a[0] == "net" for a in argvs)
+    assert any(a[:2] == ("icacls", r"C:\ProgramData\Sentinel\status") and "*S-1-5-32-545:(OI)(CI)RX" in a
+               for a in argvs)
+    inp = _inputs()
+    for bad in (None, Path(r"C:\ProgramData\Sentinel\data"), Path(r"C:\ProgramData\Sentinel\config")):
+        with pytest.raises(PlanError, match="status_dir"):
+            install_plan(InstallInputs(inp.config_path, inp.data_dirs, None, inp.host, status_dir=bad),
+                         forbidden=FORBIDDEN)
+
+
+def test_preshutdown_window_covers_the_bounded_shutdown_work() -> None:
+    from sentinel import service
+    from sentinel.winsvc.commands import PRESHUTDOWN_TIMEOUT_MS
+
+    assert service.SHUTDOWN_BUDGET_S < PRESHUTDOWN_TIMEOUT_MS / 1000
 
 
 def test_install_plan_rendering_is_what_subprocess_runs() -> None:

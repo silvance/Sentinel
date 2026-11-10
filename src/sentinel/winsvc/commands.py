@@ -11,8 +11,11 @@ ACLs use language-neutral ``*S-1-...`` SIDs so the same commands work on any Win
 * the service's own virtual account ``NT SERVICE\\SentinelRecorder`` (SID computed by
   :func:`sentinel.platform.winacl.service_sid`): modify on data/spool/log, read on config,
   read on the credentials file;
-* Users ``S-1-5-32-545``: read on the configuration directory only (the camera address is not a
-  secret; the future operator GUI needs to find the status file). Nothing else.
+* Users ``S-1-5-32-545``: read on the configuration directory (the camera address is not a
+  secret; the operator GUI needs to find the status folder);
+* the local group "Sentinel Operators" (default; or Users if the owner chooses
+  ``--status-readers users``): read on the status folder only (status.json + read-only ledger
+  snapshot). Nothing else.
 """
 
 from __future__ import annotations
@@ -26,7 +29,7 @@ from pathlib import Path, PureWindowsPath
 from typing import Any
 
 from ..platform.winacl import SID_ADMINISTRATORS, SID_SYSTEM, SID_USERS, service_sid
-from . import DESCRIPTION, DISPLAY_NAME, SERVICE_NAME
+from . import DESCRIPTION, DISPLAY_NAME, OPERATORS_GROUP, OPERATORS_GROUP_COMMENT, SERVICE_NAME
 
 # Restart after 5 s, then 30 s, then every 60 s. The SCM repeats the LAST action for every
 # further failure ("Subsequent failures" in services.msc), so it never gives up. The failure
@@ -34,8 +37,9 @@ from . import DESCRIPTION, DISPLAY_NAME, SERVICE_NAME
 FAILURE_RESET_S = 86400
 FAILURE_ACTIONS = "restart/5000/restart/30000/restart/60000"
 # Time Windows waits at shutdown for the recorder to stop FFmpeg gracefully and seal the last
-# segment (normally a few seconds; FFmpeg stop grace is 8 s).
-PRESHUTDOWN_TIMEOUT_MS = 120_000
+# segment. Normally a few seconds; the recorder bounds its shutdown work to
+# sentinel.service.SHUTDOWN_BUDGET_S (165 s) so it always fits (unit test checks this).
+PRESHUTDOWN_TIMEOUT_MS = 180_000
 # Only privilege the recorder needs (directory traversal). Everything else the virtual account
 # could hold is removed from the service token. NOT EXECUTED: if the service fails to start with
 # a privilege error on the target machine, remove this step and report it.
@@ -187,6 +191,8 @@ class InstallInputs:
     host: HostCommand
     service_name: str = SERVICE_NAME
     start: bool = True
+    status_dir: Path | None = None       # operator-readable folder ([storage] status_dir); required
+    status_readers: str = "group"        # "group" (local group Sentinel Operators) | "users" (BUILTIN\Users)
 
 
 def install_plan(inp: InstallInputs, forbidden: Iterable[str] | None = None) -> list[Step]:
@@ -200,6 +206,12 @@ def install_plan(inp: InstallInputs, forbidden: Iterable[str] | None = None) -> 
         check_dedicated_dir(d, "the recording/data/log folder", forbidden)
     if any(_norm(d) == _norm(cfg_dir) for d in inp.data_dirs):
         raise PlanError("keep the configuration file in its own folder, separate from data, spool and logs")
+    if inp.status_dir is None or any(_norm(inp.status_dir) == _norm(d) for d in (*inp.data_dirs, cfg_dir)):
+        raise PlanError("set [storage] status_dir to its own folder (e.g. C:\\ProgramData\\Sentinel\\status): "
+                        "operators may read it, while the data folder stays restricted to the service")
+    check_dedicated_dir(inp.status_dir, "the status folder", forbidden)
+    if inp.status_readers not in ("group", "users"):
+        raise PlanError("status readers must be 'group' or 'users'")
 
     steps = [
         Step(f"Register the service {name} (automatic start at boot, virtual account {account})",
@@ -220,17 +232,29 @@ def install_plan(inp: InstallInputs, forbidden: Iterable[str] | None = None) -> 
         steps.append(Step("Give the service the Python search path of this source installation",
                           action="set_service_environment",
                           params={"service": name, "entries": list(inp.host.environment)}))
-    steps.append(Step("Create the data, spool and log folders", action="make_dirs",
-                      params={"paths": [str(d) for d in inp.data_dirs]}))
+    if inp.status_readers == "group":
+        steps += [
+            # Fails harmlessly if the group already exists (re-install); the next step verifies it.
+            Step(f'Create the local group "{OPERATORS_GROUP}" (add operator accounts to it)',
+                 ("net", "localgroup", OPERATORS_GROUP, "/add", f"/comment:{OPERATORS_GROUP_COMMENT}"),
+                 may_fail=True),
+            Step(f'Check that the group "{OPERATORS_GROUP}" exists', ("net", "localgroup", OPERATORS_GROUP)),
+        ]
+        reader = OPERATORS_GROUP          # custom group names are not localised
+    else:
+        reader = _sid(SID_USERS)
+    steps.append(Step("Create the data, spool, log and status folders", action="make_dirs",
+                      params={"paths": [str(d) for d in (*inp.data_dirs, inp.status_dir)]}))
     for d in inp.data_dirs:
         steps += restrict_dir_steps(d, sid, "M")
+    steps += restrict_dir_steps(inp.status_dir, sid, "M", extra_grants=(f"{reader}:(OI)(CI)RX",))
     steps.append(Step(f"Configuration folder {cfg_dir}: Administrators change, service and Users read",
                       ("icacls", str(cfg_dir), "/inheritance:r", "/grant:r",
                        f"{_sid(SID_SYSTEM)}:(OI)(CI)F", f"{_sid(SID_ADMINISTRATORS)}:(OI)(CI)F",
                        f"{_sid(sid)}:(OI)(CI)RX", f"{_sid(SID_USERS)}:(OI)(CI)RX", "/Q")))
     if inp.credentials_path is not None:
         steps.append(Step("Camera credentials file: Administrators and the service account only",
-                          secret_file_acl_argv(inp.credentials_path, sid), may_fail=True))
+                          secret_file_acl_argv(inp.credentials_path, sid)))
     if inp.start:
         steps.append(Step("Start the service now", ("sc.exe", "start", name)))
     return steps

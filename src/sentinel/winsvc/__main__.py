@@ -132,8 +132,30 @@ def preflight(cfg_path: Path) -> tuple[InstallInputs | None, list[str], list[str
                                           | winacl.GENERIC_ALL) for s in readers):
             errors.append(f"the service account cannot read {p} (install Python, Sentinel and FFmpeg "
                           "under C:\\Program Files, not in a personal user folder)")
-    inp = InstallInputs(cfg_path, (cfg.spool_path, cfg.data_path, cfg.log_path), creds, host)
+    if not cfg.storage.status_dir:
+        errors.append("[storage] status_dir is not set: operators could not read the recorder status "
+                      "(use a separate folder, e.g. C:\\ProgramData\\Sentinel\\status)")
+    errors += [f"code could be changed by a non-administrator: {p}" for p in code_write_problems(cfg, cfg_path, host)]
+    inp = InstallInputs(cfg_path, (cfg.spool_path, cfg.data_path, cfg.log_path),
+                        creds if creds is not None and creds.exists() else None, host,
+                        status_dir=cfg.status_dir_path if cfg.storage.status_dir else None)
     return inp, errors, warnings
+
+
+def code_write_problems(cfg: object, cfg_path: Path, host: object, recursive: bool = True,
+                        scan: Callable[..., list[str]] | None = None) -> list[str]:
+    """Interpreter / PYTHONPATH / package / FFmpeg folders (recursively) and the configuration file
+    and folder must not be writable by non-administrators (see codeacl). ``recursive=False`` is the
+    cheap variant run at every service start."""
+    from .codeacl import scan as default_scan
+
+    tools = [Path(t) for t in (cfg.tools.ffmpeg, cfg.tools.ffprobe) if Path(t).is_absolute()]  # type: ignore[attr-defined]
+    roots = [Path(p) for p in host.read_paths] + sorted({t.parent for t in tools})  # type: ignore[attr-defined]
+    singles = [Path(host.interpreter), cfg_path, cfg_path.parent, *tools]  # type: ignore[attr-defined]
+    singles = [p for p in singles if p.exists()]
+    roots = [r for r in roots if r.exists()]
+    run = scan or default_scan
+    return run(singles, roots) if recursive else run(singles + roots, [])
 
 
 # ---------------------------------------------------------------------- commands
@@ -150,7 +172,8 @@ def cmd_install(args: argparse.Namespace) -> int:
         return EXIT_FAILED
     try:
         steps = install_plan(InstallInputs(inp.config_path, inp.data_dirs, inp.credentials_path, inp.host,
-                                           start=not args.no_start))
+                                           start=not args.no_start, status_dir=inp.status_dir,
+                                           status_readers=args.status_readers))
     except PlanError as exc:
         print(f"PROBLEM: {exc}")
         return EXIT_FAILED
@@ -213,6 +236,23 @@ def _dir_report(path: Path, svc_sid: str) -> str:
     return "; ".join(parts) or "restricted to SYSTEM, Administrators and the service (OK)"
 
 
+def _status_dir_report(path: Path, svc_sid: str) -> str:
+    """Operators may read the status folder; only SYSTEM, Administrators and the service may write."""
+    from ..platform import winacl
+    from .codeacl import WRITE_RIGHTS
+
+    try:
+        dacl = winacl.read_dacl(path)
+    except (winacl.AclError, OSError) as exc:
+        return f"cannot read permissions ({exc})"
+    writers = winacl.disallowed_grants(dacl, {winacl.SID_SYSTEM, winacl.SID_ADMINISTRATORS, svc_sid}, WRITE_RIGHTS)
+    readers = {a.sid for a in dacl.aces if a.allows and not a.inherit_only and a.mask & winacl.FILE_READ_DATA}
+    readers -= {winacl.SID_SYSTEM, winacl.SID_ADMINISTRATORS, svc_sid}
+    if writers:
+        return "WRITABLE BY OTHERS: " + "; ".join(writers)
+    return f"OK (read access for {len(readers)} other principal(s): {', '.join(sorted(readers)) or 'none'})"
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     from ..platform import winacl
     from ..platform.windows import WindowsPlatform, query_w32time
@@ -248,6 +288,11 @@ def cmd_status(args: argparse.Namespace) -> int:
         svc_sid = winacl.service_sid(SERVICE_NAME)
         for label, p in (("spool", cfg.spool_path), ("data", cfg.data_path), ("logs", cfg.log_path)):
             print(f"Folder {label} {p}: {_dir_report(p, svc_sid) if p.exists() else 'MISSING'}")
+        sd = cfg.status_dir_path
+        if not cfg.storage.status_dir:
+            print("Folder status: NOT SET ([storage] status_dir) - operators cannot read the status")
+        else:
+            print(f"Folder status {sd}: {_status_dir_report(sd, svc_sid) if sd.exists() else 'MISSING'}")
         if cfg.camera.credentials_file:
             cp = Path(cfg.camera.credentials_file)
             try:
@@ -258,7 +303,7 @@ def cmd_status(args: argparse.Namespace) -> int:
             except CredentialError as exc:
                 print(f"Camera credentials: PROBLEM: {exc}")
                 healthy = False
-        doc, problem = read_status(cfg.data_path / "status.json")
+        doc, problem = read_status(cfg.status_path)
         print(banner(doc, problem))
         healthy = healthy and doc is not None and not problem
     return EXIT_OK if healthy else EXIT_FAILED
@@ -344,25 +389,109 @@ def cmd_host(args: argparse.Namespace) -> int:
     return host.exit_code if host.exit_code is not None else EXIT_FAILED
 
 
-def run_recorder_in_host(host: object, config: str, recorder_factory: Callable | None = None) -> int:
+def _raw_storage_paths(config: str) -> tuple[str, Path | None, Path | None]:
+    """Best effort for a configuration that failed validation: (camera id, status file, log dir)
+    taken from the raw TOML, so the failure can still be shown to operators and logged."""
+    import tomllib
+
+    base = Path(config).resolve().parent
+    try:
+        with open(config, "rb") as fh:
+            raw = tomllib.load(fh)
+    except (OSError, tomllib.TOMLDecodeError):
+        return "unknown", None, None
+
+    def path(v: object) -> Path | None:
+        if not isinstance(v, str) or not v:
+            return None
+        p = Path(v)
+        return p if p.is_absolute() else (base / p)
+    sto = raw.get("storage") if isinstance(raw.get("storage"), dict) else {}
+    cam = raw.get("camera") if isinstance(raw.get("camera"), dict) else {}
+    status_dir = path(sto.get("status_dir")) or path(sto.get("data_dir"))
+    camera_id = cam.get("id") if isinstance(cam.get("id"), str) else "unknown"
+    return camera_id, (status_dir / "status.json") if status_dir else None, path(sto.get("log_dir"))
+
+
+def _startup_failure(message: str, camera_id: str, status_file: Path | None, log_dir: Path | None,
+                     event_log: Callable[[str], object]) -> None:
+    """Make a failure before the recorder exists visible: Windows event log, the recorder log
+    (if its folder is known) and a *terminal* C-001 status, so operators see "Recording stopped.
+    Error C-001 …" instead of a stale X-001. Each step is best effort."""
+    import logging
+
+    from ..logging_setup import setup_logging
+    from ..status import fatal_status_document, write_status
+
+    event_log(f"Sentinel Recorder cannot start: {message}")
+    if log_dir is not None:
+        try:
+            setup_logging(log_dir, "INFO", to_stderr=False)
+            logging.getLogger("sentinel.winsvc").critical("cannot start recording: %s", message)
+        except Exception:  # noqa: BLE001
+            pass
+    if status_file is not None:
+        try:
+            from .. import __version__
+
+            write_status(status_file, fatal_status_document(
+                "C-001", camera_id, detail={"reason": message},
+                service={"version": __version__, "platform": "windows", "windows_service": SERVICE_NAME}))
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _default_event_log(message: str) -> object:
+    from .eventlog import report_event
+
+    return report_event(message)
+
+
+def _running_code_problems(cfg: object, config: str) -> list[str]:
+    from .commands import host_command
+
+    return code_write_problems(cfg, Path(config).resolve(), host_command(Path(config).resolve()), recursive=False)
+
+
+def run_recorder_in_host(host: object, config: str, recorder_factory: Callable | None = None,
+                         event_log: Callable[[str], object] = _default_event_log,
+                         code_check: Callable[[object, str], list[str]] | None = None) -> int:
     """Body of ServiceMain: load configuration, log to file only (a service has no console),
-    run the recorder until stopped. Separated so it can be tested with a fake SCM."""
+    refuse to run from code non-administrators can change, run the recorder until stopped.
+    Separated so it can be tested with a fake SCM."""
+    import logging
+
     from ..config import ConfigError, load_config
     from ..logging_setup import setup_logging
     from ..service import EXIT_CONFIG, RecorderService
 
     try:
         cfg = load_config(config)
-    except ConfigError:
-        return EXIT_CONFIG          # SCM records the exit code; `winsvc status` explains it
+    except ConfigError as exc:
+        _startup_failure(f"configuration error: {exc}", *_raw_storage_paths(config), event_log=event_log)
+        return EXIT_CONFIG          # SCM restarts it every 60 s; each attempt is visible as above
     setup_logging(cfg.log_path, cfg.service.log_level, to_stderr=False)
+    wlog = logging.getLogger("sentinel.winsvc")
+    try:
+        unsafe = (code_check or _running_code_problems)(cfg, config)
+    except Exception as exc:  # noqa: BLE001 - a broken check must not silently pass
+        unsafe = [f"the program-file permission check failed: {exc}"]
+    if unsafe:
+        for p in unsafe:
+            wlog.critical("refusing to start: code could be changed by a non-administrator: %s", p)
+        _startup_failure("program files can be changed by non-administrators (see the recorder log)",
+                         cfg.camera.id, cfg.status_path, None, event_log)
+        return EXIT_CONFIG
     svc = (recorder_factory or RecorderService)(cfg)
-    host.on_stop(svc.request_stop)        # type: ignore[attr-defined]
-    host.report_running()                 # type: ignore[attr-defined]
-    import logging
 
-    logging.getLogger("sentinel.winsvc").info("Sentinel recorder starting as Windows service %s (pid %d)",
-                                              SERVICE_NAME, os.getpid())
+    def stop() -> None:
+        if getattr(host, "system_shutdown", False) and hasattr(svc, "request_shutdown"):
+            svc.request_shutdown()       # bounded drain inside the pre-shutdown window
+        else:
+            svc.request_stop()
+    host.on_stop(stop)                    # type: ignore[attr-defined]
+    host.report_running()                 # type: ignore[attr-defined]
+    wlog.info("Sentinel recorder starting as Windows service %s (pid %d)", SERVICE_NAME, os.getpid())
     return svc.run()
 
 
@@ -374,6 +503,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--config", required=True)
     p.add_argument("--dry-run", action="store_true", help="only print the commands")
     p.add_argument("--no-start", action="store_true", help="do not start the service after installing")
+    p.add_argument("--status-readers", choices=("group", "users"), default="group",
+                   help="who may read the status folder: the local group 'Sentinel Operators' (default) "
+                        "or every local user")
     p = sub.add_parser("uninstall", help="remove the service registration (recordings are kept)")
     p.add_argument("--dry-run", action="store_true")
     p = sub.add_parser("status", help="service, time synchronisation, permissions and recorder status")

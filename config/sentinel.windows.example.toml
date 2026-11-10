@@ -3,6 +3,7 @@
 #   C:\Program Files\Sentinel\                 program (readable by the service account)
 #   C:\ProgramData\Sentinel\config\            this file + camera.dpapi (Administrators change)
 #   C:\ProgramData\Sentinel\{spool,data,logs}  recordings, ledger, logs (service account only)
+#   C:\ProgramData\Sentinel\status\            status.json + ledger snapshot (operators may READ)
 # Install the service from an elevated Command Prompt:
 #   python -m sentinel.winsvc set-camera-credentials --config C:\ProgramData\Sentinel\config\sentinel.toml
 #   python -m sentinel.winsvc install --config C:\ProgramData\Sentinel\config\sentinel.toml --dry-run
@@ -30,6 +31,8 @@ display_timezone = "America/New_York"
 spool_dir = 'C:\ProgramData\Sentinel\spool'
 data_dir = 'C:\ProgramData\Sentinel\data'
 log_dir = 'C:\ProgramData\Sentinel\logs'
+# Operator-readable: the installer grants the local group "Sentinel Operators" read access here.
+status_dir = 'C:\ProgramData\Sentinel\status'
 warning_free_gb = 50
 critical_free_gb = 5
 
