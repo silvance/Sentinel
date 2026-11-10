@@ -1,0 +1,4 @@
+# Phase 2 runtime: Python standard library only, plus the IANA timezone database on
+# platforms without one (Windows). Ubuntu provides it via the system tzdata package.
+tzdata==2025.2 ; sys_platform == "win32"
+# External system packages: ffmpeg, ffprobe (distribution packages).

@@ -1,0 +1,46 @@
+# Sentinel recorder configuration — EXAMPLE ONLY.
+# Copy to /etc/sentinel/sentinel.toml (root:sentinel, 0640) and edit.
+# No real addresses or credentials belong in this file.
+
+[camera]
+id = "CAM01"                       # letters, digits, - and _ ; appears in ledger and exports
+name = "Camera 1"
+# The RTSP path for the MAXSUR M961-5-CP-IP has NOT been verified. Obtain it from vendor
+# documentation or ONVIF GetStreamUri on the actual unit (docs/02, risk A1).
+# 192.0.2.0/24 is a documentation-only address range.
+url = "rtsp://192.0.2.10:554/REPLACE-WITH-VERIFIED-PATH"
+transport = "tcp"                  # RTSP interleaved over TCP (avoids silent UDP loss)
+credentials_file = "/etc/sentinel/camera.secret"   # 0600, owned by the sentinel service user
+include_audio = false              # change only after a documented collection-scope decision
+
+[recording]
+segment_seconds = 300              # approximately; cuts occur at the next keyframe
+align_to_clock = true              # cut at :00, :05, :10 ... of the host clock
+connect_timeout_s = 20
+stall_timeout_s = 15               # stream time not advancing for this long => restart
+io_timeout_s = 10                  # FFmpeg socket timeout
+backoff_initial_s = 1
+backoff_max_s = 30
+validation = "packets"             # "decode" fully decodes each segment (more CPU)
+content_hash = "deferred"          # decoded-frame SHA-256, computed in a low-priority background worker
+frame_hashes = true                # per-frame SHA-256 sidecar for each segment
+max_internal_gap_s = 2.0
+timeline_drift_tolerance_s = 3.0   # stream time behind real time by more than this => recorded gap
+timeline_drift_persist_s = 5.0
+escalate_after_s = 180             # outage longer than this => "Automatic recovery unsuccessful"
+clock_step_tolerance_s = 2.0
+display_timezone = "America/New_York"   # IANA name; all stored times remain UTC
+
+[storage]
+spool_dir = "/var/lib/sentinel/spool"
+data_dir = "/var/lib/sentinel/data"
+log_dir = "/var/log/sentinel"
+warning_free_gb = 50
+critical_free_gb = 5
+
+[tools]
+ffmpeg = "/usr/bin/ffmpeg"
+ffprobe = "/usr/bin/ffprobe"
+
+[service]
+log_level = "INFO"

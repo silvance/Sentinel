@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools==75.8.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sentinel-recorder"
+version = "0.2.0.dev0"
+description = "Standalone single-camera IP recorder and evidence export appliance"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Apache-2.0" }
+dependencies = ["tzdata==2025.2; sys_platform == 'win32'"]   # stdlib otherwise; FFmpeg/FFprobe are system packages
+
+[project.optional-dependencies]
+dev = ["pytest==8.3.4"]
+
+[project.scripts]
+sentinel-recorder = "sentinel.service:main"
+# The simulated camera is a development tool (it listens on TCP) and is deliberately not
+# installed as a command; run it with `python -m sentinel.sim.camera` from a source checkout.
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "tests"]
+markers = [
+  "integration: requires FFmpeg/FFprobe on PATH; spawns real processes",
+  "slow: takes more than ~20 seconds",
+]
+addopts = "-ra"

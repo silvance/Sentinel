@@ -1,0 +1,50 @@
+# Sentinel recorder — systemd unit (DRAFT, Phase 6 finalises; not yet executed on Linux).
+# Install: /etc/systemd/system/sentinel-recorder.service ; systemctl enable --now sentinel-recorder
+[Unit]
+Description=Sentinel IP camera recorder
+Documentation=file:///opt/sentinel/docs/01_ARCHITECTURE.md
+After=network-online.target time-sync.target
+Wants=network-online.target
+# Keep retrying forever: never give up on recording because of repeated failures.
+StartLimitIntervalSec=0
+
+[Service]
+Type=notify
+NotifyAccess=main
+User=sentinel
+Group=sentinel
+ExecStart=/opt/sentinel/venv/bin/python -m sentinel.service run --config /etc/sentinel/sentinel.toml
+Restart=always
+RestartSec=5
+# The recording loop pings the watchdog; a hung recorder is killed and restarted.
+WatchdogSec=60
+TimeoutStartSec=120
+# Allow the finaliser to seal the last segment on shutdown.
+TimeoutStopSec=420
+KillMode=control-group
+KillSignal=SIGTERM
+
+# --- least privilege -------------------------------------------------------------
+UMask=0027
+NoNewPrivileges=yes
+# Hide other users' processes, and this service's FFmpeg argv (contains the RTSP URL with
+# credentials; FFmpeg cannot read it from a file), from other local accounts. Risk B4.
+ProtectProc=invisible
+ProcSubset=pid
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/sentinel /var/log/sentinel
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictRealtime=yes
+# Camera is on the local network only; no other address families are needed.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

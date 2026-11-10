@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+# local runtime data (never commit recordings or ledgers)
+spool/
+data/
+logs/
+*.secret
