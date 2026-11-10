@@ -1,0 +1,12 @@
+[Desktop Entry]
+# Template copied into the build folder. install-desktop-entry.sh replaces @APPDIR@ with the
+# absolute install folder and installs it to ~/.local/share/applications/.
+Type=Application
+Version=1.0
+Name=Sentinel
+Comment=Start the Sentinel camera recorder and show its status
+Exec="@APPDIR@/sentinel"
+Path=@APPDIR@
+Terminal=true
+Categories=AudioVideo;Video;
+StartupNotify=false

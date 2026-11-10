@@ -1,0 +1,30 @@
+# Build-time only: produces the click-to-run program (docs/08_PACKAGING.md). Never installed on
+# the recording machine. Install into a dedicated build virtualenv with hash checking:
+#
+#   python -m venv .venv-build
+#   .venv-build/Scripts/python -m pip install --require-hashes --no-deps -r requirements/build.txt
+#
+# (packaging/windows/build.ps1 and packaging/linux/build.sh do exactly that.)
+# Hashes: wheels for win_amd64 and manylinux2014_x86_64, recorded 2026-11-09 from PyPI. To
+# build offline, `pip download` these wheels once into a folder and add `--no-index
+# --find-links <folder>`; the hashes make a substituted wheel fail the install.
+#
+# Runtime dependency of the program itself (bundled into the build), see runtime.txt:
+tzdata==2025.2 ; sys_platform == "win32" \
+    --hash=sha256:1a403fada01ff9221ca8044d701868fa132215d84beb92242d9acd2147f667a8
+# PyInstaller and its dependencies:
+pyinstaller==6.22.3 \
+    --hash=sha256:500bd58c7bf7e584a8435adccbd763a0b918d5c12b08d74ff50fd79b2915458b \
+    --hash=sha256:451a4ae14b719365bf1a2f0a99dae7b3463060061c3a394c70d5264cfb439528
+pyinstaller-hooks-contrib==2026.10 \
+    --hash=sha256:dfc3cde20a7ce6c92e803016e66eed4b7050467e2c5f886a3745d89b258c6d6d
+altgraph==0.17.5 \
+    --hash=sha256:f3a22400bce1b0c701683820ac4f3b159cd301acab067c51c653e06961600597
+packaging==26.3 \
+    --hash=sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c
+setuptools==84.2.1 \
+    --hash=sha256:ca140b45d5325a9478f880e351484f62fef15f336462e449ca0c03c873d589c2
+pefile==2024.8.26 ; sys_platform == "win32" \
+    --hash=sha256:76f8b485dcd3b1bb8166f1128d395fa3d87af26360c2358fb75b80019b957c6f
+pywin32-ctypes==0.2.3 ; sys_platform == "win32" \
+    --hash=sha256:8a1513379d709975552d202d942d9837758905c8d01eb82b8bcc30918929e7b8

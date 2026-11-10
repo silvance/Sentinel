@@ -1,0 +1,25 @@
+SENTINEL CAMERA RECORDER (Linux)
+================================
+
+To start Sentinel or check that it is recording:
+
+    Double-click "Sentinel" (sentinel.desktop) or run  ./sentinel
+
+A terminal window shows the recorder status in large letters. "RECORDING NORMALLY"
+means everything is working. You can close the window; recording continues.
+
+If the window shows an error code (for example "Error R-003"), call technical
+support and read them the code.
+
+
+For the installing technician
+-----------------------------
+* Install: copy this folder to /opt/sentinel (or anywhere), then run
+      ./install-desktop-entry.sh
+  which writes ~/.local/share/applications/sentinel.desktop pointing at this folder.
+* First start: type SETUP and answer the questions.
+* Settings: /etc/sentinel/sentinel.toml when run as root (systemd service), otherwise
+  ~/.config/sentinel/sentinel.toml; recordings under ~/.local/share/sentinel/ (see "./sentinel about").
+* Commands: ./sentinel about | check-config | status | diagnostics | stop | setup --force
+* For unattended use install the systemd unit (packaging/systemd in the source) with
+  ExecStart=/opt/sentinel/sentinel recorder run --config /etc/sentinel/sentinel.toml
