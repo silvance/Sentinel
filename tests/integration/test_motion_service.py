@@ -72,3 +72,60 @@ def test_working_hours_record_without_motion(tmp_path: Path) -> None:
         finally:
             h.stop()
     assert {r["end_reason"] for r in h.runs()} == {"graceful_stop"}
+
+
+def test_motion_markers_reach_the_review_drive(tmp_path: Path) -> None:
+    """Owner request: show reviewers when there is motion in a recording. Continuous recording with
+    markers on; motion at 20-26 s and 40-44 s of the camera's stream; export; the manifest and the
+    summary list both, as time into the video."""
+    from sentinel.db import Ledger
+    from sentinel.export.engine import ReviewExporter
+    from sentinel.export.target import ExportTarget
+    from sentinel.gui.ledger_view import load_timeline
+    from sentinel.media.probe import ffmpeg_version
+    from sentinel.platform import get_platform
+    from sentinel.recorder.integrity import IntegrityWorker
+
+    with SimulatedCamera(fps=15, motion=[(20, 26), (40, 44)]) as cam:
+        t0 = time.time()
+        h = Harness(tmp_path, cam.url, motion={"markers": True},
+                    recording={"display_timezone": "America/New_York"}).start()
+        try:
+            wait_for(lambda: time.time() - t0 > 58, 70, what="recording through both motions")
+        finally:
+            h.stop()
+    periods = [json.loads(e["detail"]) for e in h.events("motion_period")]
+    assert len(periods) == 2, periods
+    for p, (a, b) in zip(periods, [(20, 26), (40, 44)]):
+        start, end = parse_iso_utc(p["start_utc"]), parse_iso_utc(p["end_utc"])
+        assert t0 + a - 1.0 <= start <= t0 + a + 4.0, (a, start - t0)          # key frames: ~1 s apart
+        assert t0 + b - 3.0 <= end <= t0 + b + 3.0, (b, end - t0)
+        assert p["peak_changed_percent"] > 1.0
+    assert {r["end_reason"] for r in h.runs()} == {"graceful_stop"}             # markers never stop recording
+
+    led = Ledger(h.cfg.data_path / "sentinel.db")
+    try:
+        w = IntegrityWorker(h.cfg, led, get_platform(), ffmpeg_version(h.cfg.tools.ffmpeg))
+        for s in led.segments_needing_content_hash():
+            w.hash_segment(s["segment_id"])
+        root = tmp_path / "drive"
+        root.mkdir()
+        res = ReviewExporter(h.cfg, ExportTarget(root, {"drive_uuid": "t-1", "label": "REVIEW"}), ledger=led,
+                             allow_same_volume=True, operator_id="op").run()
+        assert res.state == "COMPLETE", res
+    finally:
+        led.close()
+    man = json.loads(next(root.glob("Manifests/*/Export_Manifest.json")).read_text("utf-8"))
+    assert len(man["motion"]) == 2 and "approximate" in man["motion_note"]
+    videos = {d["path"]: d for d in man["derivatives"]}
+    for m, p in zip(man["motion"], periods):
+        assert m["start_utc"] == p["start_utc"] and m["in_videos"]
+        w0 = m["in_videos"][0]
+        v = videos[w0["video"]]
+        assert w0["from_s"] == pytest.approx(parse_iso_utc(p["start_utc"]) - parse_iso_utc(v["start_utc"]), abs=0.1)
+        assert v["motion"] and w0["to_s"] >= w0["from_s"]
+    html = next(root.glob("Reports/*.html")).read_text("utf-8")
+    assert "Motion (time into the video)" in html and "0:00:" in html and "approximate" in html
+
+    tl = load_timeline(h.cfg.data_path / "sentinel.db", h.cfg.camera.id, time.time())
+    assert len(tl.motion) == 2

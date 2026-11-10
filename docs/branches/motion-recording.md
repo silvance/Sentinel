@@ -1,9 +1,30 @@
-# Motion-triggered recording (2026-11-10)
+# Motion-triggered recording and motion markers (2026-11-10)
 
 Owner request: record all the time during set working hours; outside them record only when motion
 is detected, for a set time after the detection, restarting that timer at every new detection.
 Camera in use: MAXSUR M961 series (e.g. M961-5-CP-IP: 5 MP, H.264, multi-streaming, ONVIF
 Profile S/T, built-in motion detection).
+
+## Motion markers for reviewers (all recordings)
+
+Owner request: show reviewers when there is motion during a recording. With `[motion] markers = true`
+(written by first-run setup; code default off) the detector runs all the time, including working
+hours and without any "motion" schedule, and never starts or stops recording by itself.
+
+* **Recording log.** Every stretch of motion is one `motion_period` event (start = first moving
+  frame, end = last moving frame, peak share of the picture changed), joined when less than
+  `marker_merge_s` (10 s) apart and split every 5 minutes so a crash loses at most the current
+  part. Events are in the hash-chained, insert-only log, like every other event.
+* **Review drive.** The export plan freezes the motion periods that fall in the exported videos.
+  `Export_Summary.html` gets a column **"Motion (time into the video)"**, e.g.
+  `0:00:21–0:00:28, 0:00:41–0:00:46`, so the reviewer can jump straight there (up to 12 per video;
+  the rest are in the manifest). `Export_Manifest.json` has `motion` (each period with local times and
+  `in_videos: [{video, from_s, to_s}]`), `derivatives[].motion`, and `motion_note`.
+* **Operator screen.** The 24-hour timeline marks motion with blue ticks along the top of the bar
+  (legend "Motion"; at least 6 px wide, so a few seconds of motion stays visible) and the summary
+  line says "motion seen N times".
+* Wording everywhere: motion times are approximate (start watching a few seconds earlier) and do not
+  show that nothing happened at other times.
 
 ## How to set it up
 

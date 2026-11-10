@@ -12,6 +12,12 @@ outside working hours: the recorder records only after motion is seen and keeps 
     min_frames = 2              # motion must be seen in this many analysed frames in a row
     analysis_fps = 4            # frames analysed per second (second stream only)
 
+Motion markers for reviewers (``markers = true``, on in deployed configurations): the detector
+also runs while recording, and every stretch of motion (from its first moving frame to its last,
+joined when less than ``marker_merge_s`` apart, split every ``MAX_PERIOD_S``) is written to the
+recording log as a ``motion_period`` event. The review-drive export lists them per video as
+"time into this video", and the operator screen's timeline marks them.
+
 How it works. A separate low-priority FFmpeg reads the camera stream (the second, low-resolution
 stream when ``stream_path`` is set, otherwise only the key frames of the main stream), shrinks
 each analysed frame to 160x120 grey levels and hands it to :class:`MotionAnalyzer`, which counts
@@ -47,6 +53,7 @@ log = logging.getLogger(__name__)
 
 WIDTH, HEIGHT = 160, 120
 FRAME_BYTES = WIDTH * HEIGHT
+MAX_PERIOD_S = 300.0          # a longer stretch of motion is logged in parts (none is lost in a crash)
 
 
 class MotionConfigError(ValueError):
@@ -62,6 +69,8 @@ class MotionConfig:
     min_frames: int = 2
     analysis_fps: float = 4.0
     unhealthy_after_s: float = 15.0
+    markers: bool = False              # log motion periods for reviewers (deployed configurations: true)
+    marker_merge_s: float = 10.0       # motion less than this far apart is one period
 
 
 def validate(m: MotionConfig) -> None:
@@ -76,6 +85,7 @@ def validate(m: MotionConfig) -> None:
     rng("min_frames", 1, 20)
     rng("analysis_fps", 0.5, 15)
     rng("unhealthy_after_s", 5, 300)
+    rng("marker_merge_s", 1, 300)
     p = m.stream_path
     if p and (any(c.isspace() for c in p) or "@" in p or "://" in p):
         raise MotionConfigError("[motion] stream_path must be only the path of the camera's second stream "
@@ -127,6 +137,11 @@ class MotionAnalyzer:
         self._run = 0
         self.last_score = 0.0           # percent of the picture changed in the last frame
 
+    @property
+    def run_length(self) -> int:
+        """Consecutive frames above the threshold so far (0 = this frame showed no motion)."""
+        return self._run
+
     def score(self, a: bytes, b: bytes) -> float:
         t = self.m.pixel_threshold
         changed = sum(1 for x, y in zip(a, b) if (x - y if x > y else y - x) > t)
@@ -154,12 +169,16 @@ class MotionDetector:
     def __init__(self, ffmpeg: str, url: str, m: MotionConfig, transport: str = "tcp",
                  input_format: str | None = None, popen_kwargs: dict[str, Any] | None = None,
                  clock: Callable[[], float] = time.time, mono: Callable[[], float] = time.monotonic,
-                 on_motion: Callable[[float, float], None] | None = None) -> None:
+                 on_motion: Callable[[float, float], None] | None = None,
+                 on_period: Callable[[float, float, float], None] | None = None) -> None:
         self.m = m
         self.argv = detector_argv(ffmpeg, url, m, transport, input_format)
         self.popen_kwargs = dict(popen_kwargs or {})
         self.clock, self.mono = clock, mono
         self.on_motion = on_motion
+        self.on_period = on_period            # (start_epoch, end_epoch, peak_percent) of a closed motion period
+        self._candidate_start: float | None = None
+        self._period: list[float] | None = None   # [start, last motion, peak]
         self.analyzer = MotionAnalyzer(m)
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -222,6 +241,35 @@ class MotionDetector:
         self._kill()
         if self._thread is not None:
             self._thread.join(timeout)
+        self._close_period()
+
+    # -------------------------------------------------------------- motion periods (reviewer markers)
+    def _track(self, now: float, confirmed: bool) -> None:
+        score = self.analyzer.last_score
+        if self.analyzer.run_length == 1:
+            self._candidate_start = now              # first moving frame of a possible period
+        elif self.analyzer.run_length == 0:
+            self._candidate_start = None
+        p = self._period
+        if confirmed:
+            if p is None:
+                self._period = [self._candidate_start or now, now, score]
+            else:
+                p[1], p[2] = now, max(p[2], score)
+                if p[1] - p[0] >= MAX_PERIOD_S:
+                    self._close_period()
+                    self._period = [now, now, score]
+        elif p is not None and now - p[1] > self.m.marker_merge_s:
+            self._close_period()
+
+    def _close_period(self) -> None:
+        with self._lock:                         # reader thread and stop() may both close it
+            p, self._period = self._period, None
+        if p is not None and self.on_period is not None:
+            try:
+                self.on_period(p[0], p[1], p[2])
+            except Exception:
+                log.exception("motion period could not be logged")
 
     def _kill(self) -> None:
         proc = self._proc
@@ -270,7 +318,9 @@ class MotionDetector:
                 now_mono, now = self.mono(), self.clock()
                 with self._lock:
                     self.last_frame_mono = now_mono
-                if self.analyzer.feed(frame):
+                confirmed = self.analyzer.feed(frame)
+                self._track(now, confirmed)
+                if confirmed:
                     with self._lock:
                         first = self.last_motion_mono is None or now_mono - self.last_motion_mono > self.m.keep_recording_s
                         self.last_motion_mono, self.last_motion_epoch = now_mono, now
@@ -281,6 +331,7 @@ class MotionDetector:
                         except Exception:
                             log.exception("motion callback failed")
         finally:
+            self._close_period()                     # stream ended: the period ends at its last motion
             self._kill()
             try:
                 proc.wait(10)

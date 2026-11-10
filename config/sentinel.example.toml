@@ -142,6 +142,7 @@ end = "24:00"                      # an end before the start runs past midnight
 # before it is kept. If detection stops working, the recorder records all the time (W-001).
 # Tune on site with: Sentinel.exe motion-test   (walk through the scene while it runs)
 [motion]
+markers = true                     # log motion during recordings for reviewers (export summary, timeline)
 stream_path = ""                   # camera's low-resolution second stream path (recommended; from the
                                    # camera documentation); "" = key frames of the main stream
 keep_recording_s = 120             # 10..3600

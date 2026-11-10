@@ -239,6 +239,7 @@ class TimelinePage(QWidget):
         for kind, words in ((SpanKind.RECORDED, "Recorded"), (SpanKind.GAP, "No recording"),
                             (SpanKind.DAMAGED, "Damaged recording"), (SpanKind.NO_INFO, "No information")):
             legend.addWidget(LegendItem(self.bar, kind, words))
+        legend.addWidget(LegendItem(self.bar, None, "Motion"))
         legend.addStretch(1)
         s.addLayout(legend)
         lay.addWidget(summary)
@@ -275,6 +276,8 @@ class TimelinePage(QWidget):
                 + (f", {tf.duration(tl.missing_s)} missing in total" if gaps else "")]
         if no_info >= 60:
             bits.append(f"{tf.duration(no_info)} with no information")
+        if tl.motion:
+            bits.append(f"motion seen {len(tl.motion)} time{'s' if len(tl.motion) != 1 else ''}")
         self.sum_detail.setText(" · ".join(bits) + ".")
         self.bar.set_timeline(tl, tz)
         for s in sorted(tl.spans, key=lambda x: x.start, reverse=True):

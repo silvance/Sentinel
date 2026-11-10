@@ -499,6 +499,15 @@ class TimelineBar(QWidget):
                 qp.fillRect(rect, brush)
                 if s.kind is SpanKind.GAP:
                     qp.fillRect(QRectF(x0, bar.top(), max(2.0, min(3.0, w)), bar.height()), edge)
+            # motion markers: a strip along the top of the bar (also visible over recorded time)
+            mc, edge = QColor(p.info), QColor(p.surface)
+            for a, b in self.tl.motion:
+                # a minute of motion is < 1 px on a 24 h bar: always at least MOTION_MIN_W wide
+                w = max(MOTION_MIN_W, (b - a) * scale)
+                x0 = bar.left() + (a - t0) * scale - (w - (b - a) * scale) / 2
+                r = QRectF(x0, bar.top(), w, MOTION_STRIP_PX)
+                qp.fillRect(r.adjusted(-1, 0, 1, 1), edge)
+                qp.fillRect(r, mc)
             qp.restore()
             qp.setPen(QPen(QColor(p.border), 1))
             qp.setBrush(Qt.BrushStyle.NoBrush)
@@ -520,8 +529,14 @@ class TimelineBar(QWidget):
         qp.end()
 
 
+MOTION_STRIP_PX = 18.0
+MOTION_MIN_W = 6.0
+
+
 class LegendItem(QWidget):
-    def __init__(self, bar: TimelineBar, kind: SpanKind, text: str, parent: QWidget | None = None) -> None:
+    """Legend entry; ``kind=None`` is the motion marker."""
+
+    def __init__(self, bar: TimelineBar, kind: SpanKind | None, text: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.bar, self.kind = bar, kind
         lay = QHBoxLayout(self)
@@ -535,8 +550,15 @@ class LegendItem(QWidget):
 
     def _paint_swatch(self, _e: QPaintEvent) -> None:
         qp = QPainter(self.sw)
-        brush, edge = self.bar.brush_for(self.kind)
         r = QRectF(0.5, 0.5, 25, 15)
+        if self.kind is None:
+            qp.fillRect(r, QColor(self.bar.p.surface_alt))
+            qp.fillRect(QRectF(9.5, 0.5, 7, 9), QColor(self.bar.p.info))
+            qp.setPen(QPen(QColor(self.bar.p.border), 1))
+            qp.drawRect(r)
+            qp.end()
+            return
+        brush, edge = self.bar.brush_for(self.kind)
         tint = QColor(edge)
         tint.setAlphaF(0.14 if self.kind not in (SpanKind.RECORDED, SpanKind.LIVE) else 1.0)
         qp.fillRect(r, tint)

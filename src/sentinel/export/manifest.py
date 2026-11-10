@@ -255,6 +255,10 @@ class ManifestBuilder:
                 "note": "This file's SHA-256 differs from its sources' SHA-256 by design (different container).",
             })
         out.sort(key=lambda e: (e["start_utc"] or "", e["path"]))
+        motion = self._motion()
+        for d in out:
+            d["motion"] = [{"from_s": w["from_s"], "to_s": w["to_s"], "start_local": m["start_local"]}
+                           for m in motion for w in m["in_videos"] if w["video"] == d["path"]]
         # Gaps between consecutive reviewer files (the reason a new file was started).
         gaps = [g for g in self.plan.get("gaps", []) if g.get("start_utc")]
         for n, a in enumerate(out):
@@ -263,6 +267,27 @@ class ManifestBuilder:
             a["gap_ids_after"] = [g["gap_id"] for g in gaps if a_end is not None
                                   and parse_iso_utc(g["start_utc"]) >= a_end
                                   and (nxt is None or g["start_utc"] < nxt)]
+        return out
+
+    def _motion(self) -> list[dict[str, Any]]:
+        """Motion periods with, for every video they fall in, the time into that video."""
+        out = []
+        derivs = [(d["path"], parse_iso_utc(d["start_utc"]), parse_iso_utc(d["end_utc"]))
+                  for d in self._raw_derivatives() if d["start_utc"] and d["end_utc"]]
+        for m in self.plan.get("motion", []) or []:
+            a, b = parse_iso_utc(m["start_utc"]), parse_iso_utc(m["end_utc"])
+            where = [{"video": path, "from_s": round(max(a, v0) - v0, 1), "to_s": round(min(b, v1) - v0, 1)}
+                     for path, v0, v1 in derivs if a <= v1 and b >= v0]
+            out.append(dict(m, start_local=self._local(m["start_utc"]), end_local=self._local(m["end_utc"]),
+                            in_videos=where))
+        return out
+
+    def _raw_derivatives(self) -> list[dict[str, Any]]:
+        out = []
+        for i in self.items:
+            if i["kind"] == "mp4":
+                d = _jl(i["detail"]) or {}
+                out.append({"path": i["dest_rel_path"], "start_utc": d.get("start_utc"), "end_utc": d.get("end_utc")})
         return out
 
     def _gaps(self) -> list[dict[str, Any]]:
@@ -322,6 +347,8 @@ class ManifestBuilder:
             "originals": self._originals(),
             "derivatives": self._derivatives(),
             "gaps": self._gaps(),
+            "motion": self._motion(),
+            "motion_note": MOTION_NOTE,
             "coverage": self.plan.get("coverage", {}),
             "warnings": self.plan.get("warnings", []),
             "documents": documents,
@@ -350,10 +377,15 @@ class ManifestBuilder:
         rows = []
         for d in derivs:
             notes = "; ".join(FLAG_TEXT.get(f, f) for f in d["flags"])
+            marks = [f"{_clock(m['from_s'])}&ndash;{_clock(m['to_s'])}" for m in d["motion"]]
+            motion_cell = (", ".join(marks[:MAX_MOTION_LISTED])
+                           + (f" and {len(marks) - MAX_MOTION_LISTED} more (see manifest)" if len(marks) > MAX_MOTION_LISTED
+                              else "")) if marks else "&mdash;"
             dur = parse_iso_utc(d["end_utc"]) - parse_iso_utc(d["start_utc"]) if d["start_utc"] and d["end_utc"] else 0
             lvl = d["content_check"]["level"]
             rows.append(f"<tr><td>{e(d['start_local'] or '')}</td><td>{e(d['end_local'] or '')}</td>"
                         f"<td>{_dur(dur)}</td><td class='path'>{e(d['path'].replace('/', chr(92)))}</td>"
+                        f"<td>{motion_cell}</td>"
                         f"<td>{e(HTML_LEVEL.get(lvl, lvl))}</td><td>{e(notes)}</td></tr>")
         gap_rows = []
         for g in gaps:
@@ -384,9 +416,10 @@ Camera: {e(b['camera_id'])}. Every file listed was copied to this drive and then
 <p>Open the <b>Recordings</b> folder, then the folder for the day, and double-click a video. File names are the local
 start and end time followed by the time zone. A new file starts after every gap.</p>
 <h2>Videos ({len(derivs)})</h2>
-<table><tr><th>Starts</th><th>Ends</th><th>Length</th><th>File</th><th>Pictures compared with originals</th><th>Notes</th></tr>
-{''.join(rows) or '<tr><td colspan=6>No videos in this export.</td></tr>'}
+<table><tr><th>Starts</th><th>Ends</th><th>Length</th><th>File</th><th>Motion (time into the video)</th><th>Pictures compared with originals</th><th>Notes</th></tr>
+{''.join(rows) or '<tr><td colspan=7>No videos in this export.</td></tr>'}
 </table>
+<p><small>{e(MOTION_NOTE)}</small></p>
 <p><small>Every file's bytes were read back from this drive and checked. "All frames checked": every picture of the
 video was compared with the original recordings. "Sample of frames checked": the number of pictures and selected
 parts were compared. "Pictures not yet checked": only the bytes were checked so far.</small></p>
@@ -414,6 +447,18 @@ format differs; the MP4 pictures were checked frame by frame against the origina
 </body></html>
 """
         return page.replace("\n", "\r\n").encode("utf-8")
+
+
+MAX_MOTION_LISTED = 12
+MOTION_NOTE = ("Motion times show where Sentinel's motion detector saw the picture change, as hours:minutes:"
+               "seconds into each video, to help find activity. They are approximate (start watching a few "
+               "seconds earlier) and are not evidence that nothing happened at other times: watch the whole "
+               "video where it matters.")
+
+
+def _clock(seconds: float) -> str:
+    s = max(0, int(seconds))
+    return f"{s // 3600}:{(s % 3600) // 60:02d}:{s % 60:02d}"
 
 
 def _level_of(i: dict[str, Any], d: dict[str, Any]) -> str:

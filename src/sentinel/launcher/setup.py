@@ -129,7 +129,9 @@ def build_config(ans: SetupAnswers, layout: Layout, credentials_file: Path | Non
             # been taken away (drives swapped every 3-5 days). The code default stays OFF, so only a
             # configuration written here (or by an administrator) enables removal.
             "archive": {"enabled": True},
-            "retention": {"enabled": True, "expected_swap_days": DEPLOYED_SWAP_DAYS}}
+            "retention": {"enabled": True, "expected_swap_days": DEPLOYED_SWAP_DAYS},
+            # Owner request 2026-11-10: mark motion in recordings for reviewers (sentinel.motion).
+            "motion": {"markers": True}}
 
 
 # ------------------------------------------------------------------ TOML writing (stdlib has no writer)

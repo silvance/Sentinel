@@ -463,3 +463,33 @@ def test_close_stops_only_the_window_timer(app: QApplication, tmp_path: Path) ->
     assert cfg_win.timer.isActive()
     cfg_win.close()
     assert not cfg_win.timer.isActive()
+
+
+# ---------------------------------------------------------------------------- motion markers
+def test_timeline_marks_motion_for_reviewers(app: QApplication, tmp_path: Path) -> None:
+    from sentinel.clock import iso_utc
+    from sentinel.db import Ledger
+
+    win = open_window(app, tmp_path, "recording_test_camera")
+    try:
+        now = time.time()
+        led = Ledger(win.cfg.data_path / "sentinel.db")
+        try:
+            for a, b in ((now - 7200, now - 7140), (now - 3600, now - 3500)):
+                led.add_event("info", "motion", "motion_period", "Motion seen by the camera",
+                              {"camera_id": "CAM01", "start_utc": iso_utc(a), "end_utc": iso_utc(b),
+                               "peak_changed_percent": 4.2})
+        finally:
+            led.close()
+        win.show_timeline()
+        app.processEvents()
+        page = win.timeline_page
+        assert len(page.bar.tl.motion) == 2
+        texts = visible_texts(page)
+        assert "Motion" in texts and any("motion seen 2 times" in t for t in texts)
+        assert not [t for t in texts if FORBIDDEN.search(t)]
+        out = os.environ.get("SENTINEL_SCREENSHOT_DIR")
+        if out:
+            win.grab().save(str(Path(out) / "timeline_motion.png"))
+    finally:
+        win.close()

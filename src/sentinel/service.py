@@ -43,7 +43,7 @@ from .alerts import Severity, make_alert
 from .clock import Clock, SystemClock, iso_utc, parse_iso_utc
 from .config import AppConfig, ConfigError, check_tools, load_config
 from .credentials import CredentialError, load_credentials, register_secret, url_with_credentials
-from .db import Ledger
+from .db import Ledger, LedgerClosed
 from .diagnostics import build_report
 from .ledgerchain import ANCHOR_LOG_NAME, ChainHead, append_anchor, current_chain_head
 from .logging_setup import setup_logging
@@ -234,10 +234,12 @@ class RecorderService:
         self.keep_awake = KeepAwake().start()
         if self.schedule is not None:
             log.info("recording schedule is on:\n%s", render_plan(self.schedule, self.clock.wall(), days=7))
-        if self.schedule is not None and self.schedule.uses_motion and not cfg.camera.pending:
+        uses_motion = self.schedule is not None and self.schedule.uses_motion
+        if (uses_motion or cfg.motion.markers) and not cfg.camera.pending:
             url = detection_url(url_with_credentials(cfg.camera.url, creds), cfg.motion.stream_path)
             self.motion = MotionDetector(cfg.tools.ffmpeg, url, cfg.motion, cfg.camera.transport,
-                                         cfg.camera.input_format, self.platform.low_priority_popen_kwargs()).start()
+                                         cfg.camera.input_format, self.platform.low_priority_popen_kwargs(),
+                                         on_period=self._log_motion_period if cfg.motion.markers else None).start()
             log.info("motion detection on (%s; keep recording %.0f s after the last motion)",
                      f"second stream {cfg.motion.stream_path}" if cfg.motion.stream_path else "main stream key frames",
                      cfg.motion.keep_recording_s)
@@ -297,6 +299,16 @@ class RecorderService:
                 self._clock_obs_thread.join(30)
             self.ledger.close()
         return exit_code
+
+    def _log_motion_period(self, start: float, end: float, peak: float) -> None:
+        """Reviewer marker: one stretch of motion, in the (tamper-evident) recording log."""
+        try:
+            self.ledger.add_event("info", "motion", "motion_period", "Motion seen by the camera",
+                                  {"camera_id": self.cfg.camera.id, "start_utc": iso_utc(start),
+                                   "end_utc": iso_utc(end), "peak_changed_percent": round(peak, 2),
+                                   "source": "second stream" if self.cfg.motion.stream_path else "main stream key frames"})
+        except LedgerClosed:
+            log.info("motion period %s-%s not logged: service stopping", iso_utc(start), iso_utc(end))
 
     def _motion_broken(self) -> bool:
         """W-001: a motion period is in force but the detector gets no pictures (it then records)."""

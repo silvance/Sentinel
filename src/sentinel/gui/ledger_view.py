@@ -15,7 +15,7 @@ import re
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -145,6 +145,7 @@ class Timeline:
     window_end: float
     spans: tuple[Span, ...] = ()
     available: bool = True
+    motion: tuple[tuple[float, float], ...] = ()     # motion periods (reviewer markers), clipped to the window
 
     @property
     def recorded_s(self) -> float:
@@ -270,6 +271,25 @@ def build_timeline(segments: list[dict[str, Any]], gaps: list[dict[str, Any]], w
     return Timeline(window_start, now, tuple(spans))
 
 
+def motion_periods(rows: list[dict[str, Any]], camera_id: str, window_start: float, now: float) -> tuple[tuple[float, float], ...]:
+    """``motion_period`` event details -> (start, end) epochs clipped to [window_start, now]."""
+    out = []
+    for r in rows:
+        try:
+            d = json.loads(r.get("detail") or "{}")
+        except ValueError:
+            continue
+        if d.get("camera_id", camera_id) != camera_id:
+            continue
+        a, b = _ep(d.get("start_utc")), _ep(d.get("end_utc"))
+        if a is None or b is None:
+            continue
+        a, b = max(a, window_start), min(b, now)
+        if b >= a:
+            out.append((a, b))
+    return tuple(sorted(out))
+
+
 def load_timeline(db_path: Path, camera_id: str, now: float, *, hours: float = 24.0, live: bool = False,
                   live_slack_s: float = 600.0) -> Timeline:
     start = now - hours * 3600.0
@@ -285,9 +305,12 @@ def load_timeline(db_path: Path, camera_id: str, now: float, *, hours: float = 2
                 "SELECT start_utc, end_utc, reason, kind FROM recording_gaps WHERE camera_id=? "
                 "AND (end_utc IS NULL OR end_utc >= ?) AND (start_utc IS NULL OR start_utc <= ?)",
                 (camera_id, lo, hi))]
+            motion = [dict(r) for r in led.query(
+                "SELECT detail FROM events WHERE code='motion_period' AND ts_utc >= ?", (iso_utc(start - 600.0),))]
     except sqlite3.Error:
         return Timeline(start, now, (), available=False)
-    return build_timeline(segs, gaps, start, now, live, live_slack_s)
+    tl = build_timeline(segs, gaps, start, now, live, live_slack_s)
+    return replace(tl, motion=motion_periods(motion, camera_id, start, now))
 
 
 # --------------------------------------------------------------------------- previous exports

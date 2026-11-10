@@ -201,3 +201,72 @@ def test_motion_test_refuses_without_a_camera(tmp_path: Path) -> None:
                                                               development_source=False, input_format=None))
     out: list[str] = []
     assert run_motion_test(cfg, 1, out.append) == 2 and "set-camera" in out[0]
+
+
+# ---------------------------------------------------------------------- reviewer markers
+def _tracker(merge_s: float = 10.0) -> tuple[MotionDetector, list[tuple[float, float, float]]]:
+    periods: list[tuple[float, float, float]] = []
+    d = MotionDetector("ffmpeg", "rtsp://h/s", MotionConfig(min_frames=2, marker_merge_s=merge_s),
+                       on_period=lambda a, b, p: periods.append((a, b, p)))
+    return d, periods
+
+
+def _feed(d: MotionDetector, t: float, moving: bool) -> None:
+    f = frame(100, (int(t * 7) % 120, 10)) if moving else frame(100)
+    d._track(t, d.analyzer.feed(f))
+
+
+def test_motion_periods_start_at_the_first_moving_frame_and_merge() -> None:
+    d, periods = _tracker(merge_s=10)
+    _feed(d, 0.0, False)
+    for t in (5.0, 6.0, 7.0):                        # moving from 5 s (confirmed at 6 s)
+        _feed(d, t, True)
+    for t in (8.0, 12.0):                           # still for 5 s: shorter than merge_s
+        _feed(d, t, False)
+    for t in (13.0, 14.0):                          # moving again: same period
+        _feed(d, t, True)
+    for t in (15.0, 16.0, 27.0):                    # the box vanishing at 15 s is a change too; then still
+        _feed(d, t, False)
+    assert len(periods) == 1 and periods[0][:2] == (5.0, 15.0) and periods[0][2] > 1.0
+    _feed(d, 30.0, True)
+    _feed(d, 31.0, True)
+    d.stop()                                        # an open period is logged on stop
+    assert len(periods) == 2 and periods[1][:2] == (30.0, 31.0)
+
+
+def test_long_motion_is_logged_in_parts() -> None:
+    from sentinel.motion import MAX_PERIOD_S
+
+    d, periods = _tracker()
+    t = 0.0
+    while t <= MAX_PERIOD_S + 30:
+        _feed(d, t, True)
+        t += 1.0
+    assert len(periods) == 1 and periods[0][1] - periods[0][0] >= MAX_PERIOD_S
+
+
+def test_timeline_motion_is_clipped_and_per_camera() -> None:
+    import json as _json
+
+    from sentinel.gui.ledger_view import motion_periods
+
+    rows = [{"detail": _json.dumps({"camera_id": "CAM01", "start_utc": "2026-11-10T10:00:00.000000Z",
+                                    "end_utc": "2026-11-10T10:00:30.000000Z"})},
+            {"detail": _json.dumps({"camera_id": "CAM02", "start_utc": "2026-11-10T11:00:00.000000Z",
+                                    "end_utc": "2026-11-10T11:00:30.000000Z"})},
+            {"detail": "not json"}]
+    from sentinel.clock import parse_iso_utc
+
+    t = parse_iso_utc("2026-11-10T10:00:10.000000Z")
+    assert motion_periods(rows, "CAM01", t, t + 3600) == ((t, t + 20.0),)
+
+
+def test_setup_turns_markers_on(tmp_path: Path) -> None:
+    from sentinel.launcher import setup
+    from sentinel.paths import Layout
+
+    root = tmp_path / "m"
+    lay = Layout("machine", root / "sentinel.toml", root / "camera.secret", root / "spool", root / "data", root / "logs")
+    d = setup.build_config(setup.SetupAnswers("192.0.2.10", "stream1"), lay)
+    assert load_config_dict(d, base_dir=tmp_path).motion.markers is True
+    assert make_config(tmp_path).motion.markers is False             # code default: off

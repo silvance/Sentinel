@@ -75,10 +75,11 @@ class Plan:
     warnings: list[dict[str, Any]] = field(default_factory=list)
     planned_bytes: int = 0
     segments: dict[str, dict[str, Any]] = field(default_factory=dict)
+    motion: list[dict[str, Any]] = field(default_factory=list)   # motion periods within the exported videos
 
     def to_json(self) -> dict[str, Any]:
         return {"groups": self.groups, "gaps": self.gaps, "coverage": self.coverage, "warnings": self.warnings,
-                "planned_bytes": self.planned_bytes, "segments": self.segments}
+                "planned_bytes": self.planned_bytes, "segments": self.segments, "motion": self.motion}
 
 
 # Segment metadata frozen into the batch at planning time, so a resumed batch (and its
@@ -361,7 +362,31 @@ class Planner:
         used = exported_ids | {sid for i in items_out for sid in (i.sources or [])}
         snap = {s["segment_id"]: snapshot(s) for s in late + main if s["segment_id"] in used}
         return Plan(cam, start, end, items_out, group_meta, gaps, coverage, warnings,
-                    planned_bytes=sum(i.planned_bytes for i in items_out), segments=snap)
+                    planned_bytes=sum(i.planned_bytes for i in items_out), segments=snap,
+                    motion=self._motion(cam, group_meta))
+
+    def _motion(self, cam: str, groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Motion periods (recording-log events ``motion_period``) overlapping the exported videos,
+        frozen into the plan like the segment snapshot."""
+        spans = [(g["start_utc"], g["end_utc"]) for g in groups if g.get("start_utc") and g.get("end_utc")]
+        if not spans:
+            return []
+        lo, hi = min(a for a, _ in spans), max(b for _, b in spans)
+        rows = self._rows("SELECT event_id, detail FROM events WHERE code='motion_period' "
+                          "AND json_extract(detail, '$.end_utc') >= ? AND json_extract(detail, '$.start_utc') <= ? "
+                          "ORDER BY json_extract(detail, '$.start_utc'), event_id", (lo, hi))
+        out = []
+        for r in rows:
+            try:
+                d = json.loads(r["detail"] or "{}")
+            except ValueError:
+                continue
+            if d.get("camera_id", cam) != cam or not d.get("start_utc") or not d.get("end_utc"):
+                continue
+            if any(d["start_utc"] <= b and d["end_utc"] >= a for a, b in spans):
+                out.append({"event_id": r["event_id"], "start_utc": d["start_utc"], "end_utc": d["end_utc"],
+                            "peak_changed_percent": d.get("peak_changed_percent")})
+        return out
 
     def _check_source(self, s: dict[str, Any]) -> None:
         p = self.spool / s["rel_path"]
