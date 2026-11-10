@@ -13,9 +13,13 @@ dependencies = ["tzdata==2025.2; sys_platform == 'win32'"]   # stdlib otherwise;
 
 [project.optional-dependencies]
 dev = ["pytest==8.3.4"]
+# Operator GUI only (the recorder never imports Qt). Essentials = QtCore/QtGui/QtWidgets/QtSvg, LGPL;
+# 6.11.3 wheels are cp310-abi3 (Python 3.10-3.14), so the same pin serves 3.12 and 3.14.
+gui = ["PySide6-Essentials==6.11.3", "shiboken6==6.11.3"]
 
 [project.scripts]
 sentinel-recorder = "sentinel.service:main"
+sentinel-gui = "sentinel.gui.__main__:main"
 # The simulated camera is a development tool (it listens on TCP) and is deliberately not
 # installed as a command; run it with `python -m sentinel.sim.camera` from a source checkout.
 
