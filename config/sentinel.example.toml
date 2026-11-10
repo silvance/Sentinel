@@ -71,3 +71,35 @@ approved_filesystem = "ntfs"              # owner decision 2026-11-10
 foreign_data_authorization = "admin_only" # owner decision 2026-11-10 (admin_only | operator_with_serial | never)
 allowed_bus_types = ["USB"]
 min_size_gb = 128
+
+# Continuous copy of sealed recordings to a swappable archive drive (requirement S1).
+# Runs as its own process: python -m sentinel.archive run --config <this file>
+[archive]
+enabled = false
+# Archive drives are found by their marker on any mounted volume (never by drive letter).
+# drive_path is optional: an extra folder to look in (e.g. a fixed mount point on Linux).
+drive_path = ""
+require_drive_marker = true        # SENTINEL_DRIVE.json with drive_uuid and "role": "archive"
+                                   #   (python -m sentinel.archive designate --drive <root> --admin-id <id>)
+not_running_critical_after_s = 1800  # archive process down this long => critical alert A-007
+resume_policy = "any_drive"        # owner decision 2026-11-10: a new drive continues with footage on no
+                                   #   archive drive yet ("this_drive": everything not on THIS drive)
+max_rate_mb_s = 40                 # throttle for reading local recordings (recording uses ~0.5-1.5 MB/s)
+backlog_alert_hours = 24           # "not yet archived" longer than this => critical alert A-004
+reserve_free_mb = 1024             # never fill the archive drive beyond this
+index_every_s = 3600               # rewrite the drive's index after this much copied footage
+swap_max_wait_s = 120              # on "Swap", finish the file in flight only if it takes <= this
+
+# Removal of ARCHIVED recordings from this computer when its storage runs low.
+# OFF by default: an administrator enables it only after the owner's decision
+# (docs/branches/design-local-retention.md). Never removes damaged (CORRUPT), unarchived,
+# recent, or "lost" recordings; by default only counts copies on archive drives that have
+# been removed from the computer.
+[retention]
+enabled = false
+floor_free_gb = -1                 # -1 = use [storage] warning_free_gb
+margin_gb = 10                     # free up to floor + margin, never more
+min_verified_copies = 1
+require_removed_drive = true
+keep_recent_hours = 24
+expected_swap_days = 5             # alert L-001 if storage will run out before the next swap

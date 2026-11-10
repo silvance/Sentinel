@@ -1,0 +1,45 @@
+# Sentinel archive-drive copy — systemd unit (DRAFT; NOT EXECUTED on Linux).
+# Install: /etc/systemd/system/sentinel-archive.service ; systemctl enable --now sentinel-archive
+# Separate process from the recorder on purpose (see src/sentinel/archive/__main__.py).
+[Unit]
+Description=Sentinel archive-drive copy (low priority)
+After=sentinel-recorder.service
+Wants=sentinel-recorder.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=sentinel
+Group=sentinel
+ExecStart=/opt/sentinel/venv/bin/python -m sentinel.archive run --config /etc/sentinel/sentinel.toml
+Restart=always
+RestartSec=10
+# Lowest scheduling and I/O priority; the worker also throttles itself ([archive] max_rate_mb_s).
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+# A copy in flight is abandoned (its .partial is never claimed) on stop.
+TimeoutStopSec=60
+KillMode=control-group
+KillSignal=SIGTERM
+
+UMask=0027
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+# Spool is read (never written); data dir holds the ledger and status; the archive mount point is written.
+ReadOnlyPaths=/var/lib/sentinel/spool
+ReadWritePaths=/var/lib/sentinel/data /var/log/sentinel /media/sentinel-archive
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

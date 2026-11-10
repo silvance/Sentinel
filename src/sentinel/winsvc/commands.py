@@ -82,8 +82,9 @@ class HostCommand:
 
 def host_command(config_path: Path, *, frozen: bool | None = None, executable: str | None = None,
                  base_executable: str | None = None, prefix: str | None = None, base_prefix: str | None = None,
-                 package_root: Path | None = None) -> HostCommand:
-    """The ``binPath`` for the service.
+                 package_root: Path | None = None, program: str = "recorder") -> HostCommand:
+    """The ``binPath`` for the service. ``program``: ``recorder`` (SentinelRecorder) or, since the
+    archive-drive integration, ``archive`` (SentinelArchive: same host, ``--program archive``).
 
     * PyInstaller one-folder build (``sys.frozen``): ``"<exe>" host --config "<cfg>"``. The
       service exe's entry point must be ``sentinel.winsvc.__main__:main`` (packaging branch).
@@ -97,6 +98,9 @@ def host_command(config_path: Path, *, frozen: bool | None = None, executable: s
     frozen = bool(getattr(sys, "frozen", False)) if frozen is None else frozen
     executable = executable or sys.executable
     cfg = str(config_path)
+    if program not in ("recorder", "archive"):
+        raise ValueError(f"unknown service program {program!r}")
+    extra = [] if program == "recorder" else ["--program", program]
     if frozen:
         # Integration: the one-folder build ships the service host as its own executable,
         # SentinelService.exe, next to the operator's Sentinel.exe (packaging/windows/sentinel.spec).
@@ -105,7 +109,7 @@ def host_command(config_path: Path, *, frozen: bool | None = None, executable: s
         exe_path = Path(executable)
         if exe_path.name.lower() == LAUNCHER_EXE_NAME.lower():
             executable = str(exe_path.with_name(SERVICE_EXE_NAME))
-        return HostCommand(_command_line(executable, ["host", "--config", cfg]), (), executable,
+        return HostCommand(_command_line(executable, ["host", "--config", cfg, *extra]), (), executable,
                            (str(Path(executable).parent),))
     base_executable = base_executable or getattr(sys, "_base_executable", executable)
     prefix = prefix or sys.prefix
@@ -116,7 +120,7 @@ def host_command(config_path: Path, *, frozen: bool | None = None, executable: s
     paths = [str(package_root)]
     if in_venv:
         paths.append(str(Path(prefix) / "Lib" / "site-packages"))
-    line = _command_line(interpreter, ["-m", "sentinel.winsvc", "host", "--config", cfg])
+    line = _command_line(interpreter, ["-m", "sentinel.winsvc", "host", "--config", cfg, *extra])
     return HostCommand(line, ("PYTHONPATH=" + ";".join(paths),), interpreter,
                        (str(Path(interpreter).parent), *paths))
 

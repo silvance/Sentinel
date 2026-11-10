@@ -36,6 +36,7 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from . import __version__
 from .alerts import Severity
@@ -114,6 +115,7 @@ class RecorderService:
         self.supervisor: RecordingSupervisor | None = None
         self.finalizer: Finalizer | None = None
         self.integrity: IntegrityWorker | None = None
+        self.retention: Any = None                   # sentinel.retention.manager.RetentionManager
         self.storage: StorageMonitor | None = None
         self._next_janitor = 0.0
         self._next_checkpoint = 0.0
@@ -135,6 +137,7 @@ class RecorderService:
         self._clock_obs_thread: threading.Thread | None = None
         self.last_clock_observation: dict | None = None
         self._closing = threading.Event()
+        self._archive_view: Any = None               # sentinel.archive.status.RecorderArchiveView when enabled
 
     # ------------------------------------------------------------------
     def run(self) -> int:
@@ -210,6 +213,11 @@ class RecorderService:
         self._host_clock = ClockStepDetector(w0, m0, cfg.recording.clock_step_tolerance_s)
         self._next_clock_obs = self.clock.mono() + cfg.service.clock_observation_interval_s
         self._sample_clock("startup")
+        from .retention.manager import RetentionManager
+
+        self.retention = RetentionManager(cfg, self.ledger, disk_usage=self._disk_usage)
+        if cfg.retention.enabled:          # admin decision; OFF by default
+            self.retention.start()
         self.supervisor = RecordingSupervisor(
             cfg, self.ledger, self.platform, self.storage, self.finalizer,
             url_with_credentials(cfg.camera.url, creds), self.stop_event, clock=self.clock,
@@ -241,6 +249,8 @@ class RecorderService:
             else:
                 drained = self.finalizer.stop()
                 self.integrity.stop()
+            if self.retention is not None:
+                self.retention.stop()
             if not drained:
                 log.error("finaliser did not drain before shutdown; recovery will complete it on next start")
             self.ledger.add_event("audit", "recorder", "service_stop", "Recorder service stopped",
@@ -375,6 +385,10 @@ class RecorderService:
             log.critical("integrity worker died; restarting it")
             self.ledger.add_event("error", "integrity", "integrity_worker_restarted", "Integrity worker restarted")
             self.integrity.start()
+        if (self.retention is not None and self.cfg.retention.enabled and not self.retention.alive
+                and not self.stop_event.is_set()):
+            log.critical("retention worker died; restarting it")
+            self.retention.start()
         current = self.supervisor.live.run_id if self.supervisor and self.supervisor.live.ffmpeg_running else None
         for seg in self.ledger.unsealed_segments(exclude_run_id=current):
             if seg["finalize_attempts"] >= MAX_FINALIZE_ATTEMPTS or self.finalizer.is_queued(seg["segment_id"]):
@@ -574,7 +588,26 @@ class RecorderService:
                      "clock_synchronized": self._ntp, "clock_observation": self.last_clock_observation},
             recording=live_d, storage=storage_d, integrity=integrity_d, last_segment=last_seg, open_gap=gap,
             terminal=self._terminal)
-        apply_alerts(doc, d.alerts)
+        alerts = list(d.alerts)
+        if self.retention is not None:
+            try:
+                alerts += self._retention_status(doc, sample)
+            except Exception:
+                log.exception("could not build retention status")
+        if cfg.archive.enabled:  # archive-drive copy runs in its own process; show its state and A-0xx alerts here
+            try:
+                if self._archive_view is None:
+                    from .archive.status import RecorderArchiveView
+
+                    a = cfg.archive
+                    self._archive_view = RecorderArchiveView(cfg.data_path, cfg.camera.id, a.poll_interval_s,
+                                                             a.backlog_alert_hours * 3600, a.not_running_critical_after_s)
+                doc.archive, archive_alerts = self._archive_view.evaluate(self.ledger)
+                alerts = sorted(alerts + archive_alerts, key=lambda a: -a.severity)
+                doc.messages = doc.messages + [a.message for a in archive_alerts]
+            except Exception:
+                log.exception("could not read archive status")
+        apply_alerts(doc, alerts)
         return doc
 
     # ------------------------------------------------------------------ watchdog (watchdog thread)
@@ -638,6 +671,30 @@ class RecorderService:
         verification backlog is drained only within SHUTDOWN_BUDGET_S (rest: recovery at boot)."""
         self._system_shutdown = True
         self.request_stop()
+
+    def _retention_status(self, doc: StatusDocument, sample: Any) -> list[Any]:
+        """Retention section of the status ("Oldest footage kept on this computer: <date>") and alerts:
+        L-001 when retention is OFF and storage will reach the critical level before the next expected
+        swap (measured rate); L-002 when retention is ON but could not free enough space."""
+        from .alerts import make_alert
+        from .retention.manager import oldest_kept_text
+
+        rcfg = self.cfg.retention
+        st = self.retention.status()
+        st["text"] = oldest_kept_text(st["oldest_kept_utc"], self.cfg.recording.display_timezone)
+        doc.retention = st
+        out = []
+        horizon = rcfg.expected_swap_days * 86400
+        if (not rcfg.enabled and sample is not None and sample.seconds_until_critical is not None
+                and sample.seconds_until_critical < horizon):
+            out.append(make_alert("L-001", Severity.WARNING,
+                                  detail={"seconds_until_critical": round(sample.seconds_until_critical),
+                                          "horizon_s": horizon}))
+        last = self.retention.last
+        if rcfg.enabled and last is not None and (last.blocked or last.error):
+            out.append(make_alert("L-002", Severity.WARNING, detail={"skipped": last.skipped, "error": last.error}))
+        doc.messages = doc.messages + [a.message for a in out]
+        return out
 
     def request_stop(self, *_: object) -> None:
         log.info("stop requested")

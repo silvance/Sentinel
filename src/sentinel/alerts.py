@@ -98,6 +98,30 @@ CATALOG: dict[str, AlertDef] = {d.code: d for d in [
              "Contact technical support.", False),
     AlertDef("M-010", "Setting up drives is not enabled on this system yet",
              "Contact technical support.", False),
+    # Archive drive (separate low-priority process; never stops recording). docs/04 §2-3, S1.
+    AlertDef("A-001", "No archive drive is connected",
+             "Recording continues on this system. Insert the archive drive.", False),
+    AlertDef("A-002", "The archive drive is full",
+             "Recording continues on this system. Do not unplug the archive drive yet: press Swap Archive "
+             "Drive, wait for SAFE TO REMOVE, then insert an empty archive drive.", False),
+    AlertDef("A-003", "The archive drive was removed without preparing it",
+             "No recordings were lost. Copying will continue when an archive drive is inserted.", False),
+    AlertDef("A-004", "Recordings are waiting too long to be copied to the archive drive",
+             "Recording continues on this system. Check that an archive drive with free space is inserted. "
+             + SUPPORT, False),
+    AlertDef("A-005", "The archive drive cannot be used",
+             "Use a different archive drive, or contact technical support.", False),
+    AlertDef("A-006", "Files on the archive drive could not be verified",
+             "Do not use this archive drive as evidence. " + SUPPORT, False),
+    AlertDef("A-007", "Archive copying is not running", SUPPORT, False),
+    AlertDef("A-008", "A recording on this system could not be read for archiving", SUPPORT, False),
+    AlertDef("A-009", "The archive drive will be full within the next few days",
+             "Recording continues. Have an empty archive drive ready for the next swap.", False),
+    # Local retention (admin-enabled removal of archived recordings from this computer).
+    AlertDef("L-001", "Recording storage on this computer will be full before the next expected drive swap",
+             "Recording continues for now. Swap the archive drive. " + SUPPORT, False),
+    AlertDef("L-002", "Archived recordings could not be removed to free space on this computer",
+             "Recording continues for now. Swap the archive drive. " + SUPPORT, False),
     AlertDef("Z-001", "A test camera is configured. These recordings are not evidence",
              "Contact technical support before any operational use.", False),
 ]}

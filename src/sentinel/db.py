@@ -249,6 +249,88 @@ CREATE TABLE IF NOT EXISTS ledger_chain_pending (
 );
 """
 WAL_SIZE_LIMIT = 64 * 1024 * 1024
+# ---------------------------------------------------------------------------------------------
+# Phase 3: continuous archive-drive copies (docs/04 §2-3, requirement S1). Owned by
+# ``sentinel.archive.ledger``. A row is created ONLY for a copy that was read back from the archive
+# drive (bypassing the OS cache) and matched the sealed hash: unverified / in-flight copies are never
+# recorded. A copy later found missing or damaged is marked LOST (the row is kept as history) and the
+# segment is queued again; only VERIFIED rows count as archived.
+ARCHIVE_DDL = """
+CREATE TABLE IF NOT EXISTS archive_copies (
+    copy_id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    segment_id        TEXT NOT NULL REFERENCES segments(segment_id),
+    drive_id          TEXT NOT NULL REFERENCES drives(drive_id), -- stable drive key ("drive_uuid:<uuid>" when prepared)
+    kind              TEXT NOT NULL,          -- original | quarantine | framehash
+    path              TEXT NOT NULL,          -- relative to the drive root, forward slashes
+    sha256            TEXT NOT NULL,          -- measured by cache-bypassing read-back; equals the sealed hash
+    size_bytes        INTEGER NOT NULL,
+    verify_method     TEXT NOT NULL,
+    already_present   INTEGER NOT NULL DEFAULT 0,  -- 1: file found on the drive and re-verified, not copied
+    verified_utc      TEXT NOT NULL,
+    state             TEXT NOT NULL DEFAULT 'VERIFIED',  -- VERIFIED | LOST
+    lost_utc          TEXT,
+    lost_reason       TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_archive_copies_live ON archive_copies(segment_id, drive_id, kind)
+    WHERE state='VERIFIED';
+CREATE UNIQUE INDEX IF NOT EXISTS ux_archive_copies_path ON archive_copies(drive_id, path) WHERE state='VERIFIED';
+CREATE INDEX IF NOT EXISTS ix_archive_copies_seg ON archive_copies(segment_id, kind, state);
+
+CREATE TABLE IF NOT EXISTS archive_problems (      -- persistent operator alerts (A-006) until acknowledged
+    problem_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    drive_id          TEXT REFERENCES drives(drive_id),
+    kind              TEXT NOT NULL,          -- verify_failed | lost | unverifiable | set_aside
+    segment_id        TEXT,
+    path              TEXT,                   -- file on the drive concerned (e.g. a set-aside *.unverified-* file)
+    detail            TEXT,
+    created_utc       TEXT NOT NULL,
+    acknowledged_utc  TEXT,
+    acknowledged_by   TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_archive_problems_open ON archive_problems(acknowledged_utc, drive_id);
+
+CREATE TABLE IF NOT EXISTS archive_indexes (       -- every Sentinel/INDEX/ generation written to a drive
+    drive_id          TEXT NOT NULL REFERENCES drives(drive_id),
+    generation        INTEGER NOT NULL,
+    generated_utc     TEXT NOT NULL,
+    reason            TEXT NOT NULL,          -- attach | hourly | swap | idle
+    copies            INTEGER NOT NULL,       -- archive_copies rows described
+    json_sha256       TEXT NOT NULL,
+    sums_sha256       TEXT NOT NULL,
+    PRIMARY KEY (drive_id, generation)
+);
+"""
+
+# ---------------------------------------------------------------------------------------------
+# Optional local retention (admin-enabled, default OFF; sentinel.retention). A local original may be
+# deleted only after it is verified on archive drive(s); the segment row keeps all its metadata and
+# hashes and gets ``segments.local_deleted_utc`` (added by _migrate). Every deletion has a row here.
+RETENTION_DDL = """
+CREATE TABLE IF NOT EXISTS retention_deletions (
+    deletion_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    segment_id        TEXT NOT NULL REFERENCES segments(segment_id),
+    state             TEXT NOT NULL,          -- DELETING (decided, files may still exist) | DONE
+    rel_path          TEXT NOT NULL,
+    sha256            TEXT NOT NULL,
+    size_bytes        INTEGER,
+    framehash_rel_path TEXT,
+    archive_copies    TEXT NOT NULL,          -- JSON: the VERIFIED copies (copy_id, drive_id, path) relied on
+    reason            TEXT NOT NULL,
+    free_before       INTEGER,
+    free_after        INTEGER,
+    decided_utc       TEXT NOT NULL,
+    deleted_utc       TEXT
+);
+
+CREATE TABLE IF NOT EXISTS archive_drive_sessions (   -- when each archive drive was physically present
+    session_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    drive_id          TEXT NOT NULL REFERENCES drives(drive_id),
+    seen_utc          TEXT NOT NULL,
+    gone_utc          TEXT,                   -- NULL while the drive is (or may be) attached
+    gone_how          TEXT                    -- swapped | removed | not_present
+);
+CREATE INDEX IF NOT EXISTS ix_archive_sessions_open ON archive_drive_sessions(drive_id, gone_utc);
+"""
 
 # Columns that may be written once (NULL -> value) on a sealed segment, never changed after.
 WRITE_ONCE = frozenset({
@@ -328,7 +410,23 @@ class Ledger:
             self._conn = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None)
             self._configure(self._conn)
         if not readonly:
-            self._conn.execute("PRAGMA journal_mode=WAL")
+            # Switching a new database to WAL needs an exclusive lock and SQLite does not wait for
+            # it (busy_timeout is not applied), so two processes opening a fresh ledger at the same
+            # moment (recorder + archive at first boot) would fail with "database is locked". Retry.
+            # The pragma can also return the OLD mode without raising, so the result is checked.
+            mode = None
+            for attempt in range(50):
+                try:
+                    mode = str(self._conn.execute("PRAGMA journal_mode=WAL").fetchone()[0]).lower()
+                except sqlite3.OperationalError as exc:
+                    if "locked" not in str(exc) or attempt == 49:
+                        raise
+                else:
+                    if mode == "wal":
+                        break
+                time.sleep(0.1)
+            if mode != "wal":
+                raise RuntimeError(f"the ledger could not be switched to WAL mode (journal_mode={mode})")
             self._conn.execute("PRAGMA synchronous=FULL")
             self._migrate()
 
@@ -389,6 +487,11 @@ class Ledger:
             self._conn.executescript(DDL)
             self._conn.executescript(EXPORT_DDL)
             self._conn.executescript(CHAIN_DDL)
+            self._conn.executescript(ARCHIVE_DDL)
+            self._conn.executescript(RETENTION_DDL)
+            cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(segments)")}
+            if "local_deleted_utc" not in cols:   # additive column (retention); NULL = original kept locally
+                self._conn.execute("ALTER TABLE segments ADD COLUMN local_deleted_utc TEXT")
             row = self._conn.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()
             if row is None:
                 self._conn.execute("INSERT INTO schema_meta(key, value) VALUES ('schema_version', ?)",
@@ -496,6 +599,14 @@ class Ledger:
 
         self._chain_guard(c, f"{table} update", work, [(table, t.key) for t in tracked])
         self.chain_discrepancies += len(found)
+
+    # Public entry points for other modules that write covered tables inside ``tx()``
+    # (archive, retention, timing): the chain entry is written in the SAME transaction.
+    def chain_insert(self, c: sqlite3.Connection, table: str, key: Any) -> None:
+        self._chain_insert(c, table, key)
+
+    def chained(self, c: sqlite3.Connection, table: str, keys: Iterable[Any]) -> Any:
+        return self._chained(c, table, keys)
 
     def _chain_insert(self, c: sqlite3.Connection, table: str, key: Any) -> None:
         self._repair_if_pending(c)
@@ -736,12 +847,15 @@ class Ledger:
 
     def segments_needing_content_hash(self, max_attempts: int = 3) -> list[sqlite3.Row]:
         return self.query("SELECT * FROM segments WHERE state IN ('FINALIZED','INTERRUPTED') "
-                          "AND content_sha256 IS NULL AND content_hash_attempts < ? ORDER BY rowid", (max_attempts,))
+                          "AND content_sha256 IS NULL AND content_hash_attempts < ? AND local_deleted_utc IS NULL "
+                          "ORDER BY rowid", (max_attempts,))
 
     def segments_for_audit(self, limit: int) -> list[sqlite3.Row]:
+        # Originals removed by the (admin-enabled) retention rule are on archive drives, not here:
+        # they are not audited locally and never reported missing.
         return self.query("SELECT * FROM segments WHERE state IN ('FINALIZED','INTERRUPTED','CORRUPT') "
-                          "AND sha256 IS NOT NULL ORDER BY (last_audit_utc IS NOT NULL), last_audit_utc, rowid "
-                          "LIMIT ?", (limit,))
+                          "AND sha256 IS NOT NULL AND local_deleted_utc IS NULL "
+                          "ORDER BY (last_audit_utc IS NOT NULL), last_audit_utc, rowid LIMIT ?", (limit,))
 
     def state_counts(self) -> dict[str, int]:
         return {r["state"]: r["n"] for r in self.query("SELECT state, COUNT(*) n FROM segments GROUP BY state")}

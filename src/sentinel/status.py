@@ -175,6 +175,8 @@ class StatusDocument:
     # at startup). Readers then show its alert even when the heartbeat is old, instead of the
     # generic X-001 "not responding": the recorder *did* respond, with a reason.
     terminal: bool = False
+    archive: dict[str, Any] = field(default_factory=dict)  # archive-drive copy (sentinel.archive); empty if disabled
+    retention: dict[str, Any] = field(default_factory=dict)  # local retention (sentinel.retention): oldest kept, last pass
 
 
 def fatal_status_document(code: str, camera_id: str, service: dict[str, Any] | None = None,

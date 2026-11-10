@@ -718,7 +718,10 @@ def test_resume_uses_segment_snapshot_not_live_rows(env: Env) -> None:
     # The recorder changes ledger rows after planning (e.g. deferred hashing fills columns).
     env.ledger.query("UPDATE segments SET warnings='[\"changed_later\"]', content_hash_method='later'")
     man = _check_drive(env, t, env.export(t))
-    assert all(o["warnings"] == [] and o["content_hash_method"] != "later" for o in man["originals"])
+    # Integration: segments may legitimately carry warnings from sealing (e.g. the time-accuracy
+    # branch's "time_correction_limited" under machine load); what matters is that the live-row
+    # change made after planning does not leak into the manifest.
+    assert all("changed_later" not in o["warnings"] and o["content_hash_method"] != "later" for o in man["originals"])
 
 
 def test_export_survives_a_locked_ledger(env: Env) -> None:

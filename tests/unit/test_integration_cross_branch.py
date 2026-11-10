@@ -247,3 +247,114 @@ def test_chain_verification_reads_the_status_anchor_from_status_dir(tmp_path: Pa
     assert not lc.verify_ledger(db, status_path=status).ok
     # ... and is not looked for beside the ledger when it is not (previous behaviour).
     assert lc.verify_ledger(db).ok
+
+
+# ---------------------------------------------------------------------- merge 10: chain x archive / retention
+def test_archive_and_retention_rows_are_chained_and_tampering_is_found(tmp_path: Path) -> None:
+    import sqlite3
+
+    from test_ledgerchain import _run, _sealed_segment
+
+    from sentinel import ledgerchain as lc
+    from sentinel.archive.ledger import ArchiveLedger
+    from sentinel.db import Ledger
+
+    db = tmp_path / "data" / "sentinel.db"
+    led = Ledger(db)
+    _run(led, "R1")
+    seg = _sealed_segment(led, "R1", 0)
+    sha = led.get_segment(seg)["sha256"]
+    with led.tx() as c:
+        c.execute("INSERT INTO drives(drive_id, identity, first_seen_utc, last_seen_utc) VALUES ('d1','{}','t','t')")
+    al = ArchiveLedger(led, "CAM01")
+    al.record_verified(segment_id=seg, drive_id="d1", kind="original", path="Sentinel/CAM01/x.ts", sha256=sha,
+                       size_bytes=1000, verify_method="windows-unbuffered")
+    al.sync_sessions({"d1"}, keep_open=False)
+    al.sync_sessions(set(), keep_open=False)            # drive left the machine: session closed
+    copy_id = led.query("SELECT copy_id FROM archive_copies")[0][0]
+    al.mark_lost(copy_id, "missing on attach")          # VERIFIED -> LOST (+ problem row, event)
+    al.acknowledge("admin-1")
+    with led.tx() as c:                                  # retention's write path, as RetentionManager does it
+        cur = c.execute("INSERT INTO retention_deletions(segment_id, state, rel_path, sha256, archive_copies, reason, "
+                        "decided_utc) VALUES (?, 'DELETING', 'x', ?, '[]', 'test', 't')", (seg, sha))
+        led.chain_insert(c, "retention_deletions", cur.lastrowid)
+        with led.chained(c, "segments", [seg]):
+            c.execute("UPDATE segments SET local_deleted_utc='t' WHERE segment_id=?", (seg,))
+    led.close()
+    rep = lc.verify_ledger(db)
+    assert rep.ok, rep.render_text()
+    kinds = {r[0] for r in sqlite3.connect(db).execute("SELECT kind FROM ledger_chain")}
+    assert {"archive_copy_recorded", "archive_copy_updated", "drive_session_opened", "drive_session_closed",
+            "archive_problem_recorded", "archive_problem_updated", "retention_decided"} <= kinds
+    for sql in ("UPDATE archive_copies SET sha256='00' WHERE copy_id=1",
+                "UPDATE archive_drive_sessions SET gone_utc=NULL",
+                "DELETE FROM retention_deletions",
+                "UPDATE segments SET local_deleted_utc=NULL"):
+        c2 = sqlite3.connect(db)
+        try:
+            c2.execute("BEGIN")
+            c2.execute(sql)
+            c2.commit()
+        finally:
+            c2.close()
+        assert not lc.verify_ledger(db).ok, sql
+
+
+def test_archive_windows_service_uses_the_recorder_service_host(tmp_path: Path) -> None:
+    from sentinel.archive.hosting import SERVICE_NAME as ARCHIVE_SVC, windows_service_commands
+
+    hc = host_command(Path(r"C:\ProgramData\Sentinel\config\sentinel.toml"), frozen=True,
+                      executable=r"C:\Program Files\Sentinel\Sentinel.exe", program="archive")
+    assert hc.command_line.endswith("--program archive")
+    assert '"C:\\Program Files\\Sentinel\\SentinelService.exe" host --config' in hc.command_line
+    src = host_command(Path(r"C:\cfg\sentinel.toml"), frozen=False, executable=r"C:\Py\python.exe",
+                       base_executable=r"C:\Py\python.exe", prefix=r"C:\Py", base_prefix=r"C:\Py",
+                       package_root=Path(r"C:\src"), program="archive")
+    assert "-m sentinel.winsvc host --config" in src.command_line and src.command_line.endswith("--program archive")
+    cmds = windows_service_commands(hc.command_line, Path("S"), Path("D"), Path("L"), Path("C"))
+    assert cmds[0][:3] == ["sc.exe", "create", ARCHIVE_SVC] and cmds[0][4] == hc.command_line
+    assert ["icacls", "C", "/grant", f"NT SERVICE\\{ARCHIVE_SVC}:(OI)(CI)RX"] in cmds
+
+
+def test_archive_service_body_runs_worker_until_stopped_and_stops_cleanly_when_disabled(tmp_path: Path) -> None:
+    from conftest import base_config_dict
+    from gui_support import write_toml
+
+    from sentinel.winsvc.__main__ import run_archive_in_host
+
+    class Host:
+        def __init__(self) -> None:
+            self.stop_cb = None
+            self.running = False
+
+        def on_stop(self, cb) -> None:  # noqa: ANN001
+            self.stop_cb = cb
+
+        def report_running(self) -> None:
+            self.running = True
+
+    class Worker:
+        def __init__(self, cfg) -> None:  # noqa: ANN001
+            self.cfg, self.ran, self.stopped = cfg, False, None
+
+        def stop(self, code: int) -> None:
+            self.stopped = code
+
+        def run(self, whole_process: bool) -> None:
+            self.ran = whole_process
+
+    events: list[str] = []
+    d = base_config_dict(tmp_path)
+    d["archive"] = {"enabled": True, "drive_path": str(tmp_path / "arch")}
+    cfg_on = write_toml(tmp_path / "on.toml", d)
+    made: list[Worker] = []
+    host = Host()
+    rc = run_archive_in_host(host, str(cfg_on), worker_factory=lambda c: made.append(Worker(c)) or made[-1],
+                             event_log=events.append)
+    assert rc == 0 and host.running and made[0].ran is True
+    host.stop_cb()
+    assert made[0].stopped == 0
+    d["archive"]["enabled"] = False
+    cfg_off = write_toml(tmp_path / "off.toml", d)
+    assert run_archive_in_host(Host(), str(cfg_off), worker_factory=lambda c: 1 / 0, event_log=events.append) == 0
+    assert any("enabled = false" in e for e in events)

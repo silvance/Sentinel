@@ -183,6 +183,8 @@ class Recovery:
 
     def _check_sealed_files_exist(self) -> None:
         for seg in self.ledger.segments_in_states([SegmentState.FINALIZED, SegmentState.INTERRUPTED]):
+            if seg["local_deleted_utc"]:      # removed by the retention rule after archiving: expected
+                continue
             if not (self.cfg.spool_path / seg["rel_path"]).exists():
                 log.error("sealed recording missing from local storage: %s", seg["rel_path"])
                 self.ledger.add_event("error", "recovery", "sealed_file_missing",

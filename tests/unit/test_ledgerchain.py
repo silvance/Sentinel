@@ -426,7 +426,8 @@ def test_existing_ledger_gets_genesis_and_adopts_rows(tmp_path: Path) -> None:
     genesis = json.loads(rows[0]["record"])["data"]
     # Integration: clock_observations (time accuracy) is a covered table too.
     assert genesis["pre_existing_rows"] == {"recording_runs": 1, "segments": 2, "recording_gaps": 0, "events": 1,
-                                            "clock_observations": 0}
+                                            "clock_observations": 0, "archive_copies": 0, "archive_problems": 0,
+                                            "archive_drive_sessions": 0, "retention_deletions": 0}
     assert genesis["adopted_rows"] == 3 and not genesis["previous_chain_missing"]
     assert [r["kind"] for r in rows[1:]] == ["adopted"] * 3          # the ACTIVE segment is not yet covered
     led.transition("S-ACT", SegmentState.INTERRUPTED, sha256="bb" * 32)   # sealed after the upgrade: covered

@@ -223,21 +223,34 @@ class TargetIO:
     def _write(self, fh: object, data: bytes) -> None:
         fh.write(data)  # type: ignore[attr-defined]
 
-    def write_new(self, dest: Path, chunks: Iterable[bytes], expected_sha256: str | None = None) -> tuple[str, int]:
+    def _fsync(self, fh: object) -> None:
+        """Periodic flush during write_new (separate so tests can count / fail it)."""
+        os.fsync(fh.fileno())  # type: ignore[attr-defined]
+
+    def write_new(self, dest: Path, chunks: Iterable[bytes], expected_sha256: str | None = None,
+                  fsync_every: int | None = None) -> tuple[str, int]:
         """Write ``chunks`` as ``dest`` via .partial/fsync/no-replace rename. Returns (sha256 of
         the bytes written, size). Raises FileExistsError if ``dest`` already exists, and
-        :class:`SourceMismatch` (nothing renamed) if the bytes do not hash to ``expected_sha256``."""
+        :class:`SourceMismatch` (nothing renamed) if the bytes do not hash to ``expected_sha256``.
+        ``fsync_every``: additionally flush to the device after at least this many bytes (the
+        archive copier uses it so a slow drive never holds a large amount of dirty cache)."""
         self.makedirs(dest.parent)
         tmp = partial_path(dest)
         self.discard_partial(dest)
         h = hashlib.sha256()
         n = 0
+        unsynced = 0
         try:
             with open(tmp, "xb") as fh:
                 for c in chunks:
                     self._write(fh, c)
                     h.update(c)
                     n += len(c)
+                    unsynced += len(c)
+                    if fsync_every and unsynced >= fsync_every:
+                        fh.flush()
+                        self._fsync(fh)
+                        unsynced = 0
                 fh.flush()
                 os.fsync(fh.fileno())
             if expected_sha256 is not None and h.hexdigest() != expected_sha256:
@@ -249,8 +262,21 @@ class TargetIO:
             except OSError:
                 pass
             raise
-        self.fsync_dir(dest.parent)
+        self.confirm_in_place(dest)
         return h.hexdigest(), n
+
+    def confirm_in_place(self, dest: Path) -> None:
+        """Make a just-renamed file's directory entry durable (integration: the archive branch's
+        directory-flush fix, now used by the export write path too). If the file system refuses
+        the directory flush, require the final name present and the ``.partial`` gone in a fresh
+        listing, then ask for the flush once more; otherwise raise OSError (the item fails and is
+        retried; nothing is reported verified)."""
+        if self.fsync_dir(dest.parent):
+            return
+        names = set(os.listdir(dest.parent))
+        if dest.name not in names or partial_path(dest).name in names:
+            raise OSError(f"rename of {dest.name} is not visible in a fresh directory listing")
+        self.fsync_dir(dest.parent)
 
     def finish_external(self, dest: Path) -> int:
         """A file written by another program (FFmpeg) at ``partial_path(dest)``: fsync, rename."""
@@ -263,7 +289,7 @@ class TargetIO:
             os.close(fd)
         size = tmp.stat().st_size
         self.rename_noreplace(tmp, dest)
-        self.fsync_dir(dest.parent)
+        self.confirm_in_place(dest)
         return size
 
     def check_external(self, path: Path) -> None:
@@ -287,14 +313,20 @@ class TargetIO:
                 raise FileExistsError(errno.EEXIST, "destination exists", str(dst)) from None
             os.rename(src, dst)
 
-    def fsync_dir(self, path: Path) -> None:
+    def fsync_dir(self, path: Path) -> bool:
+        """Commit the directory entry of a just-renamed file. True if the device was asked to commit
+        it; False if the file system refused (callers that must be sure then re-list the directory).
+        Windows: FlushFileBuffers on a directory handle (``platform.windows.flush_directory``)."""
         if sys.platform == "win32":
-            return
-        fd = os.open(path, os.O_RDONLY)
+            from ..platform.windows import flush_directory
+
+            return flush_directory(path)
+        fd = os.open(path, os.O_RDONLY)  # NOT EXECUTED on the development host
         try:
             os.fsync(fd)
         finally:
             os.close(fd)
+        return True
 
     def read_back(self, path: Path) -> tuple[Iterator[bytes], str]:
         return open_unbuffered(path)

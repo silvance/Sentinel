@@ -116,7 +116,10 @@ SEGMENT_FIELDS = ("segment_id", "camera_id", "run_id", "seq", "rel_path", "state
                   # Integration with design/time-accuracy (ledger_timing.SEGMENT_COLUMNS): the
                   # correction that went into start_utc/end_utc, so the derivation is protected too.
                   "time_correction_start_s", "time_correction_end_s", "time_correction_stream_s",
-                  "time_correction_limited", "time_correction_detail")
+                  "time_correction_limited", "time_correction_detail",
+                  # Integration with design/local-retention: when the local original was removed
+                  # (set once, on a sealed segment, by the retention rule).
+                  "local_deleted_utc")
 GAP_FIELDS = ("gap_id", "camera_id", "kind", "start_utc", "end_utc", "duration_s", "reason", "prev_segment_id",
               "next_segment_id", "ended_run_id", "start_basis", "attempts", "clock_anomaly", "detail",
               "opened_utc", "closed_utc")
@@ -129,6 +132,28 @@ CLOCK_OBSERVATION_FIELDS = ("obs_id", "observed_utc", "mono_s", "reason", "platf
                             "stream_time_s", "camera_drift_ppm", "time_correction_s", "ref_server", "ref_offset_s",
                             "ref_delay_s", "ref_detail")
 INSERT_ONLY = frozenset({"events", "clock_observations"})   # rows never change once written
+# Integration with design/archive-drive + design/local-retention (security-relevant: what is
+# archived where, when an archive drive left the machine, and every local deletion). Each table
+# may change only in the one way its writer changes it (see illegal_changes).
+ARCHIVE_COPY_FIELDS = ("copy_id", "segment_id", "drive_id", "kind", "path", "sha256", "size_bytes", "verify_method",
+                       "already_present", "verified_utc", "state", "lost_utc", "lost_reason")
+ARCHIVE_PROBLEM_FIELDS = ("problem_id", "drive_id", "kind", "segment_id", "path", "detail", "created_utc",
+                          "acknowledged_utc", "acknowledged_by")
+DRIVE_SESSION_FIELDS = ("session_id", "drive_id", "seen_utc", "gone_utc", "gone_how")
+RETENTION_FIELDS = ("deletion_id", "segment_id", "state", "rel_path", "sha256", "size_bytes", "framehash_rel_path",
+                    "archive_copies", "reason", "free_before", "free_after", "decided_utc", "deleted_utc")
+# table -> (kind for the first entry, kind for later entries)
+_TABLE_KINDS = {"archive_copies": ("archive_copy_recorded", "archive_copy_updated"),
+                "archive_problems": ("archive_problem_recorded", "archive_problem_updated"),
+                "archive_drive_sessions": ("drive_session_opened", "drive_session_closed"),
+                "retention_deletions": ("retention_decided", "retention_updated")}
+# table -> (columns that may go from NULL to a value once, {column: (from, to)} allowed transitions)
+_SET_ONCE_RULES: dict[str, tuple[frozenset[str], dict[str, tuple[Any, Any]]]] = {
+    "archive_copies": (frozenset({"lost_utc", "lost_reason"}), {"state": ("VERIFIED", "LOST")}),
+    "archive_problems": (frozenset({"acknowledged_utc", "acknowledged_by"}), {}),
+    "archive_drive_sessions": (frozenset({"gone_utc", "gone_how"}), {}),
+    "retention_deletions": (frozenset({"deleted_utc", "free_after"}), {"state": ("DELETING", "DONE")}),
+}
 
 # table -> (primary key column, covered columns). Segments are covered once sealed (terminal state).
 COVERED: dict[str, tuple[str, tuple[str, ...]]] = {
@@ -137,9 +162,16 @@ COVERED: dict[str, tuple[str, tuple[str, ...]]] = {
     "recording_gaps": ("gap_id", GAP_FIELDS),
     "events": ("event_id", EVENT_FIELDS),
     "clock_observations": ("obs_id", CLOCK_OBSERVATION_FIELDS),
+    "archive_copies": ("copy_id", ARCHIVE_COPY_FIELDS),
+    "archive_problems": ("problem_id", ARCHIVE_PROBLEM_FIELDS),
+    "archive_drive_sessions": ("session_id", DRIVE_SESSION_FIELDS),
+    "retention_deletions": ("deletion_id", RETENTION_FIELDS),
 }
+_LATER_TABLES = frozenset({"clock_observations", *_TABLE_KINDS})   # may be absent from older ledgers
 _NOUN = {"recording_runs": "recording run", "segments": "recording segment", "recording_gaps": "recording gap",
-         "events": "log event", "clock_observations": "clock observation"}
+         "events": "log event", "clock_observations": "clock observation", "archive_copies": "archive copy",
+         "archive_problems": "archive problem record", "archive_drive_sessions": "archive drive presence record",
+         "retention_deletions": "local removal record"}
 
 
 class ChainError(RuntimeError):
@@ -278,6 +310,8 @@ def _derive_kind(table: str, prev: dict[str, Any] | None, post: dict[str, Any] |
         return "event"
     if table == "clock_observations":
         return "clock_observation"
+    if table in _TABLE_KINDS:
+        return _TABLE_KINDS[table][0 if prev is None else 1]
     if table == "recording_runs":
         if prev is None:
             return "run_started"
@@ -562,6 +596,7 @@ SEGMENT_WRITE_ONCE = frozenset({          # must equal db.WRITE_ONCE (unit-teste
     "time_correction_start_s", "time_correction_end_s", "time_correction_stream_s",
 })
 _SEG_FREE = frozenset({"audit_status"})                  # rolling audit result: may change any time
+_SEG_SET_ONCE = frozenset({"local_deleted_utc"})         # retention: NULL -> time, once (integration)
 _RAISE_ONLY = frozenset({"clock_anomaly"})               # 0 -> 1 only
 _RUN_END = frozenset({"ended_utc", "end_reason", "exit_code", "end_detail", "last_stream_time_s",
                       # integration (time-accuracy): updated at every segment boundary while running
@@ -572,7 +607,8 @@ _RUN_WRITE_ONCE = frozenset({"anchor_utc", "anchor_method", "timeline_break_stre
 _GAP_WHILE_OPEN = frozenset({"ended_run_id", "end_utc", "duration_s", "next_segment_id", "closed_utc"})
 VALID_KINDS = frozenset({"genesis", "adopted", "run_started", "run_updated", "run_ended", "segment_sealed",
                          "segment_updated", "gap_opened", "gap_recorded", "gap_updated", "gap_closed", "event",
-                         "clock_observation", "discrepancy", "protection_gap", "chain_repair"})
+                         "clock_observation", "discrepancy", "protection_gap", "chain_repair",
+                         *(k for pair in _TABLE_KINDS.values() for k in pair)})
 
 
 def _same(a: Any, b: Any) -> bool:
@@ -595,9 +631,14 @@ def illegal_changes(table: str, prev: dict[str, Any], cur: dict[str, Any]) -> li
         if _same(a, b) or (f in _RAISE_ONLY and _raised(a, b)):
             continue
         if table == "segments":
-            if f in _SEG_FREE or (f in SEGMENT_WRITE_ONCE and a is None):
+            if f in _SEG_FREE or ((f in SEGMENT_WRITE_ONCE or f in _SEG_SET_ONCE) and a is None):
                 continue
             when = "after the segment was sealed"
+        elif table in _SET_ONCE_RULES:
+            once, transitions = _SET_ONCE_RULES[table]
+            if (f in once and a is None) or transitions.get(f) == (a, b):
+                continue
+            when = "after it was recorded"
         elif table == "recording_gaps":
             if prev.get("closed_utc") is None and (f in _GAP_WHILE_OPEN or (
                     f == "attempts" and isinstance(a, int) and isinstance(b, int) and b >= a)):
@@ -1049,9 +1090,9 @@ class _Verifier:
                     rows = c.execute(f"SELECT rowid AS _rowid_, * FROM {table} WHERE rowid > ? ORDER BY rowid LIMIT ?",
                                      (last_rowid, self.chunk)).fetchall()
                 except sqlite3.OperationalError as exc:
-                    if table == "clock_observations" and "no such table" in str(exc):
-                        # A ledger last opened by software before time accuracy was integrated.
-                        self.rep.notes.append("This recording log has no clock observations table.")
+                    if table in _LATER_TABLES and "no such table" in str(exc):
+                        # A ledger last opened by software before these features were integrated.
+                        self.rep.notes.append(f"This recording log has no {_NOUN[table]} table.")
                         return
                     self.find(None, "table_missing", f"The {noun} table cannot be read ({exc}).")
                     return

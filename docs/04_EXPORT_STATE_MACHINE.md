@@ -2,6 +2,16 @@
 
 Status: design only. Nothing in this document is implemented yet.
 
+> **Implementation note (branch `design/archive-drive`):** §1–3 (archive drive) are implemented in
+> `src/sentinel/archive/`; see `docs/branches/design-archive-drive.md`. Differences from the text
+> below: archive file names use UTC (`<HHMMSS>Z_<HHMMSS>Z_<seg8>.ts`); the index is rewritten on
+> attach, after each hour of copied footage (or an hour of wall time with new copies) and on swap,
+> and between rewrites an append-only `Sentinel/<camera>/INDEX/verified_journal.csv` (the index is per camera) documents each verified
+> file; at the default 40 MB/s throttle a 24 h backlog of 12 Mbit/s footage (≈130 GB) needs ≈1.4 h
+> on this development host (measured to an internal SSD — **no USB platter drive was tested**);
+> eject goes through the `SafeRemover` interface (only the manual-removal fallback ships). §6 is
+> implemented by `req/review-drive-export`.
+
 ## 1. Storage tiers
 
 ```

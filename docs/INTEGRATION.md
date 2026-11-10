@@ -22,6 +22,7 @@ silently replace the earlier entry instead of failing).
 | 7 | design/tamper-evident-ledger | 575 passed (573 after the merge, +2 integration tests) | db.py, service.py, tests/integration/harness.py, docs/07 |
 | 8 | req/operator-gui (322ed90) | 793 passed (4 failed before the test adaptation below; +3 integration tests) | none textually (auto-merged) |
 | 9 | design/time-accuracy (782a8c9) | 834 passed | config.py, db.py, service.py, diagnostics.py, example config, docs/05 |
+| 10 | design/local-retention (39bf395, contains design/archive-drive 5c976bc) | 932 passed (17 failed before the fixes below) | alerts.py, config.py, db.py, service.py, status.py, example config |
 
 ## 1. fix/ledger-reader-retry
 Clean merge. Note carried forward: `ledgerchain._ro_connect` (tamper-evident-ledger branch) does
@@ -300,3 +301,67 @@ Conflicts: `config.py`, `db.py`, `service.py`, `diagnostics.py`, example config,
   the log shows a rate-limited correction and an extra short timeline gap while other agents
   loaded the machine); that test re-run alone: **1 passed**. Every harness-based run also
   verified the ledger chain after stopping (no false "altered").
+
+## 10. design/archive-drive + design/local-retention (one `--no-ff` merge of local-retention 39bf395)
+`design/local-retention` is stacked on `design/archive-drive` (5c976bc), which is itself rebased
+on `req/review-drive-export` (already merged), so one merge brings in both; recorded here as
+merge 10 (the coordinator asked for it "in spirit" right after the export, done now because the
+other merges were already committed).
+* **Conflicts:** `alerts.py` (M-codes and A-/L-codes kept, one Z-001, spacing restored; catalogue
+  **49 codes, no duplicates**), `config.py` (`[drives]`, `[archive]`, `[retention]` all accepted;
+  `AppConfig.drives/archive/retention`), `db.py` (`CHAIN_DDL`, `ARCHIVE_DDL`, `RETENTION_DDL`
+  all applied; `segments.local_deleted_utc` added before the timing columns and before chain
+  genesis; the archive branch's WAL-switch retry sits after the reader-retry constructor),
+  `status.py` (`terminal`, `archive`, `retention` fields + `fatal_status_document`),
+  `service.py` (watchdog/shutdown budget + retention thread stop; status document carries clock
+  observation, terminal flag, retention and archive sections and A-/L-alerts), example config.
+* **Owner decisions applied:** `[archive] resume_policy` default **`any_drive`** (config.py and
+  example config). `[retention] enabled = false` unchanged (not authorised yet; config still
+  refuses retention without archiving). Tests that were written for the old default now set
+  `resume_policy = "this_drive"` explicitly in their environment (`test_archive_units.py::Env`,
+  `test_retention_units.py::Env`); `test_config_validation` asserts the new default.
+* **Bug fixed by the combination:** archive and retention called `Ledger._event_in(c, spec)` as a
+  static method; the tamper-evident ledger made it an instance method (it writes the chain entry),
+  so these calls raised TypeError (17 unit failures). Now `self.ledger._event_in(...)`.
+* **Directory flush shared with export** (coordinator item 3): `TargetIO.fsync_dir` now calls the
+  archive branch's `platform.windows.flush_directory` (FlushFileBuffers on the directory), and the
+  export write paths (`write_new`, `finish_external`) use the new shared
+  `TargetIO.confirm_in_place`: if the file system refuses the flush, the final name must be in a
+  fresh listing with no `.partial`, else the item fails (it is never reported verified).
+* **Ledger chain covers the archive/retention rows** (item 5), added to chain format 1 before
+  release: `archive_copies` (VERIFIED → LOST once; nothing else may change), `archive_problems`
+  (acknowledged once), `archive_drive_sessions` (closed once — this is what retention relies on to
+  know a drive left the machine), `retention_deletions` (DELETING → DONE once) and
+  `segments.local_deleted_utc` (set once on a sealed segment). Every write path in
+  `archive/ledger.py` and `retention/manager.py` now writes its chain entry in the same
+  transaction (`Ledger.chain_insert` / `Ledger.chained`). **Not covered (documented):**
+  `archive_indexes` (composite key; it lists SHA-256 values of index documents that are on the
+  drive itself) and the `drives` / export tables (see merge 7). Test:
+  `test_archive_and_retention_rows_are_chained_and_tampering_is_found` (a clean flow verifies;
+  editing a copy hash, re-opening a closed session, deleting a removal record, or clearing
+  `local_deleted_utc` is each found).
+* **Archive Windows service consistent with the service host** (item 4): `sentinel.winsvc host`
+  gained `--program archive` (service name `SentinelArchive`, body `run_archive_in_host`: config
+  error → exit 2 and event log; archiving disabled → clean stop, no restart loop);
+  `winsvc.commands.host_command(..., program="archive")` builds the binPath (frozen:
+  `SentinelService.exe host --config … --program archive`); `python -m sentinel.archive
+  service-plan` uses it by default (`--host-command` is now an override) and also grants the
+  archive account read access to the configuration folder. Tests:
+  `test_archive_windows_service_uses_the_recorder_service_host`,
+  `test_archive_service_body_runs_worker_until_stopped_and_stops_cleanly_when_disabled`.
+  Installation itself: NOT EXECUTED (administrator rights).
+* **Archive role on drives** (item 6): decision — keep the archive branch's separate,
+  administrator-only, audited `python -m sentinel.archive designate` (it refuses review drives)
+  rather than having "Erase and Set Up Drive" write `role`. Reasons: erasing is switched off
+  until the dock test, designation must work on drives prepared earlier, and keeping the
+  destructive path free of role logic keeps it smaller. The drives marker validator accepts the
+  extra `role` keys; drives holding an archive layout are SENTINEL_EVIDENCE (never erased).
+* **Integration tests after merge 10:** `test_archive_drive.py` + `test_review_export.py`:
+  **27 passed, 2 failed** at first. Both were test assumptions broken by the combination, fixed
+  in the tests with the reason recorded there: (1) `test_swap_during_active_recording_then_next_drive`
+  asserts the `this_drive` behaviour and relied on the old default → now sets
+  `resume_policy = "this_drive"`; (2) `test_resume_uses_segment_snapshot_not_live_rows` asserted
+  that every exported original has *no* warnings, but under machine load a real segment can carry
+  the time-accuracy finalizer's legitimate `time_correction_limited` warning; it now asserts that
+  the after-planning change (`changed_later`) does not leak into the manifest, which is what it
+  tests. Re-run of both: **2 passed**. Unit tests: **932 passed**.

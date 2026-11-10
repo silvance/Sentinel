@@ -374,11 +374,20 @@ def cmd_host(args: argparse.Namespace) -> int:
     from .scm import CtypesScmApi, NotStartedByScm, ServiceHost
 
     config = args.config
+    program = getattr(args, "program", "recorder") or "recorder"
 
     def run_recorder(host: ServiceHost) -> int:
         return run_recorder_in_host(host, config)
 
-    host = ServiceHost(SERVICE_NAME, run_recorder, CtypesScmApi())
+    def run_archive(host: ServiceHost) -> int:
+        return run_archive_in_host(host, config)
+
+    if program == "archive":   # integration: the SentinelArchive service uses the same ctypes host
+        from ..archive.hosting import SERVICE_NAME as ARCHIVE_SERVICE_NAME
+
+        host = ServiceHost(ARCHIVE_SERVICE_NAME, run_archive, CtypesScmApi())
+    else:
+        host = ServiceHost(SERVICE_NAME, run_recorder, CtypesScmApi())
     try:
         host.dispatch()
     except NotStartedByScm:
@@ -495,6 +504,35 @@ def run_recorder_in_host(host: object, config: str, recorder_factory: Callable |
     return svc.run()
 
 
+def run_archive_in_host(host: object, config: str, worker_factory: Callable | None = None,
+                        event_log: Callable[[str], object] = _default_event_log) -> int:
+    """Body of ServiceMain for the ``SentinelArchive`` service (integration of design/archive-drive
+    with this host): load configuration, log to file only, run the archive worker until the SCM
+    stops it. A configuration error exits 2 (the SCM restarts it, each attempt visible in the
+    event log); archiving switched off in the configuration is a clean stop (no restart loop).
+    Real SCM operation NOT EXECUTED (administrator rights); tested with a fake host."""
+    from ..config import ConfigError, load_config
+    from ..logging_setup import setup_logging
+    from ..service import EXIT_CONFIG
+
+    try:
+        cfg = load_config(config)
+    except ConfigError as exc:
+        event_log(f"Sentinel archive cannot start: configuration error: {exc}")
+        return EXIT_CONFIG
+    if not cfg.archive.enabled:
+        event_log("Sentinel archive: [archive] enabled = false in the configuration; the service stops.")
+        return 0
+    setup_logging(cfg.log_path, cfg.service.log_level, to_stderr=False)
+    if worker_factory is None:
+        from ..archive.worker import ArchiveWorker as worker_factory  # noqa: N813
+    w = worker_factory(cfg)
+    host.on_stop(lambda: w.stop(0))        # type: ignore[attr-defined]
+    host.report_running()                  # type: ignore[attr-defined]
+    w.run(whole_process=True)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="python -m sentinel.winsvc",
                                  description="Install and manage the Sentinel recorder Windows service.")
@@ -521,6 +559,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--no-acl", action="store_true", help="do not restrict file permissions (development only)")
     p = sub.add_parser("host", help=argparse.SUPPRESS)
     p.add_argument("--config", required=True)
+    p.add_argument("--program", choices=("recorder", "archive"), default="recorder")
     args = ap.parse_args(argv)
     handlers: dict[str, Callable[[argparse.Namespace], int]] = {
         "install": cmd_install, "uninstall": cmd_uninstall, "status": cmd_status,
