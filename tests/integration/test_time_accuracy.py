@@ -13,6 +13,14 @@ while probing the stream and writes segment 0 in a burst afterwards, so its clos
 about 1.1-1.2 s after its last packet arrived. Measured with NO drift (clock_rate 1.0):
 end_utc - observed_closed_utc = -1.19 s for segment 0 and -0.18..-0.41 s (0.2 s poll) for the
 rest. That is a limitation of the reference, not of the timestamps.
+
+These tests need a machine that is not saturated: the simulated camera runs on the same machine.
+Load test 2026-11-10 (20 CPU burners on 20 cores plus PyInstaller builds) showed what saturation
+does, none of it a recorder fault: (1) the simulator drops frames, so FFmpeg's segment list has
+one-frame (1/15 s) holes between segments, which the recorder reports faithfully as non-contiguous
+times; (2) the poll-based reference lags (one segment 0.57 s off); (3) noisy reception-time
+measurements make the drift correction flag itself "limited" instead of following them. A
+footage-less first connection attempt that timed out is set aside (``_recording_runs``).
 """
 
 from __future__ import annotations
