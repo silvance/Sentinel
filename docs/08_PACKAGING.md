@@ -185,8 +185,9 @@ powershell -ExecutionPolicy Bypass -File packaging\windows\build.ps1 -FfmpegDir 
   `packaging/windows/sentinel.spec` (`PYTHONHASHSEED=0`, `SOURCE_DATE_EPOCH` = commit time), copies
   FFmpeg/FFprobe unchanged (copy verified by SHA-256) plus licence/readme files, and writes
   `BUILD-MANIFEST.json` and `SHA256SUMS.txt`.
-* **FFmpeg is never downloaded** by the build. The test build used the copy installed on the
-  development host (gyan.dev 9.0.1 full build, WinGet).
+* **FFmpeg is never downloaded** by the build. The test builds used the copy installed on the
+  development host (gyan.dev 9.0.1 full build, WinGet, GPL — the latest one built with
+  `-AllowGplInternalUse`). The release build must bundle an LGPL FFmpeg (§8).
 * Outputs: `dist\Sentinel\` and `build\` (both git-ignored). Never commit them.
 * **Offline build:** once, `pip download --no-deps -r requirements/build.txt -d wheels\`
   (Windows) and with `--platform manylinux2014_x86_64 --only-binary=:all:` for Linux; then install
@@ -218,46 +219,108 @@ UPX is disabled on purpose (packed executables are a common false-positive trigg
 | Launcher: double-click → recorder confirmed by heartbeat | 0.74–0.75 s (`launch --once` wall time); recorder process start → first status 0.5 s |
 | Frozen recorder, 30 s, simulated camera, PATH without any FFmpeg | 15 segments FINALIZED, 14 content-hashed (the last one is hashed on next start, existing behaviour); every FFmpeg command line starts with the bundled `dist\Sentinel\ffmpeg\ffmpeg.exe`; graceful stop via `Sentinel.exe stop`; final segment FINALIZED; status `STOPPED`. Separate first-run-setup run (same build, PATH without FFmpeg): `stop` took 2.2 s |
 | Re-test after the QA review fixes (commit d26c67e, rebuilt) | Frozen 30 s run again: 15 segments FINALIZED with the bundled FFmpeg, PATH without FFmpeg, graceful stop; `launch --once` 1.45 s. Setup with credentials under a stand-in `%ProgramData%`: folder, `spool` and `camera.secret` show only the setup account, SYSTEM and Administrators (`icacls`), no `(I)` entries. Hidden `ffprobe.exe` → `launch` C-001 (exit 2), `check-config` "FFprobe not found (<bundled path>)". Configuration in a folder granting Users Modify → C-001, "configuration file/folder … can be changed by Users". WSL rebuild: 7 segments in 12 s, stop via verified PID; Linux unit suite 112 passed, 2 skipped. |
-| Bundled FFmpeg | `9.0.1-full_build-www.gyan.dev`; `ffmpeg.exe` SHA-256 `57c56e369d5b4873b4d93fc1a1d833cb7cd8bc9325c14b05c34ce60b22842d8a`; `ffprobe.exe` SHA-256 `afe05347caaabe479b3c4eae71992b6ec1e11c57266a1d665deb0f9fe9847208`; licence class GPL-3.0-or-later |
+| Bundled FFmpeg (test builds only; GPL, now accepted only with `--allow-gpl-internal-use`) | `9.0.1-full_build-www.gyan.dev`; `ffmpeg.exe` SHA-256 `57c56e369d5b4873b4d93fc1a1d833cb7cd8bc9325c14b05c34ce60b22842d8a`; `ffprobe.exe` SHA-256 `afe05347caaabe479b3c4eae71992b6ec1e11c57266a1d665deb0f9fe9847208`; licence class GPL-3.0-or-later |
 
-## 8. FFmpeg licensing (decision for the owner — not decided here; not legal advice)
+## 8. FFmpeg licensing — owner decision: ship an LGPL FFmpeg (not legal advice)
 
-**Facts about the test build.** The bundled gyan.dev "full" build is configured with
-`--enable-gpl --enable-version3` and statically links GPL libraries such as libx264, libx265 and
-libxvid. Its licence is therefore **GPL version 3** (its README also states "License: GPL v3"). Sentinel runs it as a separate program over
-the command line and does not link to it.
+**Decision (owner, 2026-11-10): Sentinel is distributed with an LGPL build of FFmpeg.** The build
+script enforces it (§8.3). No LGPL build has been obtained or tested yet: downloading one needs
+the owner's explicit approval, which is being requested separately. **Until an LGPL build is
+bundled and the test suite has passed with it (§8.5), no build may be distributed.**
 
-**What distributing that folder implies (GPL-3.0):** whoever gives the folder to someone else
-must (a) pass on the GPL licence text (shipped as `ffmpeg\LICENSE.txt`), (b) provide the
-*complete corresponding source* for that exact FFmpeg build and every library compiled into it —
-either with the copy or through a written offer / equivalent access, kept available — and (c)
-impose no further restrictions on those binaries. Running FFmpeg as a separate process is
-commonly treated as "aggregation", which would not extend the GPL to Sentinel's own code, but
-that is a legal judgement for counsel. Distribution only inside one agency may or may not count
-as "conveying" — also for counsel.
+### 8.1 Why the current test build is not acceptable
+The FFmpeg used for all tests so far (gyan.dev 9.0.1 "full", WinGet) is configured with
+`--enable-gpl --enable-version3` and statically links GPL-only libraries (libx264, libx265,
+libxvid, libvidstab, librubberband, frei0r, libcdio, libdavs2, libxavs2); `ffmpeg -L` reports
+GPL version 3, and its README states "License: GPL v3". Distributing it would require providing
+the complete corresponding source of FFmpeg *and* of every library compiled in (the README only
+points to the FFmpeg commit `bf1b838f2a`; 67 `--enable-lib*` flags). Linux distribution packages
+are also GPL (Fedora's `ffmpeg-free` 7.1.4 observed with `--enable-gpl`; Debian/Ubuntu packages are, to our knowledge, likewise configured with `--enable-gpl` — not checked here) and are dynamically linked.
 
-**Options:**
-1. **Recommended technically: an LGPL FFmpeg build** (configured without `--enable-gpl` and
-   `--enable-nonfree`; e.g. the "lgpl" Windows builds published by BtbN, or our own build).
-   Sentinel only needs stream copy, the MPEG-TS/segment/MP4 muxers, demuxers/RTSP and FFmpeg's own
-   (LGPL) H.264/HEVC decoders for validation and content hashing — no GPL encoder. Obligations
-   are lighter (licence text, source of the LGPL build, allow replacement — trivially true for a
-   separate `ffmpeg.exe`). A "shared" build would also be much smaller than 444 MB (not measured).
-   **Before switching, re-run the full test suite with that exact build** (`[tools]` or bundle it),
-   because decoder availability and version affect validation and content hashes.
-2. Keep a GPL build and adopt a compliance procedure: archive the complete corresponding source
-   with every release and include a written offer. Note that the gyan.dev README only points to
-   the FFmpeg source commit (`bf1b838f2a`); the sources of the statically linked third-party
-   libraries (67 `--enable-lib*` flags, plus others such as gnutls, zlib, SDL2) would have to be collected separately, which makes this option laborious.
-3. Do not distribute FFmpeg: the installing technician installs an approved FFmpeg and points
-   `[tools]` at it. Weakest for U9 ("just click this one program").
+### 8.2 What Sentinel needs from FFmpeg — all of it is LGPL code
+Sentinel never encodes video (stream copy only). Everything it uses is FFmpeg's own code under
+the LGPL; none of it requires `--enable-gpl` or `--enable-nonfree`:
+
+| Use | FFmpeg components | Licence |
+|---|---|---|
+| Camera input | `rtsp` demuxer (+ RTP depacketisers), `tcp`/`udp` protocols; `rtsps` additionally needs a TLS library (GnuTLS LGPL-2.1+, or OpenSSL 3 / Schannel on Windows) | LGPL |
+| H.264 / H.265 stream handling | `h264`/`hevc` parsers, `h264_mp4toannexb`/`hevc_mp4toannexb` bitstream filters | LGPL |
+| Recording | `segment` and `mpegts` muxers, `file`/`pipe` protocols | LGPL |
+| Validation (ffprobe) and content hash | `mpegts` demuxer, native `h264`/`hevc` **decoders**, `null`, `hash`/`framehash` muxers, SHA-256 from libavutil, libswscale for pixel-format conversion | LGPL |
+| MP4 review copies (Phase 3) | `mp4` (mov) muxer and `mov` demuxer | LGPL |
+
+The native `h264`/`hevc` decoders matter: content hashes (`videohash.py`) were validated with
+FFmpeg's own decoders; builds that replace them (e.g. with libopenh264) are refused by the
+component check. Only the *simulated camera* (a development tool, never shipped) needs the GPL
+encoder libx264; the test suite therefore keeps a GPL FFmpeg on the developer's PATH for the
+simulator while the recorder under test uses the LGPL candidate (§8.5).
+
+### 8.3 What the build script enforces (`packaging/build.py`, tests `tests/unit/test_build_licence.py`)
+* The licence is read from two independent sources and must agree: `ffmpeg -L` and
+  `ffprobe -L` (the licence string FFmpeg's `configure` compiles in: "GNU Lesser General Public
+  License … version 2.1/3", "GNU General Public License … version 2/3", or "nonfree parts
+  compiled in") and the `configuration:` line of `ffmpeg -version` (`--enable-nonfree` ⇒ nonfree;
+  `--enable-gpl`, `--enable-postproc` or any GPL-only library such as `--enable-libx264` ⇒ GPL;
+  `--enable-version3` selects v3). Disagreement or an unrecognised `-L` text ⇒ refused.
+* **Nonfree: always refused. GPL: refused** with a message pointing here, unless the builder
+  passes `--allow-gpl-internal-use` (`-AllowGplInternalUse` in `build.ps1`). Then
+  `BUILD-MANIFEST.json` starts with `"ffmpeg_license_status": "GPL FFMPEG - INTERNAL USE ONLY …
+  must NOT be distributed"`, `ffmpeg\FFMPEG-LICENCE-NOTE.txt` says so, and `Sentinel about` prints
+  it inside a row of `!` characters with "This folder must not be given to anyone outside the
+  organisation."
+* The components in §8.2 must be present (`-demuxers`, `-muxers`, `-decoders`, `-protocols`,
+  `-bsfs`), else refused.
+* `build.py --ffmpeg-dir <dir> --inspect-only` (or `build.ps1 -InspectOnly`) checks a candidate
+  without building and prints the verdict.
+
+Test basis: captured `-version`, `-L` and component lists of the local GPL build
+(`tests/fixtures/ffmpeg/`); the LGPL and nonfree `-L` texts in the tests are synthetic, written
+from FFmpeg's wording, because no such build is installed here — they must be confirmed against
+the first real LGPL build (§8.5 step 3).
+
+### 8.4 Which LGPL build to obtain (for the owner's approval)
+Use a static build (no separate DLLs) of an FFmpeg **release** branch (7.1 or newer; the code is
+tested on 9.0.1 and requires ≥ 6.0), 64-bit, LGPL variant. Options, in order of preference:
+
+1. **Build it ourselves from the official release tarball** — `https://ffmpeg.org/releases/ffmpeg-<version>.tar.xz`
+   with its `.asc` signature, verified with `gpg --verify` against the FFmpeg release signing
+   key published on ffmpeg.org. Configure **without** `--enable-gpl` and `--enable-nonfree`
+   (optionally `--enable-version3`), e.g.
+   `--disable-shared --enable-static --disable-doc --disable-ffplay --enable-gnutls` (TLS only if
+   `rtsps` is needed) and no external codec libraries. Most auditable: we hold exactly the source
+   we distribute. Costs a cross-compile toolchain (MSYS2/MinGW or a Linux cross build).
+2. **BtbN "FFmpeg-Builds"** (GitHub, `github.com/BtbN/FFmpeg-Builds/releases`): automated builds
+   published in GPL and LGPL variants for `win64` and `linux64`; choose an asset whose name
+   contains `win64-lgpl` (Windows) / `linux64-lgpl` (Linux) for a **release** branch (`n<version>`),
+   not `master`/`latest` nightlies, and not the `-shared` variant unless DLLs are wanted. The
+   release page lists checksums; record the asset URL and SHA-256. (Asset naming as published
+   at the time of writing — confirm on the page.)
+3. Not acceptable: gyan.dev "full" (GPL, §8.1) and, as published at the time of writing, gyan.dev
+   "essentials" (also includes libx264/libx265 ⇒ GPL — confirm with `--inspect-only`); Linux
+   distribution packages (GPL, dynamically linked).
+
+### 8.5 How to verify a candidate and what must be re-run
+1. Record where it came from (URL, release tag), its SHA-256, and for option 1 the verified
+   signature and the exact `configure` command.
+2. `packaging\windows\build.ps1 -FfmpegDir <dir> -InspectOnly` → must print
+   `"license_status": "OK: LGPL-…"`; any refusal ends the evaluation.
+3. Look at `ffmpeg -L` yourself: it must say "GNU Lesser General Public License"; compare with the
+   synthetic text in `tests/unit/test_build_licence.py` and, if FFmpeg's wording differs, update
+   the detector and add the real output under `tests/fixtures/ffmpeg/`.
+4. **Re-run the whole test suite with the candidate as the recorder's FFmpeg**:
+   `SENTINEL_TEST_TOOLS_DIR=<dir>` makes every test configuration use it, while the simulated camera
+   keeps using the FFmpeg on PATH: `python -m pytest tests -q -p no:cacheprovider`. Content hashes
+   carry the FFmpeg version in their method string, so expect no comparison against hashes made
+   with the old build.
+5. Build with it (no override flag), then run the frozen smoke test
+   (`SENTINEL_FROZEN_EXE=dist\Sentinel\Sentinel.exe SENTINEL_LAUNCHER_RUN_S=30 pytest tests/integration/test_launcher_process.py -s`),
+   `Sentinel about --verify`, and record the results and new folder size in the branch notes.
+6. Ship the FFmpeg licence text (copied automatically if present next to the binaries) and keep
+   the matching source archive (option 1: our tarball; option 2: the tagged source the build used)
+   with each release, so the LGPL source offer can be honoured.
 
 Separately from copyright: H.264/HEVC are patent-encumbered formats; whether decoding them in
 this deployment needs a patent licence is outside engineering scope.
-
-The build manifest records the licence class derived from the configure flags of whatever was
-bundled, so a release can be checked against the chosen policy.
-
 ## 9. Linux
 
 **Recipe (implemented):** PyInstaller one-folder with `packaging/linux/sentinel.spec`, built

@@ -75,6 +75,10 @@ same way under WSL.
 | After fixes, built program, manual: setup with credentials under a stand-in `%ProgramData%`; `icacls` on the folder, `spool`, `camera.secret`; hidden bundled `ffprobe.exe`; configuration in a folder granting Users Modify | Only setup account/SYSTEM/Administrators, no inherited entries; missing ffprobe → C-001 exit 2 and "FFprobe not found (<bundled path>)"; Users-writable folder → C-001 exit 2, "configuration file/folder … can be changed by Users"; `about --verify` OK afterwards |
 | After fixes, WSL Fedora 43: clean clone, build, frozen `launch`/12 s/`stop`, Linux unit suite | Built; 7 segments FINALIZED, bundled FFmpeg, stop via verified PID; **112 passed, 2 skipped** (Windows-only) |
 | Full `pytest tests` after the fixes | **NOT re-run** (only unit + the integration files touched by the change) |
+| **After the LGPL-policy change (commit d0bdd43):** `pytest tests/unit -q -p no:cacheprovider` | **126 passed** (12 new in `test_build_licence.py`) |
+| After the policy change: `SENTINEL_TEST_TOOLS_DIR=<gyan bin> pytest tests/integration/test_launcher_process.py tests/integration/test_service_process.py::test_credentials_never_leak` (checks the new test hook) | **2 passed** |
+| `build.ps1 -FfmpegDir <gyan bin> -InspectOnly` | Refused (exit 1): "this FFmpeg is GPL-3.0-or-later (flags: --enable-frei0r --enable-gpl … --enable-libx264 …). Sentinel ships an LGPL FFmpeg only …" |
+| `build.ps1 -FfmpegDir <gyan bin> -AllowGplInternalUse`, then `Sentinel.exe about` | Built (13 s); manifest starts with `ffmpeg_license_status: GPL FFMPEG - INTERNAL USE ONLY …`; `about` shows it between rows of `!` with "must not be given to anyone outside the organisation"; required components all present |
 
 Measured: output folder 465.9 MB (FFmpeg 444.3 MB of it, Python part 18.2 MiB); startup of
 `Sentinel.exe about` 0.32 s warm, 1.29 s first run after build (one 7.4 s outlier, assumed AV
@@ -101,10 +105,12 @@ scan); double-click to recorder confirmed 0.74–0.75 s.
 * Python 3.12 anywhere (only 3.14.3 on Windows and 3.14.5 on WSL).
 
 ## 6. Risks, limitations, open decisions for the owner
-1. **FFmpeg licence (open decision).** The bundled test FFmpeg is a GPL-3.0 build; distributing
-   the folder requires providing its complete corresponding source (incl. ~67 compiled-in
-   libraries). Recommendation: switch to an LGPL build and re-run the suite with it; alternatives
-   in docs/08 §8. Not decided here.
+1. **FFmpeg licence — decided: LGPL (owner, 2026-11-10).** `packaging/build.py` now refuses GPL
+   and nonfree FFmpeg (override `--allow-gpl-internal-use`, recorded in the manifest and shown by
+   `Sentinel about`). **No LGPL build has been obtained yet** (download awaits the owner's
+   approval); everything was tested with the local GPL build only. Before any distribution:
+   obtain an LGPL build (docs/08 §8.4), verify it and re-run the whole suite with it (§8.5). The
+   LGPL/nonfree `-L` texts used in the detector tests are synthetic until then.
 2. **Interim background mode is not suitable for unattended deployment:** the recorder stops when
    the user logs off and at every restart, depends on that user being logged on, and does not
    start by itself (U8). The Windows service branch is required for unattended use. The
@@ -135,9 +141,21 @@ scan); double-click to recorder confirmed 0.74–0.75 s.
 | 4.2 | Interim mode limits | **Documented** (docs/08 §5, `control.py`, risks above). |
 | 4.6 LOW | Reproducibility wording | **Fixed** in docs/08 and these notes. |
 
-## 8. Recommendation
-**Merge after the owner decides the FFmpeg distribution policy** (the code does not depend on
-the choice: any FFmpeg folder can be passed to the build script). The launcher, resolution
+## 8. Owner decision: LGPL FFmpeg
+* Enforced in `packaging/build.py`: licence from `ffmpeg -L`/`ffprobe -L` cross-checked with the
+  configure flags (incl. GPL-only libraries); disagreement/unknown ⇒ refused; nonfree ⇒ always
+  refused; GPL ⇒ refused unless `--allow-gpl-internal-use`. Required native components checked.
+  `--inspect-only` vets a candidate. Tests use captured outputs of the local GPL build
+  (`tests/fixtures/ffmpeg/`) and synthetic LGPL/nonfree lines.
+* docs/08 §8 lists what Sentinel needs (all FFmpeg-native, LGPL), which LGPL build to obtain
+  (own build from the signed ffmpeg.org release tarball, or a BtbN `win64-lgpl`/`linux64-lgpl`
+  release build), how to verify it and that the whole suite must be re-run with it
+  (`SENTINEL_TEST_TOOLS_DIR`, new test hook in `tests/conftest.py`).
+* **Not done:** no LGPL FFmpeg downloaded (needs the owner's approval); nothing tested with one.
+
+## 9. Recommendation
+**Merge** the code (the policy is enforced and nothing GPL can be built by accident); **do not
+distribute any build until an LGPL FFmpeg has been obtained, bundled and the whole test suite
+re-run with it** (docs/08 §8.5). The launcher, resolution
 rules and build are tested on Windows and partially on Linux; the service and GUI branches plug
-in through the two provider lists without changing the packaging approach. Do not distribute
-builds containing the current GPL FFmpeg until that decision is made.
+in through the two provider lists without changing the packaging approach. 

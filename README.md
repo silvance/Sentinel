@@ -25,7 +25,8 @@ operator GUI (Phase 4), Windows service / auto-start.
 first start (technician questions), starts the recorder in the background and shows its
 status. Build: `packaging\windows\build.ps1 -FfmpegDir <dir>` (Linux: `packaging/linux/build.sh`).
 From source the same launcher is `python -m sentinel.launcher`. See
-[docs/08](docs/08_PACKAGING.md), including the FFmpeg licensing decision that is still open.
+[docs/08](docs/08_PACKAGING.md). Owner decision: releases bundle an **LGPL** FFmpeg; the build
+script refuses GPL/nonfree builds (docs/08 §8). No LGPL build has been obtained or tested yet.
 
 ## Developer quick start (Windows or Linux)
 Requires Python ≥ 3.12 and FFmpeg/FFprobe ≥ 6.0 on PATH.
