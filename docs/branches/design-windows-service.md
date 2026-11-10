@@ -254,6 +254,6 @@ Full integration suite after the fixes (32 tests): **28 passed, 4 failed** — t
   letters/digits/hyphens, ≤63 each, ≤253 total, not all-numeric TLD) or a dotted IPv4 address
   without leading zeros; spaces (w32tm's peer separator), commas (peer flags), quotes, slashes,
   `& | < > ^ %`, control characters, non-ASCII look-alikes, IPv6, ports and URLs are refused
-  (30 rejection cases unit-tested).
+  (32 rejection cases unit-tested).
 
 Tests: `tests/unit` **177 passed**.
