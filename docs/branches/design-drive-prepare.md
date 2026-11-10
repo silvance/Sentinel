@@ -1,167 +1,179 @@
-# Branch `design/drive-prepare` — automatic drive detection and one-button preparation
+# Branch `design/drive-prepare` — automatic drive detection and one-button "Erase and Set Up Drive"
 
 ## 1. Summary (for the project owner)
-When a drive is plugged in, Sentinel can now tell what kind of drive it is — already prepared,
-empty, wrong format, holding someone else's files, or not usable at all — and shows a plain
-sentence for each. For empty or wrongly formatted drives it offers **Prepare This Drive**, which
-erases the drive and sets it up correctly after one confirmation; for drives holding other files it
-demands an administrator and the last 4 characters of the drive's serial number. The computer's
-own drive and the drive holding the recordings can never be selected. **No drive was actually
-formatted while building this**: the erase step was tested only by generating and checking its
-commands, not by running them on a disk.
+When a drive is plugged in, Sentinel can now tell what kind of drive it is: already set up, empty,
+wrong format, holding someone else's files, holding Sentinel recordings, or not usable at all. It
+shows a plain sentence for each. For empty or wrongly formatted drives it offers **Erase and Set Up
+Drive** (docs/04 calls this "Prepare This Drive"; it was renamed so operators cannot confuse it with
+**Prepare Review Drive**). That button erases the drive and sets it up correctly after one
+confirmation. For drives holding other files it demands an administrator and the last 4 characters
+of the drive's serial number. The computer's own drive, the drive holding the recordings, and any
+drive that holds or held Sentinel recordings can never be erased by this tool. **No drive was
+actually formatted while building this**: the erase step was tested only by generating, parsing and
+checking its commands, not by running them on a disk.
 
 ## 2. Requirements addressed
 | ID | What this branch does | Requirement or design choice |
 |---|---|---|
-| S2 | Automatic classification READY / BLANK / WRONG_FORMAT / FOREIGN_DATA / UNSUITABLE; one-button prepare | Stated (owner) |
-| S3 | Never automatic; confirmation bound to the exact disk; stricter authorisation for drives with data; policy `never` possible | Stated (brief) |
-| U4 | `safe_remove()` (flush, eject, confirm the disk is gone, then "SAFE TO REMOVE DRIVE") | Stated |
-| U7 | New operator codes M-001…M-008 with fixed wording | Stated (style); codes are my choice |
+| S2 | Automatic classification READY / BLANK / WRONG_FORMAT / FOREIGN_DATA / SENTINEL_EVIDENCE / UNSUITABLE; one-button erase-and-set-up | Stated (owner) |
+| S3 | Never automatic; confirmation bound to the exact disk; stricter authorisation for drives with data; policy `never` possible; Sentinel evidence never erasable | Stated (brief) |
+| U4 | `safe_remove()` (flush, eject, confirm the disk is gone, then "SAFE TO REMOVE DRIVE"); operator wording kept distinct from "Prepare Review Drive" | Stated |
+| U7 | New operator codes M-001…M-009 with fixed wording | Stated (style); codes are my choice |
 | U9 | Windows first: built-in Storage cmdlets, UAC, cfgmgr32; Linux implemented (not executed) | Stated |
+| E4, E6 | Drives holding Sentinel recordings (marker, layout, or known to the ledger) are never erased | Stated (preservation / retention); detection rules are my design |
 | E5 | Audit events in the ledger: authorised / refused / failed / prepared, with identity and who | Stated |
-| C1, C2, C4 (docs/02) | Configurable approved filesystem (default NTFS); identity uses serial+UniqueId+model+size+GUIDs; cache-bypassing read-back test | Risks; handling is my design |
+| C1, C2, C4 (docs/02) | Configurable approved filesystem (default NTFS); identity uses hardware + content identifiers; cache-bypassing read-back test | Risks; handling is my design |
 
 Design choices (all mine, all reversible by configuration or small code changes):
-* **Mechanism:** elevated helper = a separate Windows PowerShell started through UAC
-  (`Start-Process -Verb RunAs -Wait -PassThru`), script passed with `-EncodedCommand` so there is no
-  script file another user could tamper with. The recorder never runs elevated. Linux: `pkexec`.
-* **Triple check (TOCTOU):** guards run when Prepare is requested, again immediately before the
+* **Mechanism:** the elevated helper is a separate Windows PowerShell started through UAC
+  (`Start-Process -Verb RunAs -Wait -PassThru`). The script is passed with `-EncodedCommand`, so there is no
+  script file another user could tamper with. The recorder never runs elevated. Linux uses `pkexec`.
+* **Triple check (TOCTOU):** guards run when erasing is requested, again immediately before the
   elevated helper is started, and a third time *inside* the elevated helper right before
-  `Clear-Disk` (after the UAC prompt was approved — the person may sit on that prompt for minutes).
-  It re-checks again before Initialize-Disk and New-Partition.
-* **Identity:** serial (normalised), UniqueId/WWN, model, size, bus, disk GUID, partition GUIDs,
-  volume GUIDs → SHA-256 fingerprint. The confirmation carries the fingerprint, not just the disk
-  number. Disk numbers, device nodes and drive letters are locators only.
+  `Clear-Disk`. That third check happens after the UAC prompt is approved, and the person may sit on
+  that prompt for minutes. The hardware identity is re-checked again before Initialize-Disk and New-Partition.
+* **Identity:** the hardware part is serial (normalised), UniqueId/WWN, model, size and bus. The
+  content part is the disk GUID (GPT) **or MBR disk signature**, partition GUIDs, **partition
+  offsets+sizes**, volume GUIDs and **filesystem serial numbers**. All of this goes into a SHA-256
+  fingerprint. The confirmation carries the fingerprint, not just the disk number. Disk numbers, device nodes
+  and drive letters are locators only. If a content identifier the disk should have is missing,
+  erasing is refused (`identity_incomplete`).
 * **Protected disks by identity:** the OS (`%SystemRoot%`, `/`, `/boot`…), the Python runtime and
   Sentinel code, the spool, the ledger (data dir) and logs are resolved to volume GUIDs
-  (`GetVolumePathNameW` + `GetVolumeNameForVolumeMountPointW`) or Linux `maj:min` (including LVM/LUKS
-  stacked devices), plus Windows IsSystem/IsBoot and page-file flags. **Fail closed:** if any of these
-  cannot be resolved or is found on no disk (network share, Storage Spaces, SUBST…), every drive is
-  UNSUITABLE with M-008.
-* **Uncertainty is never "empty":** unrecognised filesystem (e.g. ext4/HFS+ seen from Windows),
-  unmounted volume on Linux, unreadable root, EFI/recovery/unknown partitions → FOREIGN_DATA (the
-  stricter path). Only OS-created root entries (System Volume Information, $RECYCLE.BIN, lost+found…)
-  are ignored.
-* **Only dock drives by default:** `allowed_bus_types = ["USB"]`; internal SATA/NVMe disks are
-  UNSUITABLE unless an administrator lists their bus. Minimum size 128 GB (≈1 day at 12 Mbit/s).
-* **Drives without serial and UniqueId are UNSUITABLE** (cannot be re-identified safely).
-* **Drive letter after formatting** (`Add-PartitionAccessPath -AssignDriveLetter`) instead of
-  `New-Partition -AssignDriveLetter`, so Explorer cannot pop up "You need to format the disk" during
-  preparation. Sentinel itself uses the volume GUID path.
-* **Label** `SENTINEL_<n>`, n = one more than any number in the ledger or on attached drives;
-  validated against filesystem label limits (exFAT 11 characters → n ≤ 99).
-* **Administrator** (interim answer to D4): the OS account is a member of BUILTIN\Administrators
-  (SID S-1-5-32-544, also when UAC-filtered) and the CLI was given `--admin`; Linux: root or group
-  `sentinel-admin`. Real application roles are Phase 4.
-* **Alert prefix `M-`** ("media"): `D-` is already the recording database (D-001). M-001 empty,
-  M-002 wrong format, M-003 other files, M-004 cannot be used, M-005 preparation failed, M-006 drive
-  changed before preparing (nothing erased), M-007 could not be safely removed, M-008 drive checks
-  unavailable. None stop recording (R3: recording never writes to removable drives).
-* **`drives` table not added:** identity is recorded in `events` (`category='drives'`,
-  `severity='audit'`) to avoid colliding with the export branch's ledger changes. The export branch
-  should add the `drives` table of docs/04 §5 and can backfill from these events.
+  (`GetVolumePathNameW` + `GetVolumeNameForVolumeMountPointW`) or to Linux `maj:min` (including LVM/LUKS
+  stacked devices). Windows IsSystem/IsBoot and page-file flags are also used. **Fail closed:** if any
+  of these cannot be resolved or is found on no disk, every drive is UNSUITABLE with M-008. Erasing
+  also requires that the configuration is the **installed recorder's** (see §8, 1.3).
+* **Sentinel evidence is never erasable** (§8, 1.1).
+* **Uncertainty is never "empty":** an unrecognised filesystem, an unmounted volume on Linux, an
+  unreadable root, or EFI/recovery/unknown partitions all classify as FOREIGN_DATA (the stricter path).
+  Only OS-created root entries (System Volume Information, $RECYCLE.BIN, lost+found…) are ignored.
+* **Only dock drives by default:** `allowed_bus_types = ["USB"]`. Minimum size 128 GB.
+  Drives without serial and UniqueId are UNSUITABLE.
+* **Drive letter after formatting** (`Add-PartitionAccessPath -AssignDriveLetter`). This way Explorer
+  cannot pop up "You need to format the disk" in the middle of the setup.
+* **Label** is `SENTINEL_<n>`, validated against filesystem label limits.
+* **Administrator** (interim answer to D4): the OS account is in BUILTIN\Administrators
+  (S-1-5-32-544, also when UAC-filtered) and `--admin` was given. On Linux: root or group `sentinel-admin`.
+* **Alert prefix `M-`** ("media"), because `D-` is already the recording database. M-001 empty, M-002
+  wrong format, M-003 other files, M-004 cannot be used, M-005 setup failed, M-006 drive changed before
+  it could be erased (nothing erased), M-007 could not be safely removed, M-008 drive checks
+  unavailable, M-009 holds Sentinel recordings (never erased). None of these stop recording.
+* **`drives` table not added.** Identity is recorded in `events` (`category='drives'`) instead. A
+  `drives` table created by the export branch is *read* if present (recognised column names only).
 
 ## 3. What changed
-New package `src/sentinel/drives/`:
-* `model.py` — DiskInfo/PartitionInfo/VolumeInfo, DriveIdentity + fingerprint, normalisation.
-* `windows_enum.py` — read-only PowerShell enumeration script and parser; volume-GUID lookup by path.
-* `linux_enum.py` — `lsblk --json` parser and runner; `maj:min` lookup by path (findmnt fallback).
-* `protected.py` — protected roles → identities; fail-closed completeness check.
-* `classify.py` — classification and operator messages.
-* `policy.py` — `[drives]` policy (approved_filesystem, foreign_data_authorization, allowed_bus_types,
-  min_size_gb, label_prefix, serial_confirm_chars) with validation.
-* `commands.py` — generated Windows PowerShell and Linux sh scripts, with independent guards.
-* `prepare.py` — guards, confirmation, orchestration, UAC/pkexec runners, audit events, admin check.
-* `marker.py` — `SENTINEL_DRIVE.json`, root inspection, uncached write/read-back test.
-* `eject.py` — `safe_remove()` (Windows cfgmgr32; Linux udisksctl).
-* `cli.py`, `__main__.py` — `python -m sentinel.drives list|classify|prepare|eject|snapshot`.
-* `powershell.py`, `errors.py` — helpers, structured errors carrying M- codes.
-
-Changed: `src/sentinel/alerts.py` (M-001…M-008 added; nothing else changed).
-Tests: `tests/unit/test_drives_{classify,prepare,commands,cli_eject}.py`, `tests/drive_fakes.py`,
-fixtures `tests/fixtures/drives/windows_dev_host.json` (REAL, this machine),
-`linux_wsl_lsblk.json` (REAL, WSL2 Fedora VM), `linux_usb_constructed.json` (constructed).
-Not changed: `platform/windows.py`, `platform/posix.py`, `config.py`, `db.py`, `src/sentinel/export/`.
+New package `src/sentinel/drives/`: `model.py`, `windows_enum.py`, `linux_enum.py`, `protected.py`,
+`classify.py`, `policy.py`, `commands.py`, `prepare.py`, `marker.py`, `eject.py`, `cli.py`,
+`__main__.py`, `powershell.py`, `errors.py`. Added after review: `known.py` (drives known to the
+ledger) and `installed.py` (installed-configuration check).
+Changed outside the package:
+* `src/sentinel/alerts.py`: M-001…M-009 added. Nothing else changed.
+* `src/sentinel/config.py` (review 1.5, +14/−1 lines): accepts and validates a `[drives]` section
+  through `sentinel.drives.policy` and exposes `AppConfig.drives`.
+Tests: `tests/unit/test_drives_{classify,prepare,commands,cli_eject,review_fixes}.py` and
+`tests/drive_fakes.py`. Fixtures in `tests/fixtures/drives/`:
+* `windows_dev_host.json`: REAL, this machine; re-captured with Signature and volume SerialNumber.
+* `linux_wsl_lsblk.json`: REAL, WSL2 Fedora VM.
+* `linux_usb_constructed.json` and `windows_mbr_usb_constructed.json`: constructed.
+Not changed: `platform/windows.py`, `platform/posix.py`, `db.py`, `src/sentinel/export/`.
 
 ## 4. Tests run (development host, Windows 11 Home 10.0.26200, Python 3.14, non-elevated)
 * `"C:\Users\silva\Documents\Proc 6 Build\.venv\Scripts\python.exe" -m pytest tests/unit -q -p no:cacheprovider`
-  → **163 passed** (50 pre-existing + 113 new), 0 failed, 0 skipped.
-* `... -m pytest tests/integration/test_unattended.py -q -p no:cacheprovider` (alert catalogue
-  consumer) → **7 passed** in 121 s. Other integration files were not run: this branch changes no
-  recorder code, only adds alert-catalogue entries.
-* What the new tests cover: the system disk of the real fixture is UNSUITABLE (also with its OS
-  flags stripped — volume identity alone suffices); spool disk excluded by volume GUID with the drive
-  letter removed; every class and UNSUITABLE reason; fail-closed protection; all three FOREIGN_DATA
-  policies; refusal without confirmation, without a named person, for system disk, spool disk, READY
-  drive, missing admin, wrong serial (5 variants), policy `never`; disk swapped after confirmation;
-  **identity changed between the guard and the execute step** (helper never started); files added
-  after confirmation; disk removed; helper exit codes (identity mismatch, protected, UAC declined,
-  failure before/after erasing); wrong layout after helper (no marker written); marker never
-  overwritten; end-to-end success with a fake helper and a temp directory as the "new volume"
-  (marker, write test, audit, next label). The generated PowerShell is **parsed by the real
-  PowerShell parser** and every cmdlet and every named parameter is checked with `Get-Command` on this
-  machine (no execution). Generated Linux script passes `sh -n` (Git for Windows sh). CLI: refuses
-  non-interactively without `--yes` *and* the correct `--serial-tail`; ERASE must be typed; EOF is not
-  consent; `--admin` verified against the OS; dry-run prints the script. Safe removal logic with a fake
-  device tree (two-bay dock refused, veto reported, never "safe" while the disk is still present).
-* Manual, read-only, on this machine: `python -m sentinel.drives list --config <tmp>` (all 7 disks
-  UNSUITABLE: disk 2 = system disk with page file; others internal), `prepare --disk 2 … --yes
-  --serial-tail 0001 --admin` → refused "system_disk", exit 2; `prepare --disk 0 --dry-run` → refused.
-* Verified on this machine (non-elevated, read-only/non-destructive): Get-Disk/Get-Partition/Get-Volume/
-  Win32_Volume/Win32_DiskDrive return full data; volume-GUID lookup; cfgmgr32 bindings (device chain
-  of all 7 disks); `Write-VolumeCache` by letter and by volume GUID path on C: (flush only) works
-  without admin; unbuffered (`FILE_FLAG_NO_BUFFERING`) re-read of a temp file; parameters of
-  Clear-Disk, Initialize-Disk (PartitionStyle Unknown/MBR/GPT), New-Partition (no -Confirm),
-  Format-Volume (FileSystem FAT/FAT32/exFAT/NTFS/ReFS), Add-PartitionAccessPath, Start-Process.
+  → **215 passed** (50 pre-existing + 165 new), 0 failed, 0 skipped.
+* `... -m pytest tests/integration -q -p no:cacheprovider` (run because `config.py` changed)
+  → **28 passed, 2 failed** (364 s). The failures were `test_recorder_faults.py::test_short_freeze_is_recorded_as_internal_gap`
+  and `::test_corrupted_stream_data_does_not_stop_recording`. **These are timing-sensitive and also
+  fail on the unchanged main baseline (b39fe1b) on this machine.**
+  * Whole `test_recorder_faults.py` on this branch: 9 passed, 2 failed (the same two).
+  * The same file on main in a temporary worktree, run straight after: **8 passed, 3 failed**
+    (`test_continuous_recording…`, `test_camera_offline…`, `test_short_freeze…`).
+  * In isolation the corrupted-stream test passed 6 of 8 runs on this branch and 6 of 6 on main.
+    The freeze test passed when re-run alone.
+  * The host was under load from parallel sessions. This branch changes no recorder code; `config.py`
+    only adds a validated `drives` field.
+
+  I conclude the failures are environmental, but the integration suite should be re-run on an idle
+  machine before merging.
+* What the tests cover:
+  * The real fixture's system disk is UNSUITABLE, even with its OS flags stripped.
+  * The spool disk is excluded by volume GUID even with its drive letter removed.
+  * Every class and every UNSUITABLE reason, plus fail-closed protection.
+  * Refusal in every guard case: no confirmation, no named person, system disk, spool disk, READY,
+    missing admin, wrong serial, policy `never`, swap after confirmation, identity changed between
+    guard and execute, files added, disk removed.
+  * Helper outcomes, including timeout.
+  * Evidence layouts under all three policies.
+  * Ledger-known drives, including ones that now look blank.
+  * MBR / dock-serial swap.
+  * Missing identifiers.
+  * Installed-config checks.
+  * Wording.
+  * `[drives]` in config.py.
+  * The generated PowerShell is **parsed by the real PowerShell parser**, and every cmdlet and
+    parameter is checked with `Get-Command`. The helper's pure `Same-Set` function is evaluated in
+    real PowerShell. The Linux script passes `sh -n`.
+* Manual, read-only: `python -m sentinel.drives list --config <tmp config with [drives]>` loads the
+  configuration through `config.py` and shows all 7 disks of this machine UNSUITABLE. (During the
+  review round the tool-permission system blocked running `prepare` against a real disk number even as a refusal
+  check, so that path is covered only by unit tests. In the first round, `prepare --disk 2` was
+  refused with "system_disk".)
 
 ## 5. NOT executed / not verified
-* **No destructive command was run on any disk** (Clear-Disk, Initialize-Disk, New-Partition,
-  Format-Volume, Add-PartitionAccessPath, wipefs, sfdisk, mkfs). A disposable VHDX test was not
-  possible: creating/attaching one needs administrator rights (diskpart / Mount-DiskImage) and
-  Hyper-V's New-VHD is not installed; the session is not elevated.
-* The UAC launch (`WindowsUacRunner.run`) was not executed; that Start-Process RunAs returns the
-  elevated exit code and that the elevated process can write the result file to the user's temp/data
-  directory (including over-the-shoulder elevation by a different admin account) is NOT VERIFIED.
-* That a non-elevated user can write `SENTINEL_DRIVE.json` to the root of a freshly formatted NTFS
-  volume (default root ACL) is NOT VERIFIED. If not, the result is M-005 "could not be written to".
-* `CM_Request_Device_EjectW` (actual eject) NOT EXECUTED — no removable disk attached; whether it
-  needs admin is NOT VERIFIED (expected not, as for Explorer's Safely Remove Hardware).
-* Linux: everything NOT EXECUTED on a Linux appliance (lsblk parsing tested on fixtures only;
-  pkexec runner, udisksctl mount/unmount/power-off, `O_DIRECT` read-back, findmnt fallback).
-  mkfs.ntfs/mkfs.exfat/mkfs.ext4 options NOT VERIFIED (tools absent in the available VM); wipefs and
-  sfdisk options checked with `--help` (util-linux 2.41.4).
-* Real USB docks: serial/UniqueId reported through the Sabrent dock (C2), BusType value, removable
-  flag and device-tree shape are NOT VERIFIED. The constructed Linux fixture and the synthetic USB
-  disks in tests are invented values.
-* Health: only Windows' HealthStatus is used; SMART (`Get-StorageReliabilityCounter`, smartctl) needs
-  admin/root and is not read. The optional "thorough check" surface scan (docs/04 §4) is not built.
-* Python 3.12 not tested (dev host has 3.14); code avoids 3.13+ features as far as I know.
+* **No destructive command was run on any disk.** No disposable VHDX was possible either: it needs
+  admin rights and New-VHD is not installed.
+* The UAC launch, the result/progress file written by the elevated process, and writing the marker
+  to a fresh NTFS root as a non-elevated user are all NOT VERIFIED.
+* `CM_Request_Device_EjectW`, Linux (pkexec, udisksctl, `O_DIRECT`, findmnt), and the mkfs options
+  are NOT EXECUTED.
+* Terminating a timed-out elevated helper: `terminate_process` was exercised only on non-helper
+  processes (its image-name guard refuses them). Its expected failure against a real elevated
+  helper (integrity policy) is NOT VERIFIED.
+* The installed-configuration path `%ProgramData%\Sentinel\sentinel.toml` is my choice. No installer
+  exists yet to confirm it.
+* Real USB docks: the serial/UniqueId seen through the Sabrent dock (C2) and the MBR Signature value
+  through a bridge are NOT VERIFIED. Constructed fixtures use invented values.
+* Python 3.12 not tested.
 
 ## 6. Risks, limitations, open decisions for the owner
-* **OPEN (owner): who may prepare a FOREIGN_DATA drive** — `admin_only` (default, recommended),
-  `operator_with_serial`, or `never`. Configurable in `[drives] foreign_data_authorization`.
-* **OPEN (C1): approved filesystem** — default NTFS, configurable (`ntfs`/`exfat`/`ext4`).
-* **Conflict to resolve at merge:** docs/02 C1 says "Drives are never formatted by the application";
-  the owner's S2 request supersedes it. docs/02 and docs/01 §2.5 ("reformat is never offered") should
-  be updated to "only through Prepare This Drive with the guards above".
-* **`config.py` integration needed:** `sentinel.config` rejects unknown sections, so the drives CLI
-  strips `[drives]` before loading; `load_config` (service) would reject a file containing it until
-  `drives` is added to the allowed sections. I did not edit `config.py` to avoid conflicts.
-* C2: a dock that reports its own serial makes the serial-tail confirmation weaker (the operator
-  would type the dock's serial). Identity still includes model, size and GUIDs. Test with the dock.
-* Residual TOCTOU: between the final in-helper check and `Clear-Disk` there are milliseconds; files
-  added to a confirmed FOREIGN drive in the seconds between the last Python check and the helper are
-  not re-detected (partition GUIDs are). Acceptable in my judgement; noted.
-* A failure after erasing started leaves a partly prepared drive (M-005, audited); it will then
-  classify as FOREIGN_DATA (unreadable/raw partition) and needs the stricter path to re-prepare.
-* Two identical-looking drives connected at once → preparation stops with "ambiguous".
-* The operator GUI (Phase 4) must show `Classification.message`, `describe()`, and collect the
-  confirmation; only the CLI exists now. Under a Windows *service* (session 0) UAC cannot be shown —
-  preparation must be started from the interactive session (GUI/CLI), not from the service.
+* **OPEN (owner): who may erase a FOREIGN_DATA drive**: `admin_only` (default), `operator_with_serial`, `never`.
+* **OPEN (C1): approved filesystem.** Default NTFS.
+* **OPEN (owner, new): recycling old Sentinel drives.** A drive the ledger knows, or one showing any
+  Sentinel marker or layout, can never be erased by this tool. Reusing old archive/review drives
+  after retention needs a separate documented procedure, e.g. technical support with a retention
+  record.
+* **Conflict to resolve at merge:**
+  * docs/02 C1 says "Drives are never formatted by the application", and docs/01 §2.5 says reformat
+    is never offered. Both should be reworded to "only through Erase and Set Up Drive with these guards".
+  * `config.py` was changed (small, but other branches may touch the same section list).
+  * The installer/packaging branch must install the config at the path in `installed.py`.
+* C2: a dock that reports its own serial weakens the serial-tail confirmation. The operator would
+  type the dock's serial. Content identifiers now catch look-alike swaps, but two *blank* drives
+  of the same model in such a dock remain indistinguishable. Erasing the wrong blank drive loses nothing.
+* Detecting evidence on a drive this computer cannot read (e.g. NTFS seen from Linux while unmounted)
+  relies on the ledger. A Sentinel drive written by a *different* appliance whose filesystem is
+  unreadable here would classify as FOREIGN_DATA. Hence the admin_only default.
+* Residual TOCTOU of milliseconds between the in-helper check and `Clear-Disk`.
+* The GUI (Phase 4) must show `Classification.message` and collect the confirmation. Under a Windows
+  service (session 0), UAC cannot be shown, so erasing must start from the interactive session.
 
 ## 7. Recommendation
-**Merge after** (1) the owner decides the FOREIGN_DATA policy and C1 (defaults are safe meanwhile),
-(2) `config.py` accepts `[drives]`, and (3) one supervised hardware test on a scratch drive in the
-real Sabrent dock with an administrator present: `prepare` on a BLANK and a FOREIGN_DATA drive,
-`eject`, and swap-during-UAC-prompt (expect M-006). Until (3) the destructive path should be treated
-as untested. The read-only detection and classification can be merged now.
+**Merge after** these steps. Until step 4 is done, treat the destructive path as untested.
+1. The owner decides the FOREIGN_DATA policy, C1 and drive recycling (the defaults are safe meanwhile).
+2. The installed config path is agreed with packaging.
+3. The docs/01 and docs/02 statements are updated.
+4. One supervised hardware test on scratch drives in the real Sabrent dock, with an administrator
+   present: erase a BLANK drive and a FOREIGN_DATA drive, eject, swap a drive during the UAC prompt
+   (expect M-006), and insert an exported review drive (expect M-009).
+
+Read-only detection and classification can be merged now.
+
+## 8. Independent QA review findings (round 2)
+| # | Finding | What I changed | Tests | Remains |
+|---|---|---|---|---|
+| 1.1 HIGH | Prior Sentinel evidence drive (marker missing, corrupt, newer, `.partial`, on a non-approved filesystem or second partition; export or archive layout) was FOREIGN_DATA and therefore erasable | New class **SENTINEL_EVIDENCE** (M-009, message "This drive holds Sentinel recordings and will not be erased. Contact technical support."). It is never erasable under any policy and is refused in `check_guards` independently of the classification. Detection: any marker state; `Sentinel/` directory; `Manifests/Export_Manifest.json` or `SHA256SUMS.txt`; `README_FIRST.txt` with Recordings/Originals/Manifests/Reports; or ≥2 of those folders. Also any drive_uuid, volume GUID, filesystem serial, UniqueId or (serial, model, size) known from `drive_prepared` audit events or an export-branch `drives` table. The ledger is re-read before every erase. An unreadable ledger is UNSUITABLE (M-008). READY still wins for a valid single-partition drive. | `test_drives_review_fixes.py`: 8 layouts × 3 policies; marker on second partition; forged confirmation never reaches the helper; ledger-known drive that now looks blank; known volume/filesystem on another dock; `drives` table; READY stays READY; broken ledger | Evidence on an *unreadable* volume written by another appliance is detected only via the ledger (see §6). The layout signatures must be kept in sync with the export branch's final layout. |
+| 1.2 HIGH | Post-UAC re-check weak for MBR disks and docks reporting their own serial | Enumeration now captures the MBR disk signature, partition offsets, and Win32_Volume serial numbers (verified non-admin on this host; real fixture re-captured). Identity, fingerprint and the elevated helper compare partition style, disk GUID, MBR signature, partition GUIDs, offset:size layout, volume GUIDs and filesystem serials. Lists are compared as sets, with no culture-dependent sorting. A missing identifier refuses (`identity_incomplete`) at planning, in `check_guards`, and by mismatch inside the helper. The Linux helper also compares PARTUUIDs and filesystem UUIDs. | MBR fixture with two same-model drives behind a bridge serial "000000000000"; swap refused; every identifier present in the helper; 4 missing-identifier cases; Same-Set evaluated in real PowerShell; Linux checks | MBR Signature / volume serials through the real dock NOT VERIFIED |
+| 1.3 MED | Protected disks taken from any `--config` | `installed.py`: erasing requires all of the following. (1) The config is the installed path (`%ProgramData%\Sentinel\sentinel.toml` on Windows, `/etc/sentinel/sentinel.toml` on Linux). (2) The spool and data folders exist (no "nearest parent" guess). (3) `<data>/sentinel.db` is a Sentinel ledger. (4) `<data>/recorder.lock` exists, i.e. the recorder has run with this configuration. Otherwise M-008, refused. Dry-run still prints the script. | accepted case; 3 missing-item cases; copy/None config refused; CLI refusal with M-008 | It cannot prove the recorder is running *now*. The path choice needs agreement with packaging. |
+| 1.4 MED | "Prepare This Drive" collides with "Prepare Review Drive" | Every operator-visible text now says **Erase and Set Up Drive**, "set up", "erase". This covers M-001/M-002/M-003/M-005/M-006, classification messages and CLI messages. S-001 ("Prepare a review drive") is untouched. Internal identifiers (`prepare_drive`, `drive_prepared` events, CLI subcommand `prepare`) are unchanged, for audit continuity and to match the task's CLI spec. | test that no operator text contains "prepar" | GUI wording (Phase 4) must follow |
+| 1.5 MED | config.py rejects `[drives]` | `config.py` accepts `drives`, validates it via `load_policy` (DrivePolicyError → ConfigError), and adds `AppConfig.drives`. The CLI uses `load_config` directly. | valid/invalid/absent section; other unknown sections still rejected; example config loads | Merge-conflict risk with other branches editing `config.py` |
+| 1.6 LOW | Elevated helper keeps running after timeout | The helper writes step and PID to its result file at every step. On timeout, the runner reads it and tries `terminate_process(pid)`. That function checks the image name first, so a reused PID is never killed. The runner reports `still_running` honestly. `prepare_drive` then raises "Drive setup is taking too long and may still be running. Do not unplug the drive." and audits `erase_started: true`, even if last seen at "verify". On Linux, `Popen` + kill and PermissionError are reported the same way. | runner timeout → still_running; orchestration message and audit; terminate refuses non-helper and nonexistent PIDs | A non-elevated parent is expected to be unable to stop an elevated child (mandatory integrity). This is reported, not solved, and NOT VERIFIED against a real elevated helper. |
