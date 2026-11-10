@@ -24,7 +24,9 @@ clock synchronised, to what, how far off) so an examiner can state how accurate 
   excluded); `RunTimebase.iso_for/epoch_for` take a correction.
 * `src/sentinel/recorder/supervisor.py` — feeds progress reports to the tracker, fixes a knot
   when each segment closes (and at run end for interrupted segments), persists per-run drift
-  and per-segment corrections, one `time_correction_limited` event per run.
+  and per-segment corrections, one `time_correction_limited` event per run; the absorbed
+  lost-time (`timeline_shift_s`) is now measured from reception offsets either side of the
+  break (`measure_jump`), the old lag-vs-baseline figure is the fallback.
 * `src/sentinel/recorder/finalizer.py` — segment times = anchor + stream time + interpolated
   correction; legacy runs (no `time_method`) unchanged; segments without a measured correction
   in a tracked run hold the last one (`time_correction_held` warning). Gap/shift logic untouched.
@@ -60,7 +62,46 @@ clock synchronised, to what, how far off) so an examiner can state how accurate 
 Baseline before changes: `pytest tests/unit tests/integration/test_recorder_faults.py
 tests/integration/test_unattended.py` → **68 passed**.
 
-RESULTS_PLACEHOLDER
+Interpreter: `"C:\Users\silva\Documents\Proc 6 Build\.venv\Scripts\python.exe" -m pytest ... -q -p no:cacheprovider`
+
+| # | Command (from worktree root) | Result |
+|---|---|---|
+| 1 | `tests/unit tests/integration` (first commit) | 98 passed, **3 failed**: `test_short_freeze_is_recorded_as_internal_gap`, `test_corrupted_stream_data_does_not_stop_recording`, `test_hard_kill_restart_recovery_and_graceful_stop` (sqlite "disk I/O error" on a read-only open right after the hard kill) |
+| 2 | `tests/unit` + `test_recorder_faults.py test_unattended.py test_time_accuracy.py test_media_hashing.py` | 99 passed, 1 failed (`test_short_freeze_…`) |
+| 3 | `tests/unit test_recorder_faults.py test_unattended.py test_time_accuracy.py` | 89 passed, 1 failed: my new `test_absorbed_freeze_is_still_a_gap_under_drift` (run's correction 0.086 s vs expected ≈0.39 s). Root cause: the existing lost-time estimate (lag − slow baseline) overstated the absorbed gap by the baseline's lag behind drift. **Fixed** (`DriftTracker.measure_jump`, commit dfafcc1). |
+| 4 | after the fix: `tests/unit`; `test_time_accuracy.py test_unattended.py -k "absorbed or freeze"` | **70 passed**; **2 passed** |
+| 5 | **final**: `tests/unit tests/integration` | **102 passed, 1 failed** (`test_short_freeze_is_recorded_as_internal_gap`: "timed out after 30s waiting for internal gap row") |
+
+**Pre-existing flakiness (not caused by this branch), measured:** I exported the baseline commit
+b39fe1b with `git archive` to a scratch directory and ran it with the same interpreter:
+* `test_recorder_faults.py`, whole file, run twice on each tree, alternating:
+  branch: 1 failed (`camera_offline…`) / 1 failed (`corrupted_stream…`);
+  **baseline: 1 failed (`short_freeze…`) / 1 failed (`camera_offline…`)**. These are timing-sensitive
+  tests failing at random on both trees (other agents' test runs were probably loading this PC).
+* `-k short_freeze` on its own: branch 6/6 passed, baseline 6/6 passed.
+* `test_service_process.py`: **baseline 1/1 failed with the same "disk I/O error"**; branch failed
+  3/3 in one series and passed in the final run (#5). It is intermittent and pre-existing (the
+  read-only ledger open right after a hard kill), and should be looked at separately.
+
+New tests (all passed in runs 2 and 5, and run 4 for the freeze test):
+* `tests/integration/test_time_accuracy.py`
+  * `test_slow_camera_and_drifting_pc_clock_stay_on_reception_time`: camera 1 % slow + PC wall
+    0.5 % fast vs monotonic, 150 s, 5 s segments. All segment ends (after segment 0) within
+    ±0.5 s of observed reception; the old single-anchor end error < −1.5 s and growing; one run,
+    no `source_discontinuity_absorbed` gap, no restarts, segments contiguous to 2 ms with equal
+    boundary corrections; `camera_drift_ppm` ≈ −10 000 ± 1500, `host_clock_drift_ppm` ≈ 5000 ± 300.
+  * `test_fast_camera_stays_on_reception_time`: camera 1 % fast, 100 s; same checks, old error > +0.8 s.
+    (Measured in the first attempt: new errors −0.05..−0.28 s; segment 0 −1.09 s, which is a
+    reference artefact, see §3.)
+  * `test_absorbed_freeze_is_still_a_gap_under_drift`: 12 s freeze under 1 % slow camera →
+    exactly one `source_discontinuity_absorbed` gap of 12 ± 2 s at the right times, no
+    rate-limited corrections (break not smeared into drift), times monotonic.
+* `tests/unit/test_time_accuracy_units.py` (20 tests): 3-day synthetic drift at ±50–80 ppm
+  (old error ≈ 13 s, tracked < 0.1 s), 1 % drift with matching / production limits, a 12 s jump
+  not followed (per-knot change ≤ limit), break handling, unbiased jump measurement, wall-clock
+  step flagged not followed, contiguity/interpolation, ledger migration of an old schema
+  (append-only, idempotent), finaliser legacy/held corrections, diagnostics contents,
+  w32tm/sc/chronyc/timedatectl parsing incl. the real "service has not been started" output.
 
 ## 5. NOT executed / not verified
 * **Linux:** `chronyc tracking`, `timedatectl show`/`show-timesync` parsing is from documented
@@ -101,4 +142,10 @@ RESULTS_PLACEHOLDER
   reference-clock measurement on the real camera.
 
 ## 7. Recommendation
-RECOMMENDATION_PLACEHOLDER
+**Merge after** (a) a reviewer reads `timebase.DriftTracker` and the finaliser change (they are
+on the evidential time path) and (b) the shared-test flakiness is acknowledged: the remaining
+failures occur at the same rate on the untouched baseline. The scheme fixes the known
+multi-day drift limitation and keeps the existing gap and step guarantees, with tests showing
+it. It also records E1's measured-offset evidence. Before deployment, configure and start the
+Windows Time service (docs/07) and do the reference-clock/OSD measurement on the real camera
+(docs/03 §4.5).
