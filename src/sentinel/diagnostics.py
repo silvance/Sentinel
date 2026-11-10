@@ -66,7 +66,7 @@ def build_report(cfg: AppConfig, reason: str = "requested", out_dir: Path | None
     target = out_dir / f"Sentinel_Diagnostics_{cfg.camera.id}_{stamp}.zip"
     files: dict[str, bytes] = {}
 
-    status_path = cfg.data_path / "status.json"
+    status_path = cfg.status_path
     status_doc = None
     if status_path.exists():
         raw = status_path.read_text("utf-8", "replace")

@@ -12,15 +12,23 @@ closing any GUI has no effect on it. It is designed to run unattended for days:
   checkpoints the ledger;
 * under systemd, a watchdog ping is sent only from the recording loop itself, so a hung
   recorder is killed and restarted by systemd (WatchdogSec in the unit file);
+* on every platform an internal watchdog thread (sentinel.watchdog) ends the process with
+  EXIT_WATCHDOG if the recording loop has not run for ``[service] watchdog_timeout_s``, so the
+  Windows Service Control Manager (which has no watchdog) restarts it too;
 * when any alert first becomes critical a diagnostic report is written automatically.
+
+Exit codes: 0 stopped on request, 2 configuration/startup problem, 3 another instance running,
+4 supervisor failed repeatedly, 5 watchdog: recording loop hung.
 """
 
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import hashlib
 import json
 import logging
+import os
 import signal
 import sys
 import textwrap
@@ -45,27 +53,59 @@ from .recorder.finalizer import MAX_FINALIZE_ATTEMPTS, Finalizer, SegmentJob
 from .recorder.integrity import IntegrityWorker
 from .recorder.recovery import Recovery
 from .recorder.supervisor import RecordingSupervisor
-from .status import Measurements, StatusDocument, apply_alerts, evaluate, write_status
+from .status import Measurements, StatusDocument, apply_alerts, evaluate, fatal_status_document, write_status
 from .storage.monitor import DiskUsage, StorageMonitor
+from .watchdog import LoopWatchdog
 
 log = logging.getLogger("sentinel.service")
 
-EXIT_OK, EXIT_CONFIG, EXIT_LOCKED, EXIT_RUNTIME = 0, 2, 3, 4
+EXIT_OK, EXIT_CONFIG, EXIT_LOCKED, EXIT_RUNTIME, EXIT_WATCHDOG = 0, 2, 3, 4, 5
 MIN_FFMPEG = (6, 0)          # tested on 9.0.1; RTSP -timeout semantics and -fps_mode need >= 5.1
+WATCHDOG_STEP_TIMEOUT_S = 5.0  # each best-effort action before a watchdog exit is bounded
+# Bounded stop when the operating system is shutting down. Worst case after the stop request:
+# FFmpeg stop (stop_grace_s 8 + wait 30 + reader joins 10 ≈ 50 s) + drain 45 + current job 60 +
+# integrity 10 ≈ 165 s, inside the 180 s Windows pre-shutdown window (winsvc.commands).
+SHUTDOWN_DRAIN_S = 45.0
+SHUTDOWN_JOB_S = 60.0
+SHUTDOWN_INTEGRITY_S = 10.0
+SHUTDOWN_BUDGET_S = 50.0 + SHUTDOWN_DRAIN_S + SHUTDOWN_JOB_S + SHUTDOWN_INTEGRITY_S
+LEDGER_SNAPSHOT_INTERVAL_S = 300.0
+
+
+def _bounded(name: str, fn: Callable[[], object], timeout_s: float) -> bool:
+    """Run ``fn`` in a daemon thread and wait at most ``timeout_s``: a hung lock elsewhere in the
+    process must not stop the watchdog from ending the process."""
+    done = threading.Event()
+
+    def target() -> None:
+        try:
+            fn()
+        except Exception:
+            pass
+        finally:
+            done.set()
+    threading.Thread(target=target, name=f"watchdog-{name}", daemon=True).start()
+    return done.wait(timeout_s)
 
 
 class RecorderService:
     def __init__(self, cfg: AppConfig, platform: Platform | None = None, clock: Clock | None = None,
-                 disk_usage: Callable[[Path], DiskUsage] | None = None) -> None:
+                 disk_usage: Callable[[Path], DiskUsage] | None = None,
+                 watchdog_exit: Callable[[int], None] | None = None) -> None:
         self.cfg = cfg
         self.platform = platform or get_platform()
         self.clock = clock or SystemClock()
         self.stop_event = threading.Event()
         self._disk_usage = disk_usage
+        # os._exit, not sys.exit: the main loop is hung, so the process cannot unwind normally.
+        # FFmpeg dies with the process (Windows job object / Linux PDEATHSIG).
+        self._watchdog_exit = watchdog_exit or os._exit
+        self.watchdog = LoopWatchdog(cfg.service.watchdog_timeout_s, self._on_watchdog_expired,
+                                     mono=time.monotonic)
         self._last_status_mono = 0.0
         self._started_mono = self.clock.mono()
         self._fatal: list[str] = []                  # alert codes that prevent recording
-        self.status_path = cfg.data_path / "status.json"
+        self.status_path = cfg.status_path
         self.ledger: Ledger | None = None
         self.supervisor: RecordingSupervisor | None = None
         self.finalizer: Finalizer | None = None
@@ -79,6 +119,9 @@ class RecorderService:
         self._clock_anomaly_until: float = 0.0
         self._critical_codes: set[str] = set()
         self.last_report: str | None = None
+        self._terminal = False            # status says "cannot record" and the process is ending
+        self._system_shutdown = False     # stop because the OS is shutting down: bounded drain
+        self._next_snapshot = 0.0
 
     # ------------------------------------------------------------------
     def run(self) -> int:
@@ -120,14 +163,20 @@ class RecorderService:
                 for p in perm:
                     log.error("credentials file: %s", p)
                     self.ledger.add_event("warning", "config", "secret_permissions", p)
-                if perm and self.platform.name == "posix":
-                    problems.append("camera credentials file is readable by other accounts")
+                if perm:  # POSIX mode bits / Windows DACL (both implemented and enforced)
+                    problems.append("camera credentials file is accessible by other accounts")
+                if self.platform.name == "windows" and creds.protection != "dpapi":
+                    log.warning("camera credentials are stored as plain text; protect them with "
+                                "'python -m sentinel.winsvc set-camera-credentials'")
+                    self.ledger.add_event("warning", "config", "secret_plaintext",
+                                          "Camera credentials file is not DPAPI-protected")
             except CredentialError as exc:
                 problems.append(str(exc))
         if problems:
             for p in problems:
                 log.error("cannot start recording: %s", p)
             self._fatal = ["C-001"]
+            self._terminal = True
             self._write_status(force=True)
             self.ledger.add_event("error", "recorder", "startup_failed", "; ".join(problems))
             self._maybe_report()
@@ -148,6 +197,10 @@ class RecorderService:
         self._write_status(force=True)
         self.platform.notify("READY=1")
         exit_code = EXIT_OK
+        if self.cfg.service.watchdog_timeout_s < 60:
+            log.warning("watchdog_timeout_s=%.0f is short; a normal camera reconnect may pause the recording "
+                        "loop for up to ~50 s (120 s recommended)", self.cfg.service.watchdog_timeout_s)
+        self.watchdog.start()
         try:
             self.supervisor.run_forever()
         except Exception:
@@ -157,9 +210,17 @@ class RecorderService:
             self._fatal = ["R-006"]
             exit_code = EXIT_RUNTIME
         finally:
+            self.watchdog.stop()
             self.platform.notify("STOPPING=1")
-            drained = self.finalizer.stop()
-            self.integrity.stop()
+            if self._system_shutdown:
+                # The OS gives a bounded window (Windows pre-shutdown, SHUTDOWN_DRAIN_BUDGET_S).
+                # Whatever is not sealed in time stays unsealed on disk and is sealed by startup
+                # recovery at the next boot (the same path as a crash; nothing is lost or altered).
+                drained = self.finalizer.stop(drain_timeout=SHUTDOWN_DRAIN_S, job_timeout=SHUTDOWN_JOB_S)
+                self.integrity.stop(timeout=SHUTDOWN_INTEGRITY_S)
+            else:
+                drained = self.finalizer.stop()
+                self.integrity.stop()
             if not drained:
                 log.error("finaliser did not drain before shutdown; recovery will complete it on next start")
             self.ledger.add_event("audit", "recorder", "service_stop", "Recorder service stopped",
@@ -188,6 +249,7 @@ class RecorderService:
     # ------------------------------------------------------------------ periodic work (supervisor thread)
     def _tick(self) -> None:
         """Called from the recording loop. Watchdog ping proves the loop itself is alive."""
+        self.watchdog.beat()
         self.platform.notify("WATCHDOG=1")
         now = self.clock.mono()
         self._check_clock(now)
@@ -240,6 +302,13 @@ class RecorderService:
         if now >= self._next_checkpoint:
             self._next_checkpoint = now + 3600.0
             self.ledger.checkpoint()
+        snap = self.cfg.ledger_snapshot_path
+        if snap is not None and now >= self._next_snapshot:
+            self._next_snapshot = now + LEDGER_SNAPSHOT_INTERVAL_S
+            try:
+                self.ledger.write_snapshot(snap)
+            except Exception:
+                log.exception("could not write the operator ledger snapshot")
 
     # ------------------------------------------------------------------ status
     def _write_status(self, force: bool = False, stopping: bool = False) -> None:
@@ -378,12 +447,76 @@ class RecorderService:
             service={"version": __version__, "platform": self.platform.name,
                      "uptime_s": round(now - self._started_mono, 1), "simulated_camera": cfg.camera.development_source,
                      "clock_synchronized": self._ntp},
-            recording=live_d, storage=storage_d, integrity=integrity_d, last_segment=last_seg, open_gap=gap)
+            recording=live_d, storage=storage_d, integrity=integrity_d, last_segment=last_seg, open_gap=gap,
+            terminal=self._terminal)
         apply_alerts(doc, d.alerts)
         return doc
 
+    # ------------------------------------------------------------------ watchdog (watchdog thread)
+    def _on_watchdog_expired(self, age_s: float) -> None:
+        """The recording loop is hung. Record what we can — each step bounded, because the hang
+        may be holding a lock any of them needs — then end the process for a clean restart."""
+        limit = self.cfg.service.watchdog_timeout_s
+        msg = (f"WATCHDOG: recording loop has not run for {age_s:.0f} s (limit {limit:.0f} s); "
+               f"exiting with code {EXIT_WATCHDOG} so the service manager restarts the recorder")
+        _bounded("log", lambda: log.critical(msg), WATCHDOG_STEP_TIMEOUT_S)
+        _bounded("threads", self._dump_threads, WATCHDOG_STEP_TIMEOUT_S)
+        _bounded("status", lambda: self._write_watchdog_status(age_s), WATCHDOG_STEP_TIMEOUT_S)
+        if self.ledger is not None:
+            ledger = self.ledger
+            _bounded("ledger", lambda: ledger.add_event(
+                "error", "recorder", "watchdog_restart",
+                "Recording loop stopped responding; recorder restarting",
+                {"stalled_s": round(age_s, 1), "limit_s": limit, "exit_code": EXIT_WATCHDOG}),
+                WATCHDOG_STEP_TIMEOUT_S)
+        _bounded("ffmpeg", self._watchdog_stop_ffmpeg, self.cfg.recording.stop_grace_s + 2.0)
+        self._watchdog_exit(EXIT_WATCHDOG)
+
+    def _dump_threads(self) -> None:
+        """All thread stacks to a file in the log directory (for support: where was it hung?)."""
+        self.cfg.log_path.mkdir(parents=True, exist_ok=True)
+        path = self.cfg.log_path / f"watchdog-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}.txt"
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(f"Sentinel {__version__} watchdog thread dump\n")
+            fh.flush()
+            faulthandler.dump_traceback(file=fh, all_threads=True)
+
+    def _write_watchdog_status(self, age_s: float) -> None:
+        # Built without the supervisor's locks or the ledger: either may be what is hung. Not
+        # terminal: a restart is expected, so an old R-006 must turn into X-001.
+        doc = fatal_status_document(
+            "R-006", self.cfg.camera.id, terminal=False, detail={"watchdog_stalled_s": round(age_s, 1)},
+            service={"version": __version__, "platform": self.platform.name,
+                     "uptime_s": round(self.clock.mono() - self._started_mono, 1),
+                     "simulated_camera": self.cfg.camera.development_source,
+                     "clock_synchronized": self._ntp, "watchdog_exit": EXIT_WATCHDOG})
+        write_status(self.status_path, doc)
+
+    def _watchdog_stop_ffmpeg(self) -> None:
+        """Ask FFmpeg to finish its current segment ('q') so the file ends cleanly; startup
+        recovery seals it. If it does not exit in time it dies with the process anyway."""
+        proc = self.supervisor.current_proc if self.supervisor is not None else None
+        if proc is None or proc.poll() is not None or proc.stdin is None:
+            return
+        try:
+            proc.stdin.write(b"q")
+            proc.stdin.flush()
+        except (OSError, ValueError):
+            return
+        try:
+            proc.wait(self.cfg.recording.stop_grace_s)
+        except Exception:
+            pass
+
+    def request_shutdown(self) -> None:
+        """Stop because the operating system is shutting down: same graceful FFmpeg stop, but the
+        verification backlog is drained only within SHUTDOWN_BUDGET_S (rest: recovery at boot)."""
+        self._system_shutdown = True
+        self.request_stop()
+
     def request_stop(self, *_: object) -> None:
         log.info("stop requested")
+        self.watchdog.disarm()   # shutdown is supervised by the service manager's stop timeout
         self.stop_event.set()
 
 
@@ -453,7 +586,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
     from .status import read_status
 
     cfg = load_config(args.config)
-    doc, problem = read_status(cfg.data_path / "status.json")
+    doc, problem = read_status(cfg.status_path)
     print(banner(doc, problem))
     if args.json and doc:
         print(json.dumps(doc, indent=2))

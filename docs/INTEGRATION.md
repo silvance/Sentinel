@@ -16,6 +16,7 @@ silently replace the earlier entry instead of failing).
 | 2 | fix/test-short-freeze | 56 passed (test-only change in an integration file) | none |
 | 3 | req/review-drive-export | 96 passed | none (auto-merged) |
 | 4 | design/drive-prepare | 277 passed (1 failed before the fix below) | alerts.py, config.py, example config |
+| 5 | design/windows-service | 404 passed | none (auto-merged) |
 
 ## 1. fix/ledger-reader-retry
 Clean merge. Note carried forward: `ledgerchain._ro_connect` (tamper-evident-ledger branch) does
@@ -61,3 +62,22 @@ restored to the file's style (whitespace only). Catalogue: 24 codes, no duplicat
   switched off by default".
 * Not done here (still open per the branch notes): the installed-config path agreement with
   packaging (handled after merge 6, below).
+
+## 5. design/windows-service
+Auto-merged (config.py, db.py). `[storage] status_dir`, `[service] watchdog_timeout_s` and
+`Ledger.write_snapshot` sit beside `[export]`/`[drives]` and the export DDL without overlap. The
+ledger snapshot copies the whole database, so it now also contains the export tables (read-only
+for operators; no credentials are stored in them).
+* **Export status file moved to `status_dir`** (`export/engine.py`, `export/__main__.py`):
+  `export_status.json` (what the operator screen shows during/after an export, U4) was written
+  to `data_dir`, which the windows-service layout makes service-only. It now goes to
+  `cfg.status_dir_path` (which defaults to `data_dir`, so behaviour is unchanged without a
+  separate status folder and the export tests are unaffected).
+* **Not integrated — recorded as an open architecture item:** under the service layout an
+  operator account cannot write the ledger in `data_dir`, so an export started from the
+  operator's session (CLI or GUI) cannot run as that account. An export must either run inside
+  the service or be requested through a request file the service processes. Nothing of that
+  exists yet; the Prepare Review Drive button stays disabled (GUI branch decision, merge 8).
+  `drives` erasing likewise must start from the interactive session (UAC), as its notes say.
+* The drive-prepare installed-config path (`%ProgramData%\Sentinel\sentinel.toml`) differs from
+  the service layout (`…\Sentinel\config\sentinel.toml`); resolved after merge 6 (below).

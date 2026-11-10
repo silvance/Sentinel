@@ -103,7 +103,7 @@ class ReviewExporter:
         self.remover: SafeRemover = remover or ManualRemovalFallback()
         self.platform = platform or get_platform()
         self.operator_id = operator_id
-        self.status = ExportStatusWriter(status_path or (cfg.data_path / STATUS_FILE))
+        self.status = ExportStatusWriter(status_path or (cfg.status_dir_path / STATUS_FILE))  # integration: operator-readable folder
         self._ffmpeg_version = ffmpeg_version
         self.allow_same_volume = allow_same_volume
         self.tz = ZoneInfo(cfg.recording.display_timezone)

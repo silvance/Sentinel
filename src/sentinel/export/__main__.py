@@ -73,7 +73,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
     except ConfigError as exc:
         print(f"Configuration error: {exc}", file=sys.stderr)
         return 1
-    doc = read_export_status(cfg.data_path / STATUS_FILE)
+    doc = read_export_status(cfg.status_dir_path / STATUS_FILE)
     print(json.dumps(doc, indent=2) if doc else "No export has run yet.")
     return 0
 

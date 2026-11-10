@@ -58,7 +58,12 @@ class Harness:
         self.tmp = tmp
         self.cfg: AppConfig = make_config(tmp, url, **sections)
         self.disk = disk
-        self.svc = RecorderService(self.cfg, clock=clock, disk_usage=disk)
+        # The host's own time-synchronisation state (Windows Time service / timedatectl) is not
+        # under test here and differs between machines (T-002 on a host whose time service is
+        # stopped). It has its own unit tests (tests/unit/test_w32tm.py); report it as unknown.
+        platform = get_platform()
+        platform.clock_synchronized = lambda: None  # type: ignore[method-assign]
+        self.svc = RecorderService(self.cfg, platform=platform, clock=clock, disk_usage=disk)
         self._thread: threading.Thread | None = None
         self.exit_code: int | None = None
 

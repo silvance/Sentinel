@@ -378,6 +378,35 @@ class Ledger:
         with self._lock:
             self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
 
+    def write_snapshot(self, dest: Path) -> None:
+        """Consistent, self-contained copy of the ledger for read-only consumers (operator GUI).
+
+        Operators get read access to this copy only, never to the live ledger: a WAL-mode SQLite
+        reader needs *write* access to the ``-shm`` file, which would let any operator account
+        disturb the recorder's database. The copy uses the rollback journal (no -wal/-shm), is
+        written to a temporary file and atomically replaced, so readers (``mode=ro&immutable=1``)
+        never see a partial file. A reader holding the old copy open on Windows makes the replace
+        fail; the next interval retries.
+        """
+        import os
+
+        dest = Path(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_name(f".{dest.name}.{os.getpid()}.tmp")
+        tmp.unlink(missing_ok=True)
+        out = sqlite3.connect(tmp, isolation_level=None)
+        try:
+            with self._lock:
+                self._conn.backup(out)
+            out.execute("PRAGMA journal_mode=DELETE")
+        finally:
+            out.close()
+        try:
+            os.replace(tmp, dest)
+        except PermissionError:
+            tmp.unlink(missing_ok=True)
+            raise
+
     # ------------------------------------------------------------------ events
     @staticmethod
     def _event_in(c: sqlite3.Connection, e: EventSpec) -> None:

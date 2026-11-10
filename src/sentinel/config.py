@@ -73,6 +73,10 @@ class StorageConfig:
     log_dir: str
     warning_free_gb: float = 50.0
     critical_free_gb: float = 5.0
+    # Where operator-readable files go: status.json and a periodic read-only ledger snapshot.
+    # Default: data_dir (unchanged behaviour). On Windows the installer gives this folder a
+    # read-only entry for the "Sentinel Operators" group; data_dir itself stays service-only.
+    status_dir: str | None = None
 
 
 @dataclass(frozen=True)
@@ -89,6 +93,10 @@ class ServiceConfig:
     audit_interval_s: float = 600.0           # rolling re-verification of sealed segments
     janitor_interval_s: float = 60.0          # retry stuck segments, checkpoint ledger, tidy run dirs
     diagnostics_keep: int = 20
+    # Internal watchdog (all platforms): if the recording loop has not run for this long, the
+    # process exits with EXIT_WATCHDOG so the service manager restarts it. A normal run end
+    # (FFmpeg stop + wait + bookkeeping) can legitimately pause the loop for ~50 s.
+    watchdog_timeout_s: float = 120.0
 
 
 @dataclass(frozen=True)
@@ -126,6 +134,19 @@ class AppConfig:
     def log_path(self) -> Path:
         return Path(self.storage.log_dir)
 
+    @property
+    def status_dir_path(self) -> Path:
+        return Path(self.storage.status_dir) if self.storage.status_dir else self.data_path
+
+    @property
+    def status_path(self) -> Path:
+        return self.status_dir_path / "status.json"
+
+    @property
+    def ledger_snapshot_path(self) -> Path | None:
+        """Read-only ledger copy for operators; only when a separate status_dir is configured."""
+        return self.status_dir_path / "ledger-snapshot.db" if self.storage.status_dir else None
+
 
 def _build(cls: type, section: str, raw: dict[str, Any] | None, base_dir: Path) -> Any:
     raw = dict(raw or {})
@@ -151,8 +172,10 @@ def _build(cls: type, section: str, raw: dict[str, Any] | None, base_dir: Path) 
             raise ConfigError(f"[{section}] {name} must be text")
         kwargs[name] = value
     if cls is StorageConfig:
-        for key in ("spool_dir", "data_dir", "log_dir"):
+        for key in ("spool_dir", "data_dir", "log_dir", "status_dir"):
             if key not in kwargs:
+                if key == "status_dir":
+                    continue
                 raise ConfigError(f"[storage] {key} is required")
             p = Path(kwargs[key])
             kwargs[key] = str(p if p.is_absolute() else (base_dir / p).resolve())
@@ -209,6 +232,8 @@ def _validate(cfg: AppConfig) -> None:
     if any(v <= 0 for v in (cfg.service.poll_interval_s, cfg.service.status_interval_s,
                             cfg.service.audit_interval_s, cfg.service.janitor_interval_s)):
         raise ConfigError("[service] intervals must be positive")
+    if cfg.service.watchdog_timeout_s < 5.0:
+        raise ConfigError("[service] watchdog_timeout_s must be at least 5 (120 is recommended)")
     if cfg.service.log_level.upper() not in ("DEBUG", "INFO", "WARNING", "ERROR"):
         raise ConfigError("[service] log_level must be DEBUG, INFO, WARNING or ERROR")
     ex = cfg.export

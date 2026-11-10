@@ -1,0 +1,46 @@
+# Sentinel recorder configuration for Windows — EXAMPLE ONLY.
+# Recommended layout (see docs/07 "Windows deployment"):
+#   C:\Program Files\Sentinel\                 program (readable by the service account)
+#   C:\ProgramData\Sentinel\config\            this file + camera.dpapi (Administrators change)
+#   C:\ProgramData\Sentinel\{spool,data,logs}  recordings, ledger, logs (service account only)
+#   C:\ProgramData\Sentinel\status\            status.json + ledger snapshot (operators may READ)
+# Install the service from an elevated Command Prompt:
+#   python -m sentinel.winsvc set-camera-credentials --config C:\ProgramData\Sentinel\config\sentinel.toml
+#   python -m sentinel.winsvc install --config C:\ProgramData\Sentinel\config\sentinel.toml --dry-run
+#   python -m sentinel.winsvc install --config C:\ProgramData\Sentinel\config\sentinel.toml
+# No real addresses or credentials belong in this file.
+
+[camera]
+id = "CAM01"
+name = "Camera 1"
+# 192.0.2.0/24 is a documentation-only address range; the RTSP path is NOT verified (docs/02 A1).
+url = "rtsp://192.0.2.10:554/REPLACE-WITH-VERIFIED-PATH"
+transport = "tcp"
+# Written by `python -m sentinel.winsvc set-camera-credentials` (Windows DPAPI, machine scope).
+credentials_file = 'C:\ProgramData\Sentinel\config\camera.dpapi'
+include_audio = false
+
+[recording]
+segment_seconds = 300
+align_to_clock = true
+display_timezone = "America/New_York"
+
+[storage]
+# Internal recording disk. Keep spool, data and logs in dedicated folders (the installer
+# replaces their permissions).
+spool_dir = 'C:\ProgramData\Sentinel\spool'
+data_dir = 'C:\ProgramData\Sentinel\data'
+log_dir = 'C:\ProgramData\Sentinel\logs'
+# Operator-readable: the installer grants the local group "Sentinel Operators" read access here.
+status_dir = 'C:\ProgramData\Sentinel\status'
+warning_free_gb = 50
+critical_free_gb = 5
+
+[tools]
+# Full paths are required for the service: it does not see a personal PATH.
+ffmpeg = 'C:\Program Files\Sentinel\ffmpeg\bin\ffmpeg.exe'
+ffprobe = 'C:\Program Files\Sentinel\ffmpeg\bin\ffprobe.exe'
+
+[service]
+log_level = "INFO"
+watchdog_timeout_s = 120           # recording loop silent this long => process restarts
