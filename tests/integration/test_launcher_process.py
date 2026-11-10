@@ -24,7 +24,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import requires_ffmpeg
+from conftest import requires_ffmpeg, tools_toml_for_tests
 from harness import wait_for
 from sentinel.db import Ledger
 from sentinel.sim.camera import SimulatedCamera
@@ -85,7 +85,8 @@ critical_free_gb = 0
 
 [service]
 status_interval_s = 0.5
-""", encoding="utf-8")
+
+{"" if FROZEN else tools_toml_for_tests()}""", encoding="utf-8")
     return cfg
 
 

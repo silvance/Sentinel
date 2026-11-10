@@ -61,41 +61,162 @@ def git(*args: str) -> str:
         return ""
 
 
+# ---------------------------------------------------------------------- FFmpeg licence policy
+# Owner decision (2026-11-10): ship an LGPL FFmpeg. GPL builds are refused unless the builder
+# passes --allow-gpl-internal-use (recorded prominently); nonfree builds are always refused.
+#
+# Two independent sources are compared:
+#  * ``ffmpeg -L`` prints the licence string that FFmpeg's configure compiled into the program;
+#  * the ``configuration:`` line of ``ffmpeg -version`` (flags --enable-gpl / --enable-version3 /
+#    --enable-nonfree, plus external libraries that FFmpeg only allows in GPL builds).
+# Any disagreement, or an unrecognised -L text, is treated as "cannot determine" and refused.
+GPL_ONLY_FLAGS = frozenset({
+    "--enable-gpl", "--enable-postproc", "--enable-frei0r", "--enable-libcdio", "--enable-libdavs2",
+    "--enable-librubberband", "--enable-libvidstab", "--enable-libx264", "--enable-libx265",
+    "--enable-libxavs", "--enable-libxavs2", "--enable-libxvid",
+})
+LICENCES = ("NONFREE", "GPL-3.0-or-later", "GPL-2.0-or-later", "LGPL-3.0-or-later", "LGPL-2.1-or-later")
+
+
 def licence_class(configuration: str) -> str:
-    """Licence of an FFmpeg build from its configure flags (FFmpeg's own LICENSE.md rules)."""
-    flags = configuration.split()
+    """Licence of an FFmpeg build from its configure flags (FFmpeg's LICENSE.md rules)."""
+    flags = set(configuration.split())
     if "--enable-nonfree" in flags:
-        return "NONFREE (not redistributable)"
-    if "--enable-gpl" in flags:
+        return "NONFREE"
+    if flags & GPL_ONLY_FLAGS:
         return "GPL-3.0-or-later" if "--enable-version3" in flags else "GPL-2.0-or-later"
     return "LGPL-3.0-or-later" if "--enable-version3" in flags else "LGPL-2.1-or-later"
 
 
-def inspect_ffmpeg(folder: Path) -> dict:
+def gpl_flags(configuration: str) -> list[str]:
+    return sorted(set(configuration.split()) & GPL_ONLY_FLAGS)
+
+
+def licence_from_text(text: str) -> str | None:
+    """Licence from ``ffmpeg -L`` output (the string FFmpeg's configure compiles in)."""
+    t = " ".join(text.split())
+    if "nonfree parts compiled in" in t or "not legally redistributable" in t:
+        return "NONFREE"
+    if "GNU Lesser General Public License" in t:
+        if "version 3 of the License" in t:
+            return "LGPL-3.0-or-later"
+        if "version 2.1 of the License" in t:
+            return "LGPL-2.1-or-later"
+        return None
+    if "GNU General Public License" in t:
+        if "version 3 of the License" in t:
+            return "GPL-3.0-or-later"
+        if "version 2 of the License" in t:
+            return "GPL-2.0-or-later"
+    return None
+
+
+def licence_decision(configuration: str, licence_texts: dict[str, str], allow_gpl_internal_use: bool) -> dict:
+    """Apply the policy. Returns the manifest's licence block; raises BuildError when refused."""
+    from_flags = licence_class(configuration)
+    from_text = {name: licence_from_text(text) for name, text in licence_texts.items()}
+    unknown = [n for n, v in from_text.items() if v is None]
+    if unknown:
+        raise BuildError(f"cannot determine the licence of {', '.join(unknown)} from '-L'; refusing to bundle it")
+    disagree = {n: v for n, v in from_text.items() if v != from_flags}
+    if disagree:
+        raise BuildError(f"licence evidence disagrees: configure flags say {from_flags}, '-L' says "
+                         + ", ".join(f"{n}: {v}" for n, v in disagree.items()) + "; refusing to bundle it")
+    block = {"license": from_flags, "license_from_flags": from_flags, "license_from_L": from_text,
+             "gpl_flags": gpl_flags(configuration), "policy": "LGPL FFmpeg only (owner decision 2026-11-10)"}
+    if from_flags == "NONFREE":
+        raise BuildError("this FFmpeg was built with --enable-nonfree: it may not be redistributed at all; "
+                         "use an LGPL build (docs/08_PACKAGING.md section 8)")
+    if from_flags.startswith("GPL"):
+        if not allow_gpl_internal_use:
+            raise BuildError(
+                f"this FFmpeg is {from_flags} (flags: {' '.join(block['gpl_flags'])}). Sentinel ships an LGPL "
+                "FFmpeg only (owner decision). Use an LGPL build - see docs/08_PACKAGING.md section 8 - or, for a "
+                "build that will never leave the organisation, pass --allow-gpl-internal-use (recorded in the "
+                "build manifest and shown by 'Sentinel about').")
+        block["license_status"] = (f"GPL FFMPEG - INTERNAL USE ONLY ({from_flags}); built with "
+                                   "--allow-gpl-internal-use; must NOT be distributed")
+        block["gpl_internal_use_override"] = True
+    else:
+        block["license_status"] = f"OK: {from_flags} (complies with the LGPL-only policy)"
+        block["gpl_internal_use_override"] = False
+    return block
+
+
+# Components Sentinel uses (recorder, validation, content hash, MP4 export). All are FFmpeg's
+# own (LGPL) code; none needs --enable-gpl.
+REQUIRED_COMPONENTS = {
+    "demuxers": ("rtsp", "mpegts", "mov"),
+    "muxers": ("segment", "mpegts", "mp4", "framehash", "null"),
+    "decoders": ("h264", "hevc"),
+    "protocols": ("tcp", "udp", "file", "pipe"),
+    "bsfs": ("h264_mp4toannexb", "hevc_mp4toannexb"),
+}
+
+
+def parse_components(kind: str, text: str) -> set[str]:
+    """Names from ``ffmpeg -<kind>`` output."""
+    names: set[str] = set()
+    lines = text.splitlines()
+    if kind in ("muxers", "demuxers", "decoders"):
+        started = False
+        for ln in lines:
+            if ln.strip().startswith("--"):
+                started = True
+                continue
+            parts = ln.split()
+            if started and len(parts) >= 2:
+                names.update(parts[1].split(","))
+    elif kind == "protocols":
+        section = None
+        for ln in lines:
+            s = ln.strip()
+            if s in ("Input:", "Output:"):
+                section = s
+            elif section == "Input:" and s and " " not in s:
+                names.add(s)
+    else:  # bsfs: header line then one name per line
+        names = {ln.strip() for ln in lines[1:] if ln.strip() and " " not in ln.strip()}
+    return names
+
+
+def missing_components(ffmpeg: Path) -> list[str]:
+    missing = []
+    for kind, wanted in REQUIRED_COMPONENTS.items():
+        out = subprocess.run([str(ffmpeg), "-hide_banner", f"-{kind}"], capture_output=True, text=True,
+                             timeout=60).stdout
+        have = parse_components(kind, out)
+        missing += [f"{kind[:-1]} {w}" for w in wanted if w not in have]
+    return missing
+
+
+def inspect_ffmpeg(folder: Path, allow_gpl_internal_use: bool = False) -> dict:
     tools = {}
     for name in ("ffmpeg", "ffprobe"):
         p = folder / f"{name}{EXE_SUFFIX}"
         if not p.is_file():
             raise BuildError(f"{p} not found (give --ffmpeg-dir the folder that contains {p.name})")
         tools[name] = p
-    out = subprocess.run([str(tools["ffmpeg"]), "-hide_banner", "-version"], capture_output=True, text=True,
-                         timeout=60, check=True).stdout
-    lines = out.splitlines()
+
+    def run(*args: str) -> str:
+        return subprocess.run([*args], capture_output=True, text=True, timeout=60, check=True).stdout
+
+    lines = run(str(tools["ffmpeg"]), "-hide_banner", "-version").splitlines()
     version_line = next((ln for ln in lines if ln.startswith("ffmpeg version")), lines[0] if lines else "")
     configuration = next((ln.split(":", 1)[1].strip() for ln in lines if ln.startswith("configuration:")), "")
-    probe_line = subprocess.run([str(tools["ffprobe"]), "-hide_banner", "-version"], capture_output=True,
-                                text=True, timeout=60, check=True).stdout.splitlines()[0]
-    lic = licence_class(configuration)
-    if lic.startswith("NONFREE"):
-        raise BuildError("this FFmpeg was built with --enable-nonfree and may not be redistributed")
+    probe_line = run(str(tools["ffprobe"]), "-hide_banner", "-version").splitlines()[0]
+    texts = {n: run(str(p), "-hide_banner", "-L") for n, p in tools.items()}
+    lic = licence_decision(configuration, texts, allow_gpl_internal_use)
+    missing = missing_components(tools["ffmpeg"])
+    if missing:
+        raise BuildError("this FFmpeg lacks components Sentinel needs: " + ", ".join(missing))
     # Licence/readme texts shipped with the FFmpeg build (gyan.dev: next to bin/; others: same folder).
     search = (folder, folder.parent) if folder.name.lower() == "bin" else (folder,)
     notices = [p for d in search for p in sorted(d.glob("*"))
                if p.is_file() and p.name.upper().startswith(("LICENSE", "COPYING", "README"))]
     return {"tools": tools, "version": version_line.removeprefix("ffmpeg version ").split(" Copyright")[0],
             "ffprobe_version": probe_line.removeprefix("ffprobe version ").split(" Copyright")[0],
-            "configuration": configuration, "license": lic, "notices": notices}
-
+            "configuration": configuration, "license": lic["license"], "licence_block": lic, "notices": notices}
 
 def run_pyinstaller(dist: Path, work: Path) -> None:
     env = dict(os.environ, PYTHONHASHSEED="0")
@@ -115,13 +236,13 @@ ffmpeg{exe} and ffprobe{exe} are unmodified copies of the FFmpeg build named bel
 separate programs that Sentinel runs; Sentinel does not link to them.
 
 Version:        {version}
-Licence class:  {license}   (derived from the configure flags in BUILD-MANIFEST.json)
+Licence:        {license}   (from "ffmpeg -L", cross-checked with the configure flags)
+Status:         {status}
 
-If the licence class is GPL, anyone who distributes this folder must also make the complete
-corresponding source code of this exact FFmpeg build (and of the libraries compiled into it)
-available under the GPL, and pass on the licence text (LICENSE file in this folder). See
-docs/08_PACKAGING.md section "FFmpeg licensing" for the options; the distribution decision is
-the project owner's.
+Sentinel's policy (owner decision 2026-11-10) is to ship an LGPL FFmpeg. An LGPL build must be
+accompanied by its licence text (in this folder) and its source must be obtainable. A GPL build
+is only present if the builder explicitly chose --allow-gpl-internal-use: such a folder must NOT
+be given to anyone outside the organisation. See docs/08_PACKAGING.md section 8.
 """
 
 
@@ -138,14 +259,15 @@ def write_tree_manifest(app: Path, meta: dict) -> dict:
     return meta
 
 
-def build(ffmpeg_dir: Path, dist_root: Path, work: Path, allow_dirty: bool) -> Path:
+def build(ffmpeg_dir: Path, dist_root: Path, work: Path, allow_dirty: bool,
+          allow_gpl_internal_use: bool = False) -> Path:
     commit = git("rev-parse", "HEAD")
     dirty = bool(git("status", "--porcelain", "--untracked-files=no"))
     if dirty and not allow_dirty:
         raise BuildError("the source tree has uncommitted changes; commit them or pass --allow-dirty "
                          "(the manifest then says so)")
-    ff = inspect_ffmpeg(ffmpeg_dir)
-    print(f"FFmpeg {ff['version']} ({ff['license']}) from {ffmpeg_dir}")
+    ff = inspect_ffmpeg(ffmpeg_dir, allow_gpl_internal_use)
+    print(f"FFmpeg {ff['version']} from {ffmpeg_dir}: {ff['licence_block']['license_status']}")
     app = dist_root / "Sentinel"
     started = time.time()
     run_pyinstaller(dist_root, work)
@@ -164,7 +286,8 @@ def build(ffmpeg_dir: Path, dist_root: Path, work: Path, allow_dirty: bool) -> P
     for notice in ff["notices"]:
         shutil.copy2(notice, tools_dir / (notice.name if notice.suffix else notice.name + ".txt"))
     (tools_dir / "FFMPEG-LICENCE-NOTE.txt").write_text(
-        LICENCE_NOTE.format(exe=EXE_SUFFIX, version=ff["version"], license=ff["license"]), encoding="utf-8")
+        LICENCE_NOTE.format(exe=EXE_SUFFIX, version=ff["version"], license=ff["license"],
+                            status=ff["licence_block"]["license_status"]), encoding="utf-8")
     readme = ROOT / "packaging" / ("windows" if IS_WIN else "linux") / "READ-ME-FIRST.txt"
     shutil.copy2(readme, app / readme.name)
     if not IS_WIN:
@@ -181,6 +304,8 @@ def build(ffmpeg_dir: Path, dist_root: Path, work: Path, allow_dirty: bool) -> P
         pyi_version = "unknown"
     meta = {
         "product": "Sentinel",
+        # Shown first and by "Sentinel about": the licence status of the bundled FFmpeg.
+        "ffmpeg_license_status": ff["licence_block"]["license_status"],
         "version": spec_common.version(),
         "built_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "git_commit": commit or "unknown",
@@ -192,7 +317,8 @@ def build(ffmpeg_dir: Path, dist_root: Path, work: Path, allow_dirty: bool) -> P
         "pyinstaller_settings": {"mode": "onedir", "upx": False, "console": True, "PYTHONHASHSEED": "0",
                                  "SOURCE_DATE_EPOCH": git("log", "-1", "--format=%ct") or None},
         "ffmpeg": {"version": ff["version"], "ffprobe_version": ff["ffprobe_version"],
-                   "configuration": ff["configuration"], "license": ff["license"],
+                   "configuration": ff["configuration"], **ff["licence_block"],
+                   "required_components": {k: list(v) for k, v in REQUIRED_COMPONENTS.items()},
                    "source_dir": str(ffmpeg_dir), "files": tool_meta},
     }
     meta = write_tree_manifest(app, meta)
@@ -208,9 +334,20 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--dist", type=Path, default=ROOT / "dist", help="output root (default: dist/)")
     ap.add_argument("--work", type=Path, default=ROOT / "build" / f"pyinstaller-{sys.platform}")
     ap.add_argument("--allow-dirty", action="store_true", help="build from uncommitted changes (recorded)")
+    ap.add_argument("--allow-gpl-internal-use", action="store_true",
+                    help="bundle a GPL FFmpeg anyway, for a build that never leaves the organisation "
+                         "(recorded in BUILD-MANIFEST.json and shown by 'Sentinel about'); nonfree is never allowed")
+    ap.add_argument("--inspect-only", action="store_true",
+                    help="only check the FFmpeg folder (licence, required components) and print the result")
     args = ap.parse_args(argv)
     try:
-        build(args.ffmpeg_dir.resolve(), args.dist.resolve(), args.work.resolve(), args.allow_dirty)
+        if args.inspect_only:
+            ff = inspect_ffmpeg(args.ffmpeg_dir.resolve(), args.allow_gpl_internal_use)
+            print(json.dumps({"version": ff["version"], **ff["licence_block"],
+                              "required_components": "all present"}, indent=2))
+            return 0
+        build(args.ffmpeg_dir.resolve(), args.dist.resolve(), args.work.resolve(), args.allow_dirty,
+              args.allow_gpl_internal_use)
     except (BuildError, subprocess.CalledProcessError) as exc:
         print(f"BUILD FAILED: {exc}", file=sys.stderr)
         return 1

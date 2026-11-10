@@ -286,6 +286,14 @@ def cmd_about(args: argparse.Namespace) -> int:
         print(f"build:           {manifest.get('built_utc')}  commit {manifest.get('git_commit')}"
               f"{' (uncommitted changes)' if manifest.get('git_dirty') else ''}")
         print(f"bundled FFmpeg:  {ff.get('version')}  licence {ff.get('license')}")
+        status = manifest.get("ffmpeg_license_status") or ff.get("license_status") or "unknown (older build)"
+        if ff.get("gpl_internal_use_override") or not str(status).startswith("OK"):
+            print("!" * 72)
+            print(f"!! FFmpeg licence: {status}")
+            print("!! This folder must not be given to anyone outside the organisation.")
+            print("!" * 72)
+        else:
+            print(f"FFmpeg licence:  {status}")
         if args.verify and folder is not None:
             bad = verify_manifest(folder, manifest)
             print("installed files match the build manifest" if not bad else "FILES DIFFER FROM THE BUILD MANIFEST:")
