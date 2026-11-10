@@ -365,3 +365,15 @@ other merges were already committed).
   the time-accuracy finalizer's legitimate `time_correction_limited` warning; it now asserts that
   the after-planning change (`changed_later`) does not leak into the manifest, which is what it
   tests. Re-run of both: **2 passed**. Unit tests: **932 passed**.
+
+## Open items after integration (not done here)
+* Prepare Review Drive in the GUI and the export under the service layout need a request-file
+  interface to a service-side export (operators cannot write the ledger); GUI diagnostic report
+  is partial under the service layout; GUI not yet the launcher's view provider.
+* Export manifests do not yet carry the ledger chain head (needs a manifest-format decision).
+* `drives`, `export_batches`, `export_items`, `archive_indexes` are not covered by the chain.
+* No frozen build was made at integration (PyInstaller not installed); `SentinelService.exe` spec
+  syntax-checked only. Service installation, SCM start/stop, DPAPI under the service account,
+  real USB drives / dock: NOT EXECUTED (see the branch notes).
+* Owner decisions still open: enabling retention; enabling Erase and Set Up Drive after the dock
+  test; status readers group membership; `time_reference_server`.
