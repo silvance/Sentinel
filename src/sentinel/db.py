@@ -304,11 +304,16 @@ def _is_transient(exc: sqlite3.OperationalError) -> bool:
 
 
 class Ledger:
-    def __init__(self, path: Path, readonly: bool = False, retry_seconds: float | None = None) -> None:
+    def __init__(self, path: Path, readonly: bool = False, retry_seconds: float | None = None,
+                 immutable: bool = False) -> None:
         """``retry_seconds`` (readers only): how long to retry transient errors. A UI thread
-        that must never block can pass 0 and treat a failure as "temporarily unavailable"."""
+        that must never block can pass 0 and treat a failure as "temporarily unavailable".
+        ``immutable`` (readers only; integration): open with ``mode=ro&immutable=1``, for the
+        operator ledger snapshot written by :meth:`write_snapshot` (rollback journal, replaced
+        atomically), so a reader without write access never creates -wal/-shm files."""
         self.path = Path(path)
         self.readonly = readonly
+        self.immutable = bool(immutable and readonly)
         self.retry_seconds = READ_RETRY_SECONDS if retry_seconds is None else retry_seconds
         self._closed = False
         self._lock = threading.RLock()
@@ -334,7 +339,7 @@ class Ledger:
         conn.execute("PRAGMA busy_timeout=5000")
 
     def _open_readonly(self) -> sqlite3.Connection:
-        uri = f"{self.path.resolve().as_uri()}?mode=ro"
+        uri = f"{self.path.resolve().as_uri()}?mode=ro{'&immutable=1' if self.immutable else ''}"
         conn = sqlite3.connect(uri, uri=True, check_same_thread=False, isolation_level=None)
         try:
             self._configure(conn)

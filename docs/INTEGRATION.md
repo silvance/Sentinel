@@ -20,6 +20,7 @@ silently replace the earlier entry instead of failing).
 | 6 | design/single-executable | 480 passed | config.py, platform/windows.py, platform/winacl.py (add/add), tests/unit/test_winacl.py (add/add) |
 | 6+ | cross-branch items (a)(b)(c) | 493 passed | — |
 | 7 | design/tamper-evident-ledger | 575 passed (573 after the merge, +2 integration tests) | db.py, service.py, tests/integration/harness.py, docs/07 |
+| 8 | req/operator-gui (322ed90) | 793 passed (4 failed before the test adaptation below; +3 integration tests) | none textually (auto-merged) |
 
 ## 1. fix/ledger-reader-retry
 Clean merge. Note carried forward: `ledgerchain._ro_connect` (tamper-evident-ledger branch) does
@@ -210,3 +211,36 @@ first real service install, since that path cannot be executed on this machine.
   * Not done (recommended by the ledger branch, needs a manifest-format decision): write
     `current_chain_head()` into `Export_Manifest.json` and an `export` anchor line, so the head
     leaves the machine on every review drive.
+
+## 8. req/operator-gui (requested by the coordinator as merge 8)
+Auto-merged (only `pyproject.toml` shared). Integration changes:
+* **GUI reads `[storage] status_dir` under the Windows service layout** (`gui/window.py`):
+  `status.json` from `cfg.status_path`; history from `cfg.ledger_snapshot_path`
+  (`status_dir/ledger-snapshot.db`, written by the service janitor every 5 min) when a separate
+  status folder is configured, else the live ledger in `data_dir` as before. The snapshot is
+  opened `mode=ro&immutable=1` (new `Ledger(..., immutable=True)` for readers;
+  `gui/ledger_view.open_ledger` selects it by the snapshot file name
+  `config.LEDGER_SNAPSHOT_NAME`), so an operator account never needs to create `-wal`/`-shm`
+  files. The 24 h timeline allows the snapshot interval as extra "being recorded now" slack so
+  the newest ≤ 5 min are not shown as "no information".
+* **Admin PIN file** (`gui/admin_pin.admin_pin_dir`): with a separate `status_dir` it lives in the
+  configuration folder (installer: Users read, Administrators change — the service branch's
+  rule that the PIN verifier must never be operator-writable); otherwise in `data_dir` as before.
+  `--set-admin-pin` then needs an administrator.
+* **Prepare Review Drive stays disabled** (GUI branch decision, unchanged), also now that
+  `sentinel.export` is installed: the request-file interface (GUI writes a request; the service
+  runs the export) is not built.
+* **Tests adapted, with reason:** `test_gui_viewmodel.py::test_exports_none_yet_and_known_table`,
+  `::test_exports_states_always_shown_in_plain_words`, `::test_exports_unknown_schema_is_reported_not_guessed`
+  and `test_gui_widgets.py::test_exports_page_shows_plain_words_not_ledger_states` created a
+  reduced copy of the export schema in a fresh ledger; since merge 3 every ledger already has
+  the real tables, so `CREATE TABLE` failed and "no export table yet" no longer occurs. They now
+  insert into the real tables (all required columns), and the "unknown export schema" case uses
+  a database from other software (plain sqlite3). The plain-word outcome assertions are unchanged.
+* New tests: `tests/unit/test_gui_status_dir.py` (window uses the status folder and the snapshot;
+  snapshot read immutable, no -wal/-shm created, bytes unchanged; PIN folder by layout).
+* **Not integrated (recorded):** the GUI's "Save diagnostic report" calls `build_report`, which
+  reads the live ledger and logs in service-only folders; under the service layout an operator
+  account gets a partial report (the status part only). A service-side report request is needed.
+  The GUI is not registered in `launcher.view.VIEW_PROVIDERS` yet (Sentinel.exe still shows the
+  console view); packaging PySide6 into the frozen build is not done (not built here).

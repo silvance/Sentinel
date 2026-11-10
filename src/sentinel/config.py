@@ -19,6 +19,9 @@ from .drives.policy import DrivePolicy, DrivePolicyError, load_policy
 from .paths import TOOL_NAMES, absolute_tool, default_storage_dirs, default_tool
 
 
+LEDGER_SNAPSHOT_NAME = "ledger-snapshot.db"   # operator-readable ledger copy in [storage] status_dir
+
+
 class ConfigError(ValueError):
     """Raised for any invalid configuration. Message is safe to show to an administrator."""
 
@@ -148,7 +151,7 @@ class AppConfig:
     @property
     def ledger_snapshot_path(self) -> Path | None:
         """Read-only ledger copy for operators; only when a separate status_dir is configured."""
-        return self.status_dir_path / "ledger-snapshot.db" if self.storage.status_dir else None
+        return self.status_dir_path / LEDGER_SNAPSHOT_NAME if self.storage.status_dir else None
 
 
 def _build(cls: type, section: str, raw: dict[str, Any] | None, base_dir: Path) -> Any:
