@@ -36,6 +36,9 @@ from ..paths import SECRET_NAME, Layout
 
 log = logging.getLogger(__name__)
 
+# Owner: drives are swapped every 3-5 days; the longer end is the horizon for alert L-001.
+DEPLOYED_SWAP_DAYS = 5.0
+
 _HOST_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$")
 
 
@@ -114,7 +117,13 @@ def build_config(ans: SetupAnswers, layout: Layout, credentials_file: Path | Non
             storage["status_dir"] = str(root / "status")
     else:
         storage = layout.storage_defaults()
-    return {"camera": camera, "recording": {"display_timezone": check_timezone(ans.timezone)}, "storage": storage}
+    return {"camera": camera, "recording": {"display_timezone": check_timezone(ans.timezone)}, "storage": storage,
+            # Owner decision 2026-11-10: a deployed recorder copies to the archive drive and, when its
+            # own storage runs low, removes recordings already verified on an archive drive that has
+            # been taken away (drives swapped every 3-5 days). The code default stays OFF, so only a
+            # configuration written here (or by an administrator) enables removal.
+            "archive": {"enabled": True},
+            "retention": {"enabled": True, "expected_swap_days": DEPLOYED_SWAP_DAYS}}
 
 
 # ------------------------------------------------------------------ TOML writing (stdlib has no writer)
@@ -306,6 +315,10 @@ def write_setup(ans: SetupAnswers, layout: Layout, config_path: Path | None = No
         log.info("previous configuration kept as %s", backup)
     header = ("Sentinel configuration written by first-run setup.\n"
               "Settings not listed here use the tested defaults (docs/08_PACKAGING.md).\n"
+              "[archive] and [retention] are ON by owner decision (2026-11-10): recordings already\n"
+              "verified on a REMOVED archive drive are deleted from this computer when it runs low\n"
+              "on space (docs/branches/design-local-retention.md). Set [retention] enabled = false\n"
+              "to keep every recording on this computer.\n"
               "Camera credentials are kept in the separate credentials file, never here.")
     tmp = config_path.with_name(config_path.name + ".partial")
     tmp.write_text(to_toml(d, header), encoding="utf-8")

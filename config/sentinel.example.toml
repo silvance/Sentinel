@@ -75,7 +75,7 @@ min_size_gb = 128
 # Continuous copy of sealed recordings to a swappable archive drive (requirement S1).
 # Runs as its own process: python -m sentinel.archive run --config <this file>
 [archive]
-enabled = false
+enabled = true                     # owner decision 2026-11-10: deployed recorders copy to archive drives
 # Archive drives are found by their marker on any mounted volume (never by drive letter).
 # drive_path is optional: an extra folder to look in (e.g. a fixed mount point on Linux).
 drive_path = ""
@@ -91,15 +91,39 @@ index_every_s = 3600               # rewrite the drive's index after this much c
 swap_max_wait_s = 120              # on "Swap", finish the file in flight only if it takes <= this
 
 # Removal of ARCHIVED recordings from this computer when its storage runs low.
-# OFF by default: an administrator enables it only after the owner's decision
+# ON for deployment by owner decision (2026-11-10; drives swapped every 3-5 days); the code
+# default is OFF, so a configuration without this section never removes anything
 # (docs/branches/design-local-retention.md). Never removes damaged (CORRUPT), unarchived,
 # recent, or "lost" recordings; by default only counts copies on archive drives that have
-# been removed from the computer.
+# been removed from the computer. Set enabled = false to keep every recording here.
 [retention]
-enabled = false
+enabled = true
 floor_free_gb = -1                 # -1 = use [storage] warning_free_gb
 margin_gb = 10                     # free up to floor + margin, never more
 min_verified_copies = 1
 require_removed_drive = true
 keep_recent_hours = 24
 expected_swap_days = 5             # alert L-001 if storage will run out before the next swap
+
+# Recording schedule: pause and resume recording at times set in advance (sentinel/schedule.py).
+# OFF unless enabled. While paused the current file is closed normally, the pause is recorded in
+# the recording log as a gap ("paused by the recording schedule") and the status shows P-001 with
+# the time recording resumes. Check what it will do with: Sentinel.exe schedule --days 14
+# Precedence: [[schedule.dates]] > [[schedule.weekly]] > default. Times are local in `timezone`.
+[schedule]
+enabled = false
+default = "record"                 # outside every listed period: "record" or "pause"
+timezone = ""                      # "" = [recording] display_timezone
+
+# Example (change or remove before enabling): pause every weekend.
+[[schedule.weekly]]
+action = "pause"
+days = ["weekend"]                 # mon..sun, "weekdays", "weekend", "daily"
+start = "00:00"
+end = "24:00"                      # an end before the start runs past midnight
+
+# Example one-off period (a date alone as the end means the END of that day):
+# [[schedule.dates]]
+# action = "record"
+# start = "2026-12-24 18:00"
+# end = "2026-12-27"

@@ -375,7 +375,9 @@ other merges were already committed).
 * No frozen build was made at integration (PyInstaller not installed); `SentinelService.exe` spec
   syntax-checked only. Service installation, SCM start/stop, DPAPI under the service account,
   real USB drives / dock: NOT EXECUTED (see the branch notes).
-* Owner decisions still open: enabling retention; enabling Erase and Set Up Drive after the dock
+* Decided after integration (2026-11-10): retention and archive copying ON in deployed
+  configurations (docs/branches/design-local-retention.md §7); LGPL FFmpeg obtained (docs/08 §8).
+* Owner decisions still open: enabling Erase and Set Up Drive after the dock
   test; status readers group membership; `time_reference_server`.
 
 ## Full suite (head after merge 10)
@@ -386,3 +388,31 @@ other merges were already committed).
 `::test_camera_offline_shows_interrupted_and_recovers` (timing-sensitive, flaky on `main` per
 several branch notes). Re-run of `test_recorder_faults.py` alone: **11 passed**. Not chased further
 (load-dependent); worth watching whether `time_correction_limited` appears on an idle machine.
+
+## LGPL FFmpeg, deployment decisions and new features (2026-11-10, after merge)
+Uncommitted on `main` (based on `bd1a445`) at the time of writing.
+* **FFmpeg:** BtbN `ffmpeg-n9.0.2-48-gd4070a14ce-win64-lgpl-9.0` (docs/08 §8.6), SHA-256 checked
+  against the release checksums; LGPL-3.0-or-later by flags and `-L`; real outputs now fixtures.
+* **Retention and archive copying ON at deployment** (docs/branches/design-local-retention.md §7);
+  `winsvc install` also registers `SentinelArchive`; the launcher starts the archive copy when no
+  service runs it.
+* **Recording schedule, keep-awake / power plan / H-001, "Lock this computer"**
+  (docs/branches/schedule-and-unattended.md). A fake Windows login screen was requested and declined.
+* **Full suite with the LGPL build** (`SENTINEL_TEST_TOOLS_DIR=<lgpl bin>`, idle machine):
+  `1073 passed, 1 failed` (18 min 43 s). The failure was the new
+  `test_schedule_service.py::test_scheduled_pause_and_automatic_resume`: it counted sealed files to
+  show nothing was recorded during the pause, but files recorded just before the pause are sealed
+  later in the background. The test now checks "no new run and no file starting after the pause";
+  it then passed twice (idle, and under a concurrent unit-test run). The whole suite was not re-run
+  after that test change.
+* An earlier full run on the same day (before the schedule work, and with a concurrent unit-test
+  run for part of it) had 5 failures: 3 in `test_paths_tools.py` (the test-only FFmpeg override
+  leaked into tests of the program's own FFmpeg lookup; fixed with a fixture) and 2 in
+  `test_time_accuracy.py` (`time_correction_limited` under load; all 4 time tests pass on an idle
+  machine with the LGPL build). The load sensitivity of `time_correction_limited` remains open.
+* **Build:** `packaging\windows\build.ps1 -FfmpegDir <lgpl bin> -AllowDirty` → `dist\Sentinel`,
+  635 files, 288.8 MB (263.9 MB FFmpeg), licence check "OK: LGPL-3.0-or-later"; built from an
+  uncommitted tree (manifest says so) — a test build, not a release. `Sentinel.exe about --verify`:
+  installed files match the manifest. Frozen smoke test
+  (`SENTINEL_FROZEN_EXE=dist\Sentinel\Sentinel.exe SENTINEL_LAUNCHER_RUN_S=30
+  tests/integration/test_launcher_process.py`): passed.

@@ -122,6 +122,12 @@ CATALOG: dict[str, AlertDef] = {d.code: d for d in [
              "Recording continues for now. Swap the archive drive. " + SUPPORT, False),
     AlertDef("L-002", "Archived recordings could not be removed to free space on this computer",
              "Recording continues for now. Swap the archive drive. " + SUPPORT, False),
+    # Planned pause ([schedule]); not a fault. The status message names the resume time.
+    AlertDef("P-001", "Recording is paused by the recording schedule",
+             "Recording resumes automatically at the scheduled time. No action is needed.", False),
+    # Host power settings: an unattended laptop that goes to sleep stops recording (sentinel.power).
+    AlertDef("H-001", "This computer is set to go to sleep, which would stop recording",
+             "Recording continues for now. Do not close the lid. " + SUPPORT, False),
     AlertDef("Z-001", "A test camera is configured. These recordings are not evidence",
              "Contact technical support before any operational use.", False),
 ]}
@@ -148,6 +154,8 @@ def make_alert(code: str, severity: Severity, *, recovering: bool = False, attem
     if recovering and severity is Severity.NOTICE:
         tries = f" (attempt {attempt})" if attempt and attempt > 1 else ""
         msg = f"Recording interrupted. Error {code}: {d.headline}. Reconnecting automatically{tries}."
+    elif code.startswith("P-"):
+        msg = f"{d.headline} ({code}). {d.action}"      # a planned state, not an error
     elif d.stops_recording and severity is Severity.CRITICAL:
         tail = " Automatic recovery unsuccessful." if recovering else ""
         msg = f"Recording stopped. Error {code}: {d.headline}.{tail} {d.action}"

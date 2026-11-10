@@ -113,3 +113,26 @@ def test_manifest_status_shown_by_about(tmp_path: Path, monkeypatch: pytest.Monk
     assert cli.main(["about"]) == 0
     out = capsys.readouterr().out
     assert "INTERNAL USE ONLY" in out and "must not be given to anyone outside" in out
+
+
+# ---------------------------------------------------------------------- real LGPL build (§8.5 step 3)
+# Captured 2026-11-10 from BtbN FFmpeg-Builds release autobuild-2026-11-10-12-39, asset
+# ffmpeg-n9.0.2-48-gd4070a14ce-win64-lgpl-9.0.zip (SHA-256 3c3faf2d691c1e3038b04fda8e38dbc790a1358a9b12b6e796072c5c5f97c821,
+# matching the release's checksums.sha256): the build bundled from now on.
+def _btbn(kind: str) -> str:
+    return (FIX / f"btbn-9.0.2-lgpl.{kind}.txt").read_text("utf-8")
+
+
+def test_real_lgpl_build_accepted_by_both_sources() -> None:
+    conf = _configuration(_btbn("version"))
+    assert build.gpl_flags(conf) == [] and "--enable-nonfree" not in conf
+    block = build.licence_decision(conf, {"ffmpeg": _btbn("L"), "ffprobe": _btbn("ffprobe.L")},
+                                   allow_gpl_internal_use=False)
+    assert block["license"] == "LGPL-3.0-or-later"
+    assert build.licence_from_text(_btbn("L")) == build.licence_from_text(LGPL3_L)   # synthetic text was right
+
+
+def test_real_lgpl_build_has_every_required_component() -> None:
+    for kind, wanted in build.REQUIRED_COMPONENTS.items():
+        have = build.parse_components(kind, _btbn(kind))
+        assert set(wanted) <= have, (kind, set(wanted) - have)

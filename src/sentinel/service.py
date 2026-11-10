@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
-from .alerts import Severity
+from .alerts import Severity, make_alert
 from .clock import Clock, SystemClock, iso_utc, parse_iso_utc
 from .config import AppConfig, ConfigError, check_tools, load_config
 from .credentials import CredentialError, load_credentials, register_secret, url_with_credentials
@@ -51,6 +51,7 @@ from .media.probe import ffmpeg_version
 from .media.videohash import parse_version
 from .models import SegmentState, StorageLevel
 from .platform import InstanceLockError, Platform, get_platform
+from .power import KeepAwake, read_power_settings, sleep_risks
 from .recorder.finalizer import MAX_FINALIZE_ATTEMPTS, Finalizer, SegmentJob
 from .recorder.integrity import IntegrityWorker
 from .recorder.recovery import Recovery
@@ -58,6 +59,7 @@ from .ledger_timing import insert_clock_observation
 from .recorder.supervisor import RecordingSupervisor
 from .recorder.timebase import ClockStepDetector, read_clock_pair
 from .status import Measurements, StatusDocument, apply_alerts, evaluate, fatal_status_document, write_status
+from .schedule import RecordingSchedule, pause_message, render_plan
 from .storage.monitor import DiskUsage, StorageMonitor
 from .timesync import query_os_time_sync, sntp_offset
 from .watchdog import LoopWatchdog
@@ -75,6 +77,7 @@ SHUTDOWN_JOB_S = 60.0
 SHUTDOWN_INTEGRITY_S = 10.0
 SHUTDOWN_BUDGET_S = 50.0 + SHUTDOWN_DRAIN_S + SHUTDOWN_JOB_S + SHUTDOWN_INTEGRITY_S
 LEDGER_SNAPSHOT_INTERVAL_S = 300.0
+POWER_CHECK_INTERVAL_S = 600.0   # power-plan check for H-001 (sentinel.power)
 
 
 def _bounded(name: str, fn: Callable[[], object], timeout_s: float) -> bool:
@@ -138,6 +141,13 @@ class RecorderService:
         self.last_clock_observation: dict | None = None
         self._closing = threading.Event()
         self._archive_view: Any = None               # sentinel.archive.status.RecorderArchiveView when enabled
+        # [schedule]: planned pauses (sentinel.schedule); None = record all the time.
+        self.schedule = RecordingSchedule(cfg.schedule) if cfg.schedule.enabled else None
+        # Unattended laptop: keep Windows from idle-sleeping, check the power plan (sentinel.power).
+        self.keep_awake: KeepAwake | None = None
+        self._power: dict[str, Any] = {}
+        self._power_risks: list[str] = []
+        self._next_power_check = 0.0
 
     # ------------------------------------------------------------------
     def run(self) -> int:
@@ -218,10 +228,13 @@ class RecorderService:
         self.retention = RetentionManager(cfg, self.ledger, disk_usage=self._disk_usage)
         if cfg.retention.enabled:          # admin decision; OFF by default
             self.retention.start()
+        self.keep_awake = KeepAwake().start()
+        if self.schedule is not None:
+            log.info("recording schedule is on:\n%s", render_plan(self.schedule, self.clock.wall(), days=7))
         self.supervisor = RecordingSupervisor(
             cfg, self.ledger, self.platform, self.storage, self.finalizer,
             url_with_credentials(cfg.camera.url, creds), self.stop_event, clock=self.clock,
-            ffmpeg_version=version, tick=self._tick)
+            ffmpeg_version=version, tick=self._tick, schedule=self.schedule)
         self._write_status(force=True)
         self.platform.notify("READY=1")
         exit_code = EXIT_OK
@@ -251,6 +264,8 @@ class RecorderService:
                 self.integrity.stop()
             if self.retention is not None:
                 self.retention.stop()
+            if self.keep_awake is not None:
+                self.keep_awake.stop()
             if not drained:
                 log.error("finaliser did not drain before shutdown; recovery will complete it on next start")
             self.ledger.add_event("audit", "recorder", "service_stop", "Recorder service stopped",
@@ -289,6 +304,9 @@ class RecorderService:
         self.platform.notify("WATCHDOG=1")
         now = self.clock.mono()
         self._check_clock(now)
+        if now >= self._next_power_check:
+            self._next_power_check = now + POWER_CHECK_INTERVAL_S
+            self._check_power()
         if now >= self._next_janitor:
             self._next_janitor = now + self.cfg.service.janitor_interval_s
             try:
@@ -296,6 +314,24 @@ class RecorderService:
             except Exception:
                 log.exception("janitor failed")
         self._write_status()
+
+    def _check_power(self) -> None:
+        """H-001 when a power setting would still put this computer to sleep (sentinel.power)."""
+        try:
+            ps = read_power_settings()
+            awake = self.keep_awake.active if self.keep_awake is not None else None
+            risks = sleep_risks(ps, awake)
+            if risks and risks != self._power_risks:
+                log.warning("power settings would stop recording: %s", "; ".join(risks))
+                if self.ledger is not None:
+                    self.ledger.add_event("warning", "power", "sleep_risk",
+                                          "This computer is set to go to sleep, which would stop recording",
+                                          {"risks": risks})
+            self._power_risks = risks
+            self._power = {"keep_awake": awake, "keep_awake_error": getattr(self.keep_awake, "error", None),
+                           "settings": ps.to_dict(), "risks": risks}
+        except Exception:
+            log.exception("power settings check failed")
 
     def _check_clock(self, now: float) -> None:
         offset = self.clock.wall() - now
@@ -462,9 +498,12 @@ class RecorderService:
         since_adv = last_media = None
         attempts, unstable, last_end = 0, 0, None
         clock_anomaly = now < self._clock_anomaly_until
+        paused, resume_epoch, resumed_mono, pause_since = False, None, None, None
         if sup is not None:
             with sup.live.lock:
                 lv = sup.live
+                paused, resume_epoch, resumed_mono = lv.scheduled_pause, lv.resume_epoch, lv.resumed_mono
+                pause_since = lv.pause_since_epoch
                 ffmpeg_running, media_seen, in_backoff = lv.ffmpeg_running, lv.media_seen, lv.in_backoff
                 since_adv = (now - lv.last_advance_mono) if lv.last_advance_mono is not None else None
                 last_media = lv.last_media_mono_any
@@ -555,12 +594,18 @@ class RecorderService:
         candidates = []
         if last_media is not None:
             candidates.append(now - last_media)
-        if gap and gap.get("seconds") is not None:
+        gap_is_pause = bool(gap and gap.get("reason") == "scheduled_pause")
+        if gap and gap.get("seconds") is not None and not gap_is_pause:   # a planned pause is not an outage
             candidates.append(gap["seconds"])
         if not candidates:
             candidates.append(now - self._started_mono)
         outage = max(candidates)
-        outage_since = gap["since_utc"] if gap and gap.get("since_utc") else iso_utc(time.time() - outage)
+        outage_since = (gap["since_utc"] if gap and gap.get("since_utc") and not gap_is_pause
+                        else iso_utc(time.time() - outage))
+        if resumed_mono is not None and now - resumed_mono < outage:
+            # After a scheduled pause, an outage is measured from the scheduled restart.
+            outage = now - resumed_mono
+            outage_since = iso_utc(time.time() - outage)
 
         m = Measurements(
             now_mono=now, service_started_mono=self._started_mono, ffmpeg_running=ffmpeg_running,
@@ -572,8 +617,16 @@ class RecorderService:
             last_end_reason=last_end, ever_recorded=ever_recorded, attempts=attempts,
             unstable_restarts=unstable, clock_anomaly=clock_anomaly, clock_synchronized=self._ntp,
             corrupt_recent=corrupt_recent, verify_problem=verify_problem, verify_critical=verify_critical,
-            ledger_altered=ledger_altered, ledger_unprotected=ledger_unprotected, simulated=cfg.camera.development_source)
+            ledger_altered=ledger_altered, ledger_unprotected=ledger_unprotected, simulated=cfg.camera.development_source,
+            scheduled_pause=paused, resumed_s=(now - resumed_mono) if resumed_mono is not None else None)
         d = evaluate(m, rec.stall_timeout_s, rec.segment_seconds, rec.connect_timeout_s, rec.escalate_after_s)
+        if self.schedule is not None:
+            for a in d.alerts:
+                if a.code == "P-001":      # name the resume time, in the schedule's time zone
+                    generic, a.message = a.message, pause_message(self.schedule, resume_epoch)
+                    a.detail = {"resume_utc": iso_utc(resume_epoch) if resume_epoch else None,
+                                "paused_since_utc": iso_utc(pause_since) if pause_since else None}
+                    d.messages[:] = [a.message if x == generic else x for x in d.messages]
 
         storage_d = {}
         if sample is not None:
@@ -587,8 +640,18 @@ class RecorderService:
                      "uptime_s": round(now - self._started_mono, 1), "simulated_camera": cfg.camera.development_source,
                      "clock_synchronized": self._ntp, "clock_observation": self.last_clock_observation},
             recording=live_d, storage=storage_d, integrity=integrity_d, last_segment=last_seg, open_gap=gap,
-            terminal=self._terminal)
+            terminal=self._terminal, power=dict(self._power))
+        if self.schedule is not None:
+            nxt = resume_epoch if paused else self.schedule.next_change(self.clock.wall())
+            doc.schedule = {"enabled": True, "paused": paused, "timezone": cfg.schedule.timezone,
+                            "next_change_utc": iso_utc(nxt) if nxt else None,
+                            "next_change_text": self.schedule.format_local(nxt) if nxt else None,
+                            "next_change_is": ("record" if paused else "pause") if nxt else None}
         alerts = list(d.alerts)
+        if self._power_risks:
+            h = make_alert("H-001", Severity.WARNING, detail={"risks": list(self._power_risks)})
+            alerts.append(h)
+            doc.messages = doc.messages + [h.message]
         if self.retention is not None:
             try:
                 alerts += self._retention_status(doc, sample)
@@ -742,6 +805,17 @@ def _cmd_run(args: argparse.Namespace) -> int:
     return run_recorder(args.config)
 
 
+def _cmd_schedule(args: argparse.Namespace) -> int:
+    """Print what the recording schedule will do over the next days (for the technician)."""
+    try:
+        cfg = load_config(args.config)
+    except ConfigError as exc:
+        print(f"configuration error: {exc}")
+        return EXIT_CONFIG
+    print(render_plan(RecordingSchedule(cfg.schedule), time.time(), days=args.days))
+    return EXIT_OK
+
+
 def _cmd_check(args: argparse.Namespace) -> int:
     try:
         cfg = load_config(args.config)
@@ -764,6 +838,8 @@ def _cmd_check(args: argparse.Namespace) -> int:
           f"{'INCLUDED' if cfg.camera.include_audio else 'excluded'}, spool {cfg.storage.spool_dir}")
     if cfg.camera.development_source:
         print("WARNING: development_source = true (simulated/test camera; recordings are not evidence)")
+    if cfg.schedule.enabled:
+        print(render_plan(RecordingSchedule(cfg.schedule), time.time(), days=7))
     for p in problems:
         print(f"PROBLEM: {p}")
     print("configuration OK" if not problems else "configuration has problems")
@@ -779,7 +855,7 @@ def banner(doc: dict | None, problem: str | None) -> str:
         title = "RECORDING STOPPED" if alert.get("recording_stopped") else "ATTENTION REQUIRED"
         body = alert["message"]
     else:
-        title = {"RECORDING": "RECORDING NORMALLY", "STARTING": "STARTING"}.get(
+        title = {"RECORDING": "RECORDING NORMALLY", "STARTING": "STARTING", "PAUSED": "PAUSED BY SCHEDULE"}.get(
             (doc or {}).get("overall", ""), str((doc or {}).get("overall", "UNKNOWN")))
         body = alert["message"] if alert else "No problems detected."
     width = 72
@@ -812,16 +888,18 @@ def _cmd_diagnostics(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="sentinel-recorder")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name in ("run", "check-config", "status", "diagnostics"):
+    for name in ("run", "check-config", "status", "diagnostics", "schedule"):
         p = sub.add_parser(name)
         p.add_argument("--config", required=True)
+        if name == "schedule":
+            p.add_argument("--days", type=int, default=14, help="how many days ahead to show")
         if name == "status":
             p.add_argument("--json", action="store_true", help="also print the full status document")
         if name == "diagnostics":
             p.add_argument("--out", help="directory for the report (default: data_dir/diagnostics)")
     args = ap.parse_args(argv)
     return {"run": _cmd_run, "check-config": _cmd_check, "status": _cmd_status,
-            "diagnostics": _cmd_diagnostics}[args.cmd](args)
+            "diagnostics": _cmd_diagnostics, "schedule": _cmd_schedule}[args.cmd](args)
 
 
 if __name__ == "__main__":

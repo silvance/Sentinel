@@ -46,6 +46,8 @@ OVERALL_CASES: dict[OverallStatus, dict] = {
                                      seconds_since_media_advance=None, storage_level=StorageLevel.CRITICAL),
     OverallStatus.ERROR: dict(component_errors=["C-001"]),
     OverallStatus.STOPPED: dict(stopping=True),
+    OverallStatus.PAUSED: dict(ffmpeg_running=False, media_seen_this_run=False, seconds_since_media_advance=None,
+                               scheduled_pause=True, outage_seconds=7200.0, attempts=3),
 }
 EXPECTED_HEADLINE: dict[OverallStatus, tuple[str, Tone]] = {
     OverallStatus.RECORDING: ("Recording normally", Tone.OK),
@@ -55,6 +57,7 @@ EXPECTED_HEADLINE: dict[OverallStatus, tuple[str, Tone]] = {
     OverallStatus.STORAGE_FULL: ("Recording stopped", Tone.CRITICAL),
     OverallStatus.ERROR: ("Recording stopped", Tone.CRITICAL),     # C-001 is critical + stops recording
     OverallStatus.STOPPED: ("Not recording", Tone.CRITICAL),
+    OverallStatus.PAUSED: ("Paused by schedule", Tone.INFO),       # planned: no outage alert, no escalation
 }
 
 

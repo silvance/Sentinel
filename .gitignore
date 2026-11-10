@@ -13,3 +13,5 @@ logs/
 # packaging: build virtualenvs (outputs go to build/ and dist/, ignored above)
 .venv-build/
 .venv-build-linux/
+# third-party binaries (FFmpeg build bundled at packaging time; not committed)
+third_party/

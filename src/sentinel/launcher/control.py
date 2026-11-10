@@ -18,6 +18,9 @@ Interim detached mode (this module): the recorder is a child of the logged-on us
 It stops when that user logs off or the PC restarts, depends on that user being logged on, and
 does not start by itself. It is therefore **not suitable for unattended deployment** (U8); the
 service branch is required for that.
+
+With ``[archive] enabled`` (deployed default) :meth:`DetachedProcessControl.start_archive` also
+starts the archive-drive copy (``Sentinel.exe archive run``) as a second background process.
 """
 
 from __future__ import annotations
@@ -72,6 +75,28 @@ def recorder_command(config_path: Path, frozen: bool | None = None, executable: 
     if is_frozen() if frozen is None else frozen:
         return [exe, "recorder", "run", "--config", str(config_path)]
     return [exe, "-m", "sentinel.launcher", "recorder", "run", "--config", str(config_path)]
+
+
+def archive_command(config_path: Path, frozen: bool | None = None, executable: str | None = None) -> list[str]:
+    """argv that runs the archive-drive copy (``[archive] enabled``) in the foreground of a new process."""
+    exe = executable or sys.executable
+    if is_frozen() if frozen is None else frozen:
+        return [exe, "archive", "run", "--config", str(config_path)]
+    return [exe, "-m", "sentinel.archive", "run", "--config", str(config_path)]
+
+
+def archive_alive(cfg: AppConfig, now: float | None = None) -> bool:
+    """Non-intrusive: the archive process publishes ``archive_status.json`` at least every
+    ``poll_interval_s``; a fresh heartbeat (the recorder's own A-007 threshold) and a state other
+    than STOPPED means it runs. Never touches ``archive.lock``: a worker that loses the lock race
+    would overwrite the running worker's status with "another archive copy is already running"."""
+    from ..archive.status import ST_STOPPED, STATUS_FILE, read_archive_status
+
+    doc = read_archive_status(cfg.data_path / STATUS_FILE)
+    if not doc or doc.get("state") == ST_STOPPED:
+        return False
+    age = (time.time() if now is None else now) - float(doc.get("heartbeat_epoch", 0))
+    return age <= max(60.0, 6 * cfg.archive.poll_interval_s)
 
 
 def detached_popen_kwargs(cwd: Path | None = None, platform: str | None = None,
@@ -156,6 +181,28 @@ class DetachedProcessControl:
                 return StartResult(True, None, f"recorder confirmed by status heartbeat (pid {proc.pid})")
             self._sleep(0.25)
         return StartResult(True, None, f"recorder process alive but not yet confirmed after {confirm_s:.0f} s")
+
+    def start_archive(self) -> bool:
+        """Start the archive-drive copy as a second background process when ``[archive] enabled``
+        and it is not already running (deployed configurations enable it, and retention relies on
+        it). Best effort: if it cannot start, the recorder's status shows A-007 ("Archive copying is
+        not running"). Returns True when a process was started."""
+        if not self.cfg.archive.enabled or archive_alive(self.cfg, self._clock()):
+            return False
+        command = archive_command(self.config_path)
+        try:
+            try:
+                proc = self._popen(command, **detached_popen_kwargs())
+            except OSError as exc:
+                if sys.platform == "win32" and getattr(exc, "winerror", None) == ERROR_ACCESS_DENIED:
+                    proc = self._popen(command, **detached_popen_kwargs(breakaway=False))
+                else:
+                    raise
+        except OSError as exc:
+            log.error("could not start the archive copy: %s", exc)
+            return False
+        log.info("archive copy started in the background (pid %s): %s", getattr(proc, "pid", "?"), command)
+        return True
 
     def stop(self, timeout_s: float = 90.0) -> bool:
         """Graceful stop (closes the current segment). True once the instance lock is free."""

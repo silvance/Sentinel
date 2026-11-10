@@ -15,7 +15,10 @@ The archive service needs: read access to the spool, read/write access to the da
 (an NTFS drive prepared by Sentinel; its ACL must grant the service SID — to be set by drive
 preparation, NOT verified here).
 
-Until the service exists, the recorder's status shows A-007 ("Archive copying is not running"),
+Since the owner's deployment decision (2026-11-10) ``python -m sentinel.winsvc install`` registers
+this service itself whenever ``[archive] enabled`` (``winsvc.commands.archive_service_steps``; NOT
+EXECUTED on an administrator machine yet), and the click-to-run launcher without a service starts
+``Sentinel.exe archive run`` in the background. If neither runs, the recorder's status shows A-007 ("Archive copying is not running"),
 escalating to critical after ``[archive] not_running_critical_after_s`` (default 30 min), and the
 backlog / A-004 are still computed by the recorder from the ledger.
 

@@ -104,7 +104,9 @@ guessed — docs/02 risk A1); the stream port (default 554); the camera account 
 password (hidden input); a camera label; the display time zone (IANA name, validated); the folder
 for recordings (default `%ProgramData%\Sentinel`). Each answer is validated and re-asked when
 wrong; the complete configuration is then validated by `sentinel.config` before anything is
-written. Everything else keeps the tested defaults (5-minute segments, audio excluded, …).
+written. Everything else keeps the tested defaults (5-minute segments, audio excluded, …),
+except that archive copying and local retention are written ON (owner decision 2026-11-10,
+docs/branches/design-local-retention.md §7); the file's header says how to switch retention off.
 
 * An existing configuration is never overwritten silently: `setup --force` moves it to
   `sentinel.toml.<UTC>.bak` first (the recorder also audits configuration changes).
@@ -132,6 +134,13 @@ written. Everything else keeps the tested defaults (5-minute segments, audio exc
   without breakaway when a job forbids it), all standard handles to NUL, working directory =
   data folder; Linux `start_new_session=True`. A hidden console (not `DETACHED_PROCESS`) is used
   on purpose: FFmpeg/FFprobe children inherit it and never flash console windows.
+* With `[archive] enabled` (deployed default) and no Windows service installed, the launcher also
+  starts `Sentinel.exe archive run --config <file>` the same way, unless the archive process's
+  heartbeat (`archive_status.json`, A-007 threshold) shows it already runs; the archive lock is
+  never probed. `Sentinel.exe archive swap|resume|status|designate …` forwards to
+  `python -m sentinel.archive`. With the service installed, `install` registers `SentinelArchive`
+  as well (delayed automatic start, own virtual account; grants: spool read, data/logs modify,
+  configuration read) and `uninstall` removes it.
 * **Single instance** is the recorder's existing instance lock (`data\recorder.lock`); a second
   recorder exits with code 3. The launcher's "is it running?" check never touches that lock (a
   probe that takes the lock, even briefly, could make a starting recorder exit as "already
@@ -232,9 +241,8 @@ UPX is disabled on purpose (packed executables are a common false-positive trigg
 ## 8. FFmpeg licensing — owner decision: ship an LGPL FFmpeg (not legal advice)
 
 **Decision (owner, 2026-11-10): Sentinel is distributed with an LGPL build of FFmpeg.** The build
-script enforces it (§8.3). No LGPL build has been obtained or tested yet: downloading one needs
-the owner's explicit approval, which is being requested separately. **Until an LGPL build is
-bundled and the test suite has passed with it (§8.5), no build may be distributed.**
+script enforces it (§8.3). The LGPL build obtained with the owner's approval and its results are
+in §8.6. **No build may be distributed until it has passed §8.5 with that build.**
 
 ### 8.1 Why the current test build is not acceptable
 The FFmpeg used for all tests so far (gyan.dev 9.0.1 "full", WinGet) is configured with
@@ -326,6 +334,20 @@ tested on 9.0.1 and requires ≥ 6.0), 64-bit, LGPL variant. Options, in order o
 6. Ship the FFmpeg licence text (copied automatically if present next to the binaries) and keep
    the matching source archive (option 1: our tarball; option 2: the tagged source the build used)
    with each release, so the LGPL source offer can be honoured.
+
+### 8.6 The LGPL build in use (obtained 2026-11-10, owner approval)
+* Source: BtbN FFmpeg-Builds, release `autobuild-2026-11-10-12-39`, asset
+  `ffmpeg-n9.0.2-48-gd4070a14ce-win64-lgpl-9.0.zip` (release branch 9.0, static, win64, LGPL).
+* SHA-256 `3c3faf2d691c1e3038b04fda8e38dbc790a1358a9b12b6e796072c5c5f97c821`, equal to the release's
+  `checksums.sha256`. Unpacked to `third_party/` (git-ignored; not committed).
+* `configuration:` has `--enable-version3`, no `--enable-gpl`/`--enable-nonfree`, no GPL-only
+  library; `ffmpeg -L` and `ffprobe -L` say "GNU Lesser General Public License … version 3" ⇒
+  LGPL-3.0-or-later. Real outputs captured in `tests/fixtures/ffmpeg/btbn-9.0.2-lgpl.*.txt` and
+  checked by `tests/unit/test_build_licence.py` (licence and required components); the synthetic
+  LGPL text used before matches FFmpeg's real wording.
+* Source offer: keep the tagged FFmpeg source for `n9.0.2-48-gd4070a14ce` with each release (§8.5 step 6) —
+  NOT yet archived.
+* Suite and build results with this FFmpeg: see docs/INTEGRATION.md ("LGPL FFmpeg").
 
 Separately from copyright: H.264/HEVC are patent-encumbered formats; whether decoding them in
 this deployment needs a patent licence is outside engineering scope.

@@ -32,6 +32,7 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from .. import __version__
 from ..clock import Clock, SystemClock, compact_utc, iso_utc
@@ -103,6 +104,11 @@ class LiveState:
     host_clock_drift_ppm: float | None = None
     time_correction_s: float | None = None
     clock_slew_run: bool = False               # current run saw a faster-than-drift clock change
+    # recording schedule ([schedule], sentinel.schedule)
+    scheduled_pause: bool = False              # not recording because the schedule says pause
+    pause_since_epoch: float | None = None
+    resume_epoch: float | None = None          # next scheduled start (None: none scheduled)
+    resumed_mono: float | None = None          # when the last scheduled pause ended
 
 
 @dataclass
@@ -116,8 +122,9 @@ class RecordingSupervisor:
     def __init__(self, cfg: AppConfig, ledger: Ledger, platform: Platform, storage: StorageMonitor,
                  finalizer: Finalizer, input_url: str, stop_event: threading.Event,
                  clock: Clock | None = None, ffmpeg_version: str | None = None,
-                 tick: Callable[[], None] | None = None) -> None:
+                 tick: Callable[[], None] | None = None, schedule: Any = None) -> None:
         self.cfg = cfg
+        self.schedule = schedule             # sentinel.schedule.RecordingSchedule, or None (always record)
         self.ledger = ledger
         self.platform = platform
         self.storage = storage
@@ -140,6 +147,9 @@ class RecordingSupervisor:
         self.cam_dir.mkdir(parents=True, exist_ok=True)
         consecutive_internal = 0
         while not self.stop_event.is_set():
+            if self._schedule_says_pause():
+                self._pause_for_schedule()
+                continue
             sample = self.storage.sample()
             if sample.level.value == "critical":
                 log.error("storage critical (%d bytes free); not starting FFmpeg", sample.free_bytes)
@@ -165,6 +175,8 @@ class RecordingSupervisor:
                 outcome = RunOutcome(RunEndReason.INTERNAL_ERROR, None, 0.0)
             if self.stop_event.is_set():
                 break
+            if outcome.reason is RunEndReason.SCHEDULED_PAUSE:
+                continue                       # planned: no retry delay; the loop top pauses
             delay = self.backoff.next_delay(outcome.media_seconds)
             log.warning("run ended (%s, exit %s, %.1fs media); retrying in %.1fs",
                         outcome.reason, outcome.exit_code, outcome.media_seconds, delay)
@@ -184,6 +196,59 @@ class RecordingSupervisor:
                 return
             self._tick()
             self.stop_event.wait(min(remaining, self.cfg.service.poll_interval_s))
+
+    # ------------------------------------------------------------------ recording schedule
+    def _schedule_says_pause(self) -> bool:
+        if self.schedule is None:
+            return False
+        try:
+            return not self.schedule.should_record(self.clock.wall())
+        except Exception:      # fail safe: a schedule that cannot be evaluated never stops recording
+            log.exception("recording schedule could not be evaluated; recording")
+            return False
+
+    def _pause_for_schedule(self) -> None:
+        """Wait while the schedule says pause. The run that was recording has already ended with
+        ``scheduled_pause`` (its gap is open in the ledger until footage resumes)."""
+        s = self.schedule
+        wall = self.clock.wall()
+        state = s.state_at(wall)
+        resume = s.next_change(wall)
+        with self.live.lock:
+            self.live.scheduled_pause = True
+            self.live.pause_since_epoch = wall
+            self.live.resume_epoch = resume
+        log.info("recording paused by the schedule (%s); resumes %s", state.period or state.source,
+                 iso_utc(resume) if resume else "never (no start scheduled)")
+        try:
+            self.ledger.add_event("audit", "schedule", "schedule_pause", "Recording paused by the recording schedule",
+                                  {"period": state.period, "decided_by": state.source,
+                                   "resume_utc": iso_utc(resume) if resume else None,
+                                   "timezone": s.cfg.timezone})
+        except Exception:
+            log.exception("could not record schedule_pause event")
+        next_refresh = self.clock.mono() + 60.0
+        while not self.stop_event.is_set() and self._schedule_says_pause():
+            if self.clock.mono() >= next_refresh:   # a clock change may move the resume time
+                next_refresh = self.clock.mono() + 60.0
+                resume = s.next_change(self.clock.wall())
+                with self.live.lock:
+                    self.live.resume_epoch = resume
+            self._tick()
+            self.stop_event.wait(self.cfg.service.poll_interval_s)
+        with self.live.lock:
+            self.live.scheduled_pause = False
+            self.live.resume_epoch = None
+            if not self.stop_event.is_set():
+                self.live.resumed_mono = self.clock.mono()
+        if self.stop_event.is_set():
+            return
+        log.info("recording schedule says record; resuming")
+        try:
+            self.ledger.add_event("audit", "schedule", "schedule_resume", "Recording resumed by the recording schedule",
+                                  {"paused_since_utc": iso_utc(wall)})
+        except Exception:
+            log.exception("could not record schedule_resume event")
 
     # ------------------------------------------------------------------ one FFmpeg lifetime
     def run_once(self) -> RunOutcome:
@@ -318,6 +383,12 @@ class RecordingSupervisor:
                     reason = RunEndReason.GRACEFUL_STOP
                     self._stop_ffmpeg(proc, graceful=True)
                     break
+                if self._schedule_says_pause():
+                    # Planned pause: close the current file normally (same as a graceful stop).
+                    reason = RunEndReason.SCHEDULED_PAUSE
+                    log.info("run %s: recording schedule says pause; stopping recording cleanly", run_id)
+                    self._stop_ffmpeg(proc, graceful=True)
+                    break
 
                 # Wall and monotonic read back to back (``now`` is ~a whole loop iteration old):
                 # loop latency must not masquerade as clock drift.
@@ -419,7 +490,7 @@ class RecordingSupervisor:
         # During a long outage every retry is a run with no media; the open gap's attempt
         # counter records those, so they do not each need an event (days of retries).
         if media_s > 0 or segs or self.ledger.open_gap(self.cfg.camera.id) is None:
-            level = "info" if reason is RunEndReason.GRACEFUL_STOP else "warning"
+            level = "info" if reason in (RunEndReason.GRACEFUL_STOP, RunEndReason.SCHEDULED_PAUSE) else "warning"
             self.ledger.add_event(level, "recorder", f"run_end_{reason}", f"Recording run ended: {reason}",
                                   {"run_id": run_id, "exit_code": exit_code, "last_message": last_line,
                                    "media_seconds": media_s})

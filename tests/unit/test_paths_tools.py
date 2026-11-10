@@ -12,6 +12,15 @@ from sentinel import paths
 from sentinel.config import load_config_dict
 
 
+@pytest.fixture(autouse=True)
+def _default_tool_resolution(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests check how the program finds FFmpeg by itself; the suite-wide test override
+    (SENTINEL_TEST_TOOLS_DIR, used to run everything with the build to be shipped) must not apply."""
+    import conftest
+
+    monkeypatch.setattr(conftest, "TEST_TOOLS_DIR", None)
+
+
 def _bundle(app: Path, *names: str, platform: str = sys.platform) -> None:
     (app / "ffmpeg").mkdir(parents=True, exist_ok=True)
     for n in names:

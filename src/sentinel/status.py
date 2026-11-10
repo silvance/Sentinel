@@ -49,6 +49,8 @@ class Measurements:
     ledger_altered: bool = False                # recording-log hash chain check failed (ledgerchain)
     ledger_unprotected: bool = False            # chain entries could not be written (system fault)
     simulated: bool = False
+    scheduled_pause: bool = False               # the recording schedule says pause (planned; P-001)
+    resumed_s: float | None = None              # seconds since a scheduled pause ended (reconnect grace)
 
 
 @dataclass
@@ -111,12 +113,19 @@ def evaluate(m: Measurements, stall_timeout_s: float, segment_seconds: float, co
         alerts.insert(0, make_alert("Z-001", Severity.WARNING))
 
     starting = False
+    paused = False
     fatal = bool(m.component_errors) or bool(m.storage_error)
     if flowing and not sealing_ok:
         alerts.append(make_alert("R-005", Severity.CRITICAL))
+    elif m.scheduled_pause and not flowing and not fatal:
+        # Planned: no outage alert and no escalation. The recorder fills in the resume time.
+        paused = True
+        alerts.append(make_alert("P-001", Severity.NOTICE))
     elif not flowing and not fatal and m.storage_level is not StorageLevel.CRITICAL:
         in_grace = ((m.now_mono - m.service_started_mono) < connect_timeout_s and not m.in_backoff
                     and m.attempts <= 1)
+        # Reconnecting after a scheduled pause gets the same grace as a fresh start.
+        in_grace = in_grace or (m.resumed_s is not None and m.resumed_s < connect_timeout_s and not m.in_backoff)
         if in_grace:
             starting = True
         else:
@@ -129,8 +138,10 @@ def evaluate(m: Measurements, stall_timeout_s: float, segment_seconds: float, co
 
     if fatal:
         overall = OverallStatus.ERROR
-    elif m.storage_level is StorageLevel.CRITICAL:
+    elif m.storage_level is StorageLevel.CRITICAL and not paused:
         overall = OverallStatus.STORAGE_FULL
+    elif paused:
+        overall = OverallStatus.PAUSED
     elif flowing and sealing_ok:
         overall = OverallStatus.STORAGE_WARNING if m.storage_level is StorageLevel.WARNING else OverallStatus.RECORDING
     elif flowing:
@@ -177,6 +188,8 @@ class StatusDocument:
     terminal: bool = False
     archive: dict[str, Any] = field(default_factory=dict)  # archive-drive copy (sentinel.archive); empty if disabled
     retention: dict[str, Any] = field(default_factory=dict)  # local retention (sentinel.retention): oldest kept, last pass
+    schedule: dict[str, Any] = field(default_factory=dict)   # recording schedule: enabled, paused, resume time
+    power: dict[str, Any] = field(default_factory=dict)      # keep-awake and power-plan check (sentinel.power)
 
 
 def fatal_status_document(code: str, camera_id: str, service: dict[str, Any] | None = None,

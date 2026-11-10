@@ -20,13 +20,16 @@ Linux or against the real camera. See [docs/PHASE2_REPORT.md](docs/PHASE2_REPORT
 Review-drive export, continuous archive drive with swap workflow, drive detection with a guarded
 erase-and-set-up tool (switched off until a supervised dock test), Windows service with
 DPAPI-protected credentials, operator status screen (light/dark), tamper-evident ledger,
-multi-day time accuracy, local retention (switched off until an administrator enables it), and a
-click-to-run packaging build. Full suite on the merged code: 1003 passed (Windows 11,
+multi-day time accuracy, local retention (on in deployed configurations: archived footage on a
+removed archive drive is cleared from this computer when it runs low), and a
+click-to-run packaging build. Since then (2026-11-10): a recording schedule (pause/resume at set days and
+times, P-001), keep-awake and power settings for an unattended laptop (H-001), and a "Lock this computer"
+button (docs/branches/schedule-and-unattended.md). Full suite on the merged code: 1003 passed (Windows 11,
 FFmpeg 9.0.1, simulated camera).
 
 ## Not yet done
 Anything on the real camera, real removable drives, an administrator service install, Linux
-(except a WSL build), Python 3.12, or an LGPL FFmpeg build; the operator screen cannot yet start
+(except a WSL build), or Python 3.12; the operator screen cannot yet start
 an export (needs a request interface to the service).
 
 ## Click-to-run program (branch design/single-executable)
@@ -35,7 +38,7 @@ first start (technician questions), starts the recorder in the background and sh
 status. Build: `packaging\windows\build.ps1 -FfmpegDir <dir>` (Linux: `packaging/linux/build.sh`).
 From source the same launcher is `python -m sentinel.launcher`. See
 [docs/08](docs/08_PACKAGING.md). Owner decision: releases bundle an **LGPL** FFmpeg; the build
-script refuses GPL/nonfree builds (docs/08 §8). No LGPL build has been obtained or tested yet.
+script refuses GPL/nonfree builds (docs/08 §8). The LGPL build in use: BtbN FFmpeg 9.0.2 (docs/08 §8.6).
 
 ## Developer quick start (Windows or Linux)
 Requires Python ≥ 3.12 and FFmpeg/FFprobe ≥ 6.0 on PATH.

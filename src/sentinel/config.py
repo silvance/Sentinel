@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 import shutil
 import tomllib
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .drives.policy import DrivePolicy, DrivePolicyError, load_policy
 from .paths import TOOL_NAMES, absolute_tool, default_storage_dirs, default_tool
+from .schedule import ScheduleConfig, ScheduleError, parse_schedule
 
 
 LEDGER_SNAPSHOT_NAME = "ledger-snapshot.db"   # operator-readable ledger copy in [storage] status_dir
@@ -175,6 +176,7 @@ class AppConfig:
     drives: DrivePolicy = field(default_factory=DrivePolicy)   # [drives]; validated by sentinel.drives.policy
     archive: ArchiveConfig = field(default_factory=ArchiveConfig)
     retention: RetentionConfig = field(default_factory=RetentionConfig)
+    schedule: ScheduleConfig = field(default_factory=ScheduleConfig)   # [schedule] (sentinel.schedule); off by default
 
     @property
     def spool_path(self) -> Path:
@@ -341,7 +343,7 @@ def _build_drives(raw: Any) -> DrivePolicy:
 def load_config_dict(raw: dict[str, Any], base_dir: Path | None = None, source: str | None = None) -> AppConfig:
     base_dir = base_dir or Path.cwd()
     unknown = sorted(set(raw) - {"camera", "recording", "storage", "tools", "service", "export", "drives",
-                                 "archive", "retention"})
+                                 "archive", "retention", "schedule"})
     if unknown:
         raise ConfigError(f"unknown section(s): {', '.join(unknown)}")
     if "camera" not in raw:
@@ -370,7 +372,11 @@ def load_config_dict(raw: dict[str, Any], base_dir: Path | None = None, source: 
         retention=_build(RetentionConfig, "retention", raw.get("retention"), base_dir),
     )
     _validate(cfg)
-    return cfg
+    try:
+        sched = parse_schedule(raw.get("schedule"), cfg.recording.display_timezone)
+    except ScheduleError as exc:
+        raise ConfigError(str(exc)) from None
+    return replace(cfg, schedule=sched)
 
 
 def load_config(path: str | Path) -> AppConfig:

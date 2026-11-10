@@ -91,6 +91,15 @@ the recorder status; A-009 capacity alert; only spool files deleted (archive dri
 * Linux: file deletion on ext4 and the systemd unit NOT EXECUTED.
 
 ## 7. Decision for the owner (required before enabling)
+**Decided 2026-11-10 (owner): ON at deployment.** The code default stays OFF; first-run setup
+(`sentinel.launcher.setup.build_config`) and `config/sentinel.example.toml` write
+`[archive] enabled = true` and `[retention] enabled = true` with the recommended settings below
+(`expected_swap_days = 5` for the 3–5 day swap cadence). Because retention only counts copies the
+archive process made, every deployment path now runs it: the Windows service install registers
+`SentinelArchive` next to `SentinelRecorder` when `[archive]` is enabled, and the click-to-run
+launcher starts `Sentinel.exe archive run` in the background when no service runs it
+(`tests/unit/test_deployment_retention.py`). Original question, kept for the record:
+
 Enable `[retention]`? Recommended settings if yes: `enabled = true`, `min_verified_copies = 1`
 (2 if a second archive drive set is rotated), `require_removed_drive = true` (the copy relied on has
 physically left the machine), `keep_recent_hours = 24`, floor = storage warning threshold. Without
@@ -99,5 +108,5 @@ L-001 warns ahead of that. Risks: a removed archive drive that is later lost or 
 only copy (mitigate with `min_verified_copies = 2`); deletion is irreversible.
 
 ## 8. Recommendation
-**Merge after** `design/archive-drive`, with retention left OFF until the owner decides (§7). The
+**Merge after** `design/archive-drive` (merged). Retention ON in deployed configurations since the owner decision (§7). The
 code paths are covered by unit tests with real file deletion on temp folders; no real disk-full.

@@ -201,6 +201,7 @@ class MainWindow(QMainWindow):
         d.exports.connect(self.show_exports)
         d.admin.connect(self.show_admin)
         d.appearance_selected.connect(self.set_appearance)
+        d.lock_computer.connect(self.lock_computer)
         d.save_report.connect(lambda: self.save_report(None))
         d.save_report_elsewhere.connect(self.save_report_elsewhere)
         self.timeline_page.back.connect(self.show_dashboard)
@@ -210,6 +211,19 @@ class MainWindow(QMainWindow):
         self.admin_page.lock.connect(self.show_dashboard)
         self.admin_page.refresh_requested.connect(self.refresh_admin)
         self.admin_page.save_report.connect(lambda: self.save_report(None))
+
+    # ------------------------------------------------------------------ lock
+    def lock_computer(self) -> None:
+        """Minimise this window and lock Windows (recording continues: the recorder is a service).
+        Minimised first, so the status is not the first thing seen after the next sign-in."""
+        self.showMinimized()
+        if not self._lock_workstation():
+            self.showNormal()
+
+    def _lock_workstation(self) -> bool:     # seam for tests (never lock the test machine)
+        from ..power import lock_workstation
+
+        return lock_workstation()
 
     # ------------------------------------------------------------------ appearance
     def set_appearance(self, mode: str) -> None:

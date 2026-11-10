@@ -176,6 +176,7 @@ HEADLINES: dict[str, tuple[str, Tone]] = {
     str(OverallStatus.STORAGE_FULL): ("Recording stopped", Tone.CRITICAL),
     str(OverallStatus.ERROR): ("System error", Tone.CRITICAL),
     str(OverallStatus.STOPPED): ("Not recording", Tone.CRITICAL),
+    str(OverallStatus.PAUSED): ("Paused by schedule", Tone.INFO),
 }
 UNKNOWN_HEADLINE = ("System error", Tone.CRITICAL)
 RECORDING_STATES = {str(OverallStatus.RECORDING), str(OverallStatus.STORAGE_WARNING)}
@@ -280,6 +281,8 @@ def _camera_tile(doc: dict[str, Any] | None, stale: bool, top: AlertView | None,
     # camera without evidence: the recorder simply is not reading from it.
     if overall == str(OverallStatus.STORAGE_FULL):
         return TileView("Camera", "Not in use", Tone.NEUTRAL, "Recording is stopped because storage is full.", saved)
+    if overall == str(OverallStatus.PAUSED):
+        return TileView("Camera", "Not in use", Tone.NEUTRAL, "Recording is paused by the recording schedule.", saved)
     if overall == str(OverallStatus.ERROR):
         return TileView("Camera", "Not in use", Tone.NEUTRAL, "Recording is stopped by a system error.", saved)
     tone = Tone.CRITICAL if top and top.severity >= Severity.CRITICAL else Tone.WARNING

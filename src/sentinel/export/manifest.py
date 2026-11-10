@@ -34,6 +34,7 @@ GAP_REASONS = {
     "launch_failed": "The recording program could not start",
     "timeline_discontinuity": "Video from the camera was lost",
     "internal_error": "Recording software problem",
+    "scheduled_pause": "Recording was paused by the recording schedule (planned)",
     "timestamp_discontinuity": "The camera video paused inside a recording file",
     "timestamp_discontinuity_at_boundary": "The camera video paused between two recording files",
     "source_discontinuity_absorbed": "The camera video paused",

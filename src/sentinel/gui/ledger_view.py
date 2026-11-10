@@ -37,6 +37,7 @@ GAP_REASON_WORDS: dict[str, str] = {
     "launch_failed": "recording could not start",
     "timeline_discontinuity": "camera video froze",
     "internal_error": "recording software problem",
+    "scheduled_pause": "paused by the recording schedule (planned)",
     "source_discontinuity_absorbed": "camera video froze",
     "timestamp_discontinuity": "break in the camera video",
     "timestamp_discontinuity_at_boundary": "break in the camera video",

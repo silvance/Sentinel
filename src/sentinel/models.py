@@ -36,6 +36,7 @@ class RunEndReason(StrEnum):
     LAUNCH_FAILED = "launch_failed"          # could not start FFmpeg at all
     TIMELINE_DISCONTINUITY = "timeline_discontinuity"  # stream time fell behind real time (lost footage)
     INTERNAL_ERROR = "internal_error"        # unexpected recorder error; run closed and retried
+    SCHEDULED_PAUSE = "scheduled_pause"      # [schedule] says pause: run closed normally, resumes on schedule
 
 
 class OverallStatus(StrEnum):
@@ -46,6 +47,7 @@ class OverallStatus(StrEnum):
     STORAGE_FULL = "STORAGE_FULL"            # recording stopped to protect storage
     ERROR = "ERROR"                          # "System error"
     STOPPED = "STOPPED"                      # service shut down cleanly
+    PAUSED = "PAUSED"                        # not recording because the recording schedule says so (P-001)
 
 
 class CameraLink(StrEnum):

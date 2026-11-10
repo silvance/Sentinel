@@ -32,6 +32,11 @@ from typing import Any
 from ..platform.winacl import SID_ADMINISTRATORS, SID_SYSTEM, SID_USERS, service_sid
 from . import DESCRIPTION, DISPLAY_NAME, OPERATORS_GROUP, OPERATORS_GROUP_COMMENT, SERVICE_NAME
 
+# The archive-drive copy service (names shared with sentinel.archive.hosting, checked by a unit test).
+ARCHIVE_SERVICE_NAME = "SentinelArchive"
+ARCHIVE_DISPLAY_NAME = "Sentinel archive-drive copy"
+ARCHIVE_DESCRIPTION = "Copies finished recordings to the archive drive and checks every copy. Never deletes recordings."
+
 # Restart after 5 s, then 30 s, then every 60 s. The SCM repeats the LAST action for every
 # further failure ("Subsequent failures" in services.msc), so it never gives up. The failure
 # counter resets after a day without failures.
@@ -210,6 +215,12 @@ class InstallInputs:
     status_dir: Path | None = None       # operator-readable folder ([storage] status_dir); required
     status_readers: str = "group"        # "group" (local group Sentinel Operators) | "users" (BUILTIN\Users)
     time_server: str | None = None       # local NTP server for W32Time (validated); None = keep Windows' source
+    # [archive] enabled (deployed default since 2026-11-10): also install SentinelArchive, the
+    # archive-drive copy, with the same service host (``--program archive``). None = recorder only.
+    archive_host: HostCommand | None = None
+    # Owner request 2026-11-10: an unattended laptop must not go to sleep (sentinel.power). False only
+    # with ``install --keep-power-settings``.
+    power_settings: bool = True
 
 
 def install_plan(inp: InstallInputs, forbidden: Iterable[str] | None = None) -> list[Step]:
@@ -272,9 +283,56 @@ def install_plan(inp: InstallInputs, forbidden: Iterable[str] | None = None) -> 
     if inp.credentials_path is not None:
         steps.append(Step("Camera credentials file: Administrators and the service account only",
                           secret_file_acl_argv(inp.credentials_path, sid)))
+    if inp.archive_host is not None:
+        steps += archive_service_steps(inp, cfg_dir)
     steps += time_service_steps(inp.time_server)
+    if inp.power_settings:
+        from ..power import power_setting_commands
+
+        steps += [Step(f"Power: {d}", argv, may_fail=mf) for d, argv, mf in power_setting_commands()]
     if inp.start:
         steps.append(Step("Start the service now", ("sc.exe", "start", name)))
+        if inp.archive_host is not None:
+            steps.append(Step("Start the archive-drive copy service now", ("sc.exe", "start", ARCHIVE_SERVICE_NAME)))
+    return steps
+
+
+def archive_service_steps(inp: InstallInputs, cfg_dir: Path) -> list[Step]:
+    """SentinelArchive (``sentinel.archive.hosting``): registered like the recorder (own virtual
+    account and SID, restart forever, one privilege), delayed automatic start so the recorder comes
+    first. Folder grants come AFTER the recorder's folder restriction steps, which replace the ACLs:
+    read the spool, modify data (ledger, archive status) and logs, read the configuration.
+    Copying to an archive drive also needs write access there for this account; drives are
+    prepared by Sentinel as NTFS (NOT VERIFIED on the target machine, docs/02)."""
+    if inp.archive_host is None:
+        raise PlanError("archive service requested without its service host command")
+    name = ARCHIVE_SERVICE_NAME
+    account = f"NT SERVICE\\{name}"
+    asid = _sid(service_sid(name))
+    spool, data, logs = (str(d) for d in inp.data_dirs)
+    steps = [
+        Step(f"Register the archive-drive copy service {name} (delayed automatic start, virtual account {account})",
+             ("sc.exe", "create", name, "binPath=", inp.archive_host.command_line, "start=", "delayed-auto",
+              "obj=", account, "DisplayName=", ARCHIVE_DISPLAY_NAME)),
+        Step("Describe the archive-drive copy service", ("sc.exe", "description", name, ARCHIVE_DESCRIPTION)),
+        Step("Archive copy: restart after every failure, forever",
+             ("sc.exe", "failure", name, "reset=", str(FAILURE_RESET_S), "actions=", FAILURE_ACTIONS)),
+        Step("Archive copy: treat a non-zero exit as a failure", ("sc.exe", "failureflag", name, "1")),
+        Step("Archive copy: own security identifier", ("sc.exe", "sidtype", name, "unrestricted")),
+        Step("Archive copy: remove privileges it does not need", ("sc.exe", "privs", name, REQUIRED_PRIVILEGES)),
+    ]
+    if inp.archive_host.environment:
+        steps.append(Step("Archive copy: Python search path of this source installation",
+                          action="set_service_environment",
+                          params={"service": name, "entries": list(inp.archive_host.environment)}))
+    steps += [
+        Step(f"Archive copy may read the recordings in {spool}", ("icacls", spool, "/grant", f"{asid}:(OI)(CI)RX", "/Q")),
+        Step(f"Archive copy may update {data} (recording log, archive status)",
+             ("icacls", data, "/grant", f"{asid}:(OI)(CI)M", "/Q")),
+        Step(f"Archive copy may write its log in {logs}", ("icacls", logs, "/grant", f"{asid}:(OI)(CI)M", "/Q")),
+        Step(f"Archive copy may read the configuration folder {cfg_dir}",
+             ("icacls", str(cfg_dir), "/grant", f"{asid}:(OI)(CI)RX", "/Q")),
+    ]
     return steps
 
 
@@ -327,10 +385,18 @@ def time_service_steps(time_server: str | None) -> list[Step]:
     return steps
 
 
-def uninstall_plan(service_name: str = SERVICE_NAME) -> list[Step]:
+def uninstall_plan(service_name: str = SERVICE_NAME, archive: bool = False) -> list[Step]:
     """Removes the service registration only. Recordings, the ledger, logs, configuration,
-    credentials and folder permissions are deliberately left untouched."""
-    return [
+    credentials and folder permissions are deliberately left untouched. ``archive``: also remove
+    SentinelArchive (installed when [archive] is enabled)."""
+    pre = [
+        Step("Stop the archive-drive copy service", ("sc.exe", "stop", ARCHIVE_SERVICE_NAME), may_fail=True),
+        Step("Wait until it has stopped (up to 3 minutes)", action="wait_stopped",
+             params={"service": ARCHIVE_SERVICE_NAME, "timeout_s": 180}),
+        Step("Remove the archive-drive copy service registration (copies are NOT deleted)",
+             ("sc.exe", "delete", ARCHIVE_SERVICE_NAME)),
+    ] if archive else []
+    return pre + [
         Step("Stop the service (finalises the current segment)", ("sc.exe", "stop", service_name), may_fail=True),
         Step("Wait until it has stopped (up to 3 minutes)", action="wait_stopped",
              params={"service": service_name, "timeout_s": 180}),

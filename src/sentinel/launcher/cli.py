@@ -8,8 +8,9 @@ Technician / support commands (same executable):
 
     Sentinel.exe setup [--force] [--config FILE]       first-run setup questions
     Sentinel.exe recorder run [--config FILE]          run the recorder in this window
+    Sentinel.exe archive run|swap|resume|status|designate ... --config FILE   archive-drive copy
     Sentinel.exe stop [--timeout S] [--config FILE]    graceful stop of the background recorder
-    Sentinel.exe status [--json] | check-config | diagnostics [--out DIR]
+    Sentinel.exe status [--json] | check-config | diagnostics [--out DIR] | schedule [--days N]
     Sentinel.exe about [--verify]                      version, paths, bundled tools, build manifest
 
 The launcher never stops recording on its own and closing its window has no effect on the
@@ -43,7 +44,7 @@ from .view import alert_banner, select_view, set_console_title
 log = logging.getLogger("sentinel.launcher")
 
 EXIT_OK, EXIT_CONFIG, EXIT_LOCKED, EXIT_RUNTIME = 0, 2, 3, 4
-FORWARDED = ("status", "check-config", "diagnostics")
+FORWARDED = ("status", "check-config", "diagnostics", "schedule")
 
 
 def _interactive() -> bool:
@@ -162,6 +163,8 @@ def cmd_launch(args: argparse.Namespace) -> int:
                 log.info("start via %s: ok=%s %s", control.name, result.ok, result.detail)
                 if not result.ok:
                     start_problem = result.code
+            if not args.no_start and hasattr(control, "start_archive"):
+                control.start_archive()   # [archive] enabled (deployed default); no-op when it already runs
         finally:
             launcher_lock.close()
     view = select_view()
@@ -338,6 +341,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("setup", "first-run setup (technician)")
     p.add_argument("--force", action="store_true", help="replace an existing configuration (kept as .bak)")
     p.add_argument("--simulated-camera", metavar="URL", help=argparse.SUPPRESS)  # developer use only
+    arc = sub.add_parser("archive", help="archive-drive copy commands (run, swap, resume, status, designate, ...)")
+    arc.add_argument("archive_args", nargs=argparse.REMAINDER)
     rec = sub.add_parser("recorder", help="recorder process commands")
     rec_sub = rec.add_subparsers(dest="recorder_cmd", required=True)
     run = rec_sub.add_parser("run", help="run the recorder in the foreground")
@@ -347,6 +352,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("status", "print the recorder status banner")
     p.add_argument("--json", action="store_true")
     add("check-config", "validate the configuration and tools")
+    p = add("schedule", "show when the recording schedule records and pauses (technician)")
+    p.add_argument("--days", type=int, default=14)
     p = add("diagnostics", "write a diagnostic report for support")
     p.add_argument("--out")
     p = add("about", "version, folders, bundled tools and build manifest")
@@ -363,6 +370,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_setup(args)
     if args.cmd == "recorder":
         return cmd_recorder_run(args)
+    if args.cmd == "archive":
+        from ..archive.__main__ import main as archive_main
+
+        return archive_main(list(args.archive_args))
     if args.cmd == "stop":
         return cmd_stop(args)
     if args.cmd == "about":
@@ -372,6 +383,8 @@ def main(argv: list[str] | None = None) -> int:
         extra.append("--json")
     if args.cmd == "diagnostics" and args.out:
         extra += ["--out", args.out]
+    if args.cmd == "schedule":
+        extra += ["--days", str(args.days)]
     return cmd_forward(args, extra)
 
 

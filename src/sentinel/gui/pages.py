@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 import time
 from zoneinfo import ZoneInfo
 
@@ -64,6 +65,7 @@ class DashboardPage(QWidget):
     save_report = Signal()
     save_report_elsewhere = Signal()
     appearance_selected = Signal(str)
+    lock_computer = Signal()
 
     def __init__(self, palette: Palette, tz_text: str, appearance: str = "auto",
                  parent: QWidget | None = None) -> None:
@@ -131,6 +133,17 @@ class DashboardPage(QWidget):
             lambda i: self.appearance_selected.emit(str(self.appearance.itemData(i))))
         foot.addWidget(self.appearance)
         foot.addSpacing(12)
+        # Leaving the computer unattended (e.g. in a closet): lock Windows; the recorder is a service
+        # and keeps recording while the computer is locked (sentinel.power).
+        self.btn_lock = QPushButton("Lock this computer")
+        self.btn_lock.setObjectName("link")
+        self.btn_lock.setToolTip("Locks Windows, like Windows key + L. Recording continues while the computer is "
+                                 "locked; the Windows password is needed to see this screen again.")
+        self.btn_lock.setAccessibleDescription("Recording continues while the computer is locked.")
+        self.btn_lock.clicked.connect(self.lock_computer)
+        self.btn_lock.setVisible(sys.platform == "win32")
+        foot.addWidget(self.btn_lock)
+        foot.addSpacing(12)
         self.btn_admin = QPushButton("Administrator")
         self.btn_admin.setObjectName("link")
         self.btn_admin.setToolTip("Diagnostics for administrators (PIN required)")
@@ -144,7 +157,8 @@ class DashboardPage(QWidget):
         self.setTabOrder(self.btn_prepare, self.btn_timeline)
         self.setTabOrder(self.btn_timeline, self.btn_exports)
         self.setTabOrder(self.btn_exports, self.appearance)
-        self.setTabOrder(self.appearance, self.btn_admin)
+        self.setTabOrder(self.appearance, self.btn_lock)
+        self.setTabOrder(self.btn_lock, self.btn_admin)
 
     def set_appearance_value(self, mode: str) -> None:
         i = self.appearance.findData(mode)

@@ -11,7 +11,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from . import SERVICE_NAME
-from .commands import (InstallInputs, PlanError, Step, host_command, install_plan, render, secret_file_acl_argv,
+from .commands import (ARCHIVE_SERVICE_NAME, InstallInputs, PlanError, Step, host_command, install_plan, render, secret_file_acl_argv,
                        uninstall_plan)
 
 EXIT_OK, EXIT_FAILED, EXIT_USAGE, EXIT_NOT_ADMIN = 0, 1, 2, 5
@@ -138,7 +138,8 @@ def preflight(cfg_path: Path) -> tuple[InstallInputs | None, list[str], list[str
     errors += [f"code could be changed by a non-administrator: {p}" for p in code_write_problems(cfg, cfg_path, host)]
     inp = InstallInputs(cfg_path, (cfg.spool_path, cfg.data_path, cfg.log_path),
                         creds if creds is not None and creds.exists() else None, host,
-                        status_dir=cfg.status_dir_path if cfg.storage.status_dir else None)
+                        status_dir=cfg.status_dir_path if cfg.storage.status_dir else None,
+                        archive_host=host_command(cfg_path, program="archive") if cfg.archive.enabled else None)
     return inp, errors, warnings
 
 
@@ -173,7 +174,9 @@ def cmd_install(args: argparse.Namespace) -> int:
     try:
         steps = install_plan(InstallInputs(inp.config_path, inp.data_dirs, inp.credentials_path, inp.host,
                                            start=not args.no_start, status_dir=inp.status_dir,
-                                           status_readers=args.status_readers, time_server=args.time_server))
+                                           status_readers=args.status_readers, time_server=args.time_server,
+                                           archive_host=inp.archive_host,
+                                           power_settings=not args.keep_power_settings))
     except PlanError as exc:
         print(f"PROBLEM: {exc}")
         return EXIT_FAILED
@@ -190,21 +193,23 @@ def cmd_install(args: argparse.Namespace) -> int:
         print("Installation needs administrator rights. Open 'Command Prompt' with 'Run as administrator' "
               "and run this command again (nothing was changed).")
         return EXIT_NOT_ADMIN
-    if query_service(SERVICE_NAME) is not None:
-        print(f"The service {SERVICE_NAME} is already installed. Run 'uninstall' first to reinstall.")
-        return EXIT_FAILED
+    for name in (SERVICE_NAME, *((ARCHIVE_SERVICE_NAME,) if inp.archive_host is not None else ())):
+        if query_service(name) is not None:
+            print(f"The service {name} is already installed. Run 'uninstall' first to reinstall.")
+            return EXIT_FAILED
     ok = execute(steps)
     print("Installed." if ok else "Installation stopped at the failed step above.")
     return EXIT_OK if ok else EXIT_FAILED
 
 
 def cmd_uninstall(args: argparse.Namespace) -> int:
-    steps = uninstall_plan()
     if args.dry_run:
-        _print_plan(steps)
-        print("DRY RUN: nothing was changed.")
+        _print_plan(uninstall_plan(archive=True))
+        print("DRY RUN: nothing was changed. (The archive-drive copy steps run only if that service is installed.)")
         return EXIT_OK
     from .scm import is_admin, query_service
+
+    steps = uninstall_plan(archive=query_service(ARCHIVE_SERVICE_NAME) is not None)
 
     if query_service(SERVICE_NAME) is None:
         print(f"The service {SERVICE_NAME} is not installed.")
@@ -546,6 +551,9 @@ def main(argv: list[str] | None = None) -> int:
                         "owner decision) or, only if explicitly chosen, every local user")
     p.add_argument("--time-server", metavar="HOST",
                    help="local NTP server (host name or IPv4 address) for the Windows Time service")
+    p.add_argument("--keep-power-settings", action="store_true",
+                   help="do not change the power plan (default: never sleep or hibernate, lid closed = do "
+                        "nothing, screen off after a few minutes; an unattended laptop must not sleep)")
     p = sub.add_parser("uninstall", help="remove the service registration (recordings are kept)")
     p.add_argument("--dry-run", action="store_true")
     p = sub.add_parser("status", help="service, time synchronisation, permissions and recorder status")

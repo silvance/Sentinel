@@ -68,7 +68,7 @@ def wait_for(pred: Callable[[], T], timeout: float, interval: float = 0.25, what
 
 class Harness:
     def __init__(self, tmp: Path, url: str, clock: SystemClock | None = None, disk: FakeDisk | None = None,
-                 check_chain: bool = True, **sections: dict[str, Any]) -> None:
+                 check_chain: bool = True, power_check: bool = False, **sections: dict[str, Any]) -> None:
         self.tmp = tmp
         self.cfg: AppConfig = make_config(tmp, url, **sections)
         self.disk = disk
@@ -77,10 +77,15 @@ class Harness:
         # stopped). It has its own unit tests (tests/unit/test_w32tm.py); report it as unknown.
         platform = get_platform()
         platform.clock_synchronized = lambda: None  # type: ignore[method-assign]
+        # Likewise this machine's power plan (a laptop would show H-001); tested in test_power.py
+        # and test_schedule_service.py.
+        self._power_check = power_check
         # After every stop, the recording-log hash chain must verify: no fault scenario may
         # produce a false "log altered" finding. Tests that tamper on purpose pass False.
         self.check_chain = check_chain
         self.svc = RecorderService(self.cfg, platform=platform, clock=clock, disk_usage=disk)
+        if not power_check:
+            self.svc._check_power = lambda: None  # type: ignore[method-assign]
         self._thread: threading.Thread | None = None
         self.exit_code: int | None = None
 
