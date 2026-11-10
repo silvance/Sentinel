@@ -163,6 +163,7 @@ class StatusDocument:
     last_segment: dict[str, Any] | None = None
     open_gap: dict[str, Any] | None = None
     schema: int = STATUS_SCHEMA
+    archive: dict[str, Any] = field(default_factory=dict)  # archive-drive copy (sentinel.archive); empty if disabled
 
 
 def apply_alerts(doc: StatusDocument, alerts: list[Alert]) -> None:

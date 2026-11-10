@@ -102,6 +102,25 @@ class ExportConfig:
 
 
 @dataclass(frozen=True)
+class ArchiveConfig:
+    """Continuous copy of sealed recordings to an attached archive drive (S1, docs/04 §2-3).
+    Runs as its own process (``python -m sentinel.archive run``); see sentinel/archive/."""
+    enabled: bool = False
+    drive_path: str = ""                      # mounted folder of the archive drive, e.g. "E:\\" or a mount point
+    require_drive_marker: bool = True         # only drives prepared by Sentinel (SENTINEL_DRIVE.json with drive_uuid)
+    resume_policy: str = "this_drive"         # this_drive | any_drive: what counts as "already archived"
+    chunk_mib: int = 8                        # copy chunk size
+    fsync_every_mib: int = 64                 # flush to the drive at least this often while copying
+    max_rate_mb_s: float = 40.0               # throttle (MB/s, 10^6 bytes) for reading local recordings
+    reserve_free_mb: float = 1024.0           # never fill the drive beyond this (room for the index)
+    index_every_s: float = 3600.0             # rewrite the drive index after this much footage (and on swap)
+    backlog_alert_hours: float = 24.0         # "not yet archived" beyond this => critical alert A-004
+    poll_interval_s: float = 5.0              # how often to look for a drive / new recordings when idle
+    swap_max_wait_s: float = 120.0            # on swap, finish the file in flight if it takes no longer than this
+    verify_attempts: int = 3                  # read-back failures per file before alerting and skipping it
+
+
+@dataclass(frozen=True)
 class AppConfig:
     camera: CameraConfig
     recording: RecordingConfig
@@ -110,6 +129,7 @@ class AppConfig:
     service: ServiceConfig = field(default_factory=ServiceConfig)
     export: ExportConfig = field(default_factory=ExportConfig)
     source_path: str | None = None
+    archive: ArchiveConfig = field(default_factory=ArchiveConfig)
 
     @property
     def spool_path(self) -> Path:
@@ -153,6 +173,9 @@ def _build(cls: type, section: str, raw: dict[str, Any] | None, base_dir: Path) 
                 raise ConfigError(f"[storage] {key} is required")
             p = Path(kwargs[key])
             kwargs[key] = str(p if p.is_absolute() else (base_dir / p).resolve())
+    if cls is ArchiveConfig and kwargs.get("drive_path"):
+        p = Path(kwargs["drive_path"])
+        kwargs["drive_path"] = str(p if p.is_absolute() else (base_dir / p).resolve())
     try:
         return cls(**kwargs)
     except TypeError as exc:  # missing required field
@@ -213,11 +236,25 @@ def _validate(cfg: AppConfig) -> None:
         raise ConfigError("[export] content_check must be 'full', 'sampled' or 'deferred'")
     if ex.sample_edge_frames < 1 or ex.sample_spans < 0 or ex.sample_span_frames < 1:
         raise ConfigError("[export] sample_edge_frames and sample_span_frames must be >= 1, sample_spans >= 0")
+    arc = cfg.archive
+    if arc.enabled and not arc.drive_path:
+        raise ConfigError("[archive] drive_path is required when enabled = true")
+    if arc.resume_policy not in ("this_drive", "any_drive"):
+        raise ConfigError("[archive] resume_policy must be 'this_drive' or 'any_drive'")
+    if not 1 <= arc.chunk_mib <= 64 or arc.fsync_every_mib < arc.chunk_mib:
+        raise ConfigError("[archive] require 1 <= chunk_mib <= 64 and fsync_every_mib >= chunk_mib")
+    if arc.verify_attempts < 1:
+        raise ConfigError("[archive] verify_attempts must be at least 1")
+    for name in ("max_rate_mb_s", "index_every_s", "backlog_alert_hours", "poll_interval_s", "swap_max_wait_s"):
+        if getattr(arc, name) <= 0:
+            raise ConfigError(f"[archive] {name} must be positive")
+    if arc.reserve_free_mb < 0:
+        raise ConfigError("[archive] reserve_free_mb must not be negative")
 
 
 def load_config_dict(raw: dict[str, Any], base_dir: Path | None = None, source: str | None = None) -> AppConfig:
     base_dir = base_dir or Path.cwd()
-    unknown = sorted(set(raw) - {"camera", "recording", "storage", "tools", "service", "export"})
+    unknown = sorted(set(raw) - {"camera", "recording", "storage", "tools", "service", "export", "archive"})
     if unknown:
         raise ConfigError(f"unknown section(s): {', '.join(unknown)}")
     if "camera" not in raw or "storage" not in raw:
@@ -230,6 +267,7 @@ def load_config_dict(raw: dict[str, Any], base_dir: Path | None = None, source: 
         service=_build(ServiceConfig, "service", raw.get("service"), base_dir),
         export=_build(ExportConfig, "export", raw.get("export"), base_dir),
         source_path=source,
+        archive=_build(ArchiveConfig, "archive", raw.get("archive"), base_dir),
     )
     _validate(cfg)
     return cfg

@@ -215,6 +215,39 @@ CREATE TABLE IF NOT EXISTS export_items (
 CREATE INDEX IF NOT EXISTS ix_export_items_seg ON export_items(segment_id, state);
 """
 
+# ---------------------------------------------------------------------------------------------
+# Phase 3: continuous archive-drive copies (docs/04 §2-3, requirement S1). Owned by
+# ``sentinel.archive.ledger``. A row exists ONLY for a copy that was read back from the archive
+# drive and matched the sealed hash: unverified / in-flight copies are never recorded.
+ARCHIVE_DDL = """
+CREATE TABLE IF NOT EXISTS archive_copies (
+    copy_id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    segment_id        TEXT NOT NULL REFERENCES segments(segment_id),
+    drive_id          TEXT NOT NULL REFERENCES drives(drive_id), -- stable drive key ("drive_uuid:<uuid>" when prepared)
+    kind              TEXT NOT NULL,          -- original | quarantine | framehash
+    path              TEXT NOT NULL,          -- relative to the drive root, forward slashes
+    sha256            TEXT NOT NULL,          -- measured by cache-bypassing read-back; equals the sealed hash
+    size_bytes        INTEGER NOT NULL,
+    verify_method     TEXT NOT NULL,
+    already_present   INTEGER NOT NULL DEFAULT 0,  -- 1: file found on the drive and re-verified, not copied
+    verified_utc      TEXT NOT NULL,
+    UNIQUE (segment_id, drive_id, kind),
+    UNIQUE (drive_id, path)
+);
+CREATE INDEX IF NOT EXISTS ix_archive_copies_seg ON archive_copies(segment_id, kind);
+
+CREATE TABLE IF NOT EXISTS archive_indexes (       -- every Sentinel/INDEX/ generation written to a drive
+    drive_id          TEXT NOT NULL REFERENCES drives(drive_id),
+    generation        INTEGER NOT NULL,
+    generated_utc     TEXT NOT NULL,
+    reason            TEXT NOT NULL,          -- attach | hourly | swap | idle
+    copies            INTEGER NOT NULL,       -- archive_copies rows described
+    json_sha256       TEXT NOT NULL,
+    sums_sha256       TEXT NOT NULL,
+    PRIMARY KEY (drive_id, generation)
+);
+"""
+
 # Columns that may be written once (NULL -> value) on a sealed segment, never changed after.
 WRITE_ONCE = frozenset({
     "sha256", "size_bytes", "rel_path", "start_utc", "end_utc", "duration_s",
@@ -291,6 +324,7 @@ class Ledger:
         with self._lock:
             self._conn.executescript(DDL)
             self._conn.executescript(EXPORT_DDL)
+            self._conn.executescript(ARCHIVE_DDL)
             row = self._conn.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()
             if row is None:
                 self._conn.execute("INSERT INTO schema_meta(key, value) VALUES ('schema_version', ?)",

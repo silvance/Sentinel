@@ -223,21 +223,34 @@ class TargetIO:
     def _write(self, fh: object, data: bytes) -> None:
         fh.write(data)  # type: ignore[attr-defined]
 
-    def write_new(self, dest: Path, chunks: Iterable[bytes], expected_sha256: str | None = None) -> tuple[str, int]:
+    def _fsync(self, fh: object) -> None:
+        """Periodic flush during write_new (separate so tests can count / fail it)."""
+        os.fsync(fh.fileno())  # type: ignore[attr-defined]
+
+    def write_new(self, dest: Path, chunks: Iterable[bytes], expected_sha256: str | None = None,
+                  fsync_every: int | None = None) -> tuple[str, int]:
         """Write ``chunks`` as ``dest`` via .partial/fsync/no-replace rename. Returns (sha256 of
         the bytes written, size). Raises FileExistsError if ``dest`` already exists, and
-        :class:`SourceMismatch` (nothing renamed) if the bytes do not hash to ``expected_sha256``."""
+        :class:`SourceMismatch` (nothing renamed) if the bytes do not hash to ``expected_sha256``.
+        ``fsync_every``: additionally flush to the device after at least this many bytes (the
+        archive copier uses it so a slow drive never holds a large amount of dirty cache)."""
         self.makedirs(dest.parent)
         tmp = partial_path(dest)
         self.discard_partial(dest)
         h = hashlib.sha256()
         n = 0
+        unsynced = 0
         try:
             with open(tmp, "xb") as fh:
                 for c in chunks:
                     self._write(fh, c)
                     h.update(c)
                     n += len(c)
+                    unsynced += len(c)
+                    if fsync_every and unsynced >= fsync_every:
+                        fh.flush()
+                        self._fsync(fh)
+                        unsynced = 0
                 fh.flush()
                 os.fsync(fh.fileno())
             if expected_sha256 is not None and h.hexdigest() != expected_sha256:

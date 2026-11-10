@@ -379,7 +379,17 @@ class RecorderService:
                      "uptime_s": round(now - self._started_mono, 1), "simulated_camera": cfg.camera.development_source,
                      "clock_synchronized": self._ntp},
             recording=live_d, storage=storage_d, integrity=integrity_d, last_segment=last_seg, open_gap=gap)
-        apply_alerts(doc, d.alerts)
+        alerts = list(d.alerts)
+        if cfg.archive.enabled:  # archive-drive copy runs in its own process; show its state and A-0xx alerts here
+            try:
+                from .archive.status import recorder_view
+
+                doc.archive, archive_alerts = recorder_view(cfg.data_path, cfg.archive.poll_interval_s)
+                alerts = sorted(alerts + archive_alerts, key=lambda a: -a.severity)
+                doc.messages = doc.messages + [a.message for a in archive_alerts]
+            except Exception:
+                log.exception("could not read archive status")
+        apply_alerts(doc, alerts)
         return doc
 
     def request_stop(self, *_: object) -> None:
