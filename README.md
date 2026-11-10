@@ -16,9 +16,18 @@ Linux or against the real camera. See [docs/PHASE2_REPORT.md](docs/PHASE2_REPORT
   that escalate to "Recording stopped … Contact technical support and provide diagnostic report",
   plus an automatic diagnostic report.
 
-## Not yet built
-Removable-drive archive/export (Phase 3, design in [docs/04](docs/04_EXPORT_STATE_MACHINE.md)),
-operator GUI (Phase 4), Windows service / auto-start.
+## Also built (merged 2026-11-10; see docs/INTEGRATION.md and docs/branches/)
+Review-drive export, continuous archive drive with swap workflow, drive detection with a guarded
+erase-and-set-up tool (switched off until a supervised dock test), Windows service with
+DPAPI-protected credentials, operator status screen (light/dark), tamper-evident ledger,
+multi-day time accuracy, local retention (switched off until an administrator enables it), and a
+click-to-run packaging build. Full suite on the merged code: 1003 passed (Windows 11,
+FFmpeg 9.0.1, simulated camera).
+
+## Not yet done
+Anything on the real camera, real removable drives, an administrator service install, Linux
+(except a WSL build), Python 3.12, or an LGPL FFmpeg build; the operator screen cannot yet start
+an export (needs a request interface to the service).
 
 ## Click-to-run program (branch design/single-executable)
 `Sentinel.exe` (one-folder PyInstaller build with FFmpeg bundled next to it) sets itself up on
