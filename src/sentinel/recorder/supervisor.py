@@ -278,7 +278,11 @@ class RecordingSupervisor:
                     # Stream time is persistently behind real time and is not catching up: real
                     # time passed that is not in the recording. Record where and how much.
                     reason = RunEndReason.TIMELINE_DISCONTINUITY
-                    shift = round(lag - baseline, 3)
+                    with self.live.lock:
+                        # Measured from reception offsets either side of the break (unbiased by
+                        # clock drift); the lag-vs-baseline figure is the fallback.
+                        jump = drift.measure_jump(brk)
+                    shift = round(jump if jump is not None and jump > 0 else lag - baseline, 3)
                     log.error("run %s: %.1f s of real time missing from the stream after stream time %.2f s",
                               run_id, shift, brk)
                     self.ledger.update_run(run_id, timeline_break_stream_s=brk, timeline_shift_s=shift)

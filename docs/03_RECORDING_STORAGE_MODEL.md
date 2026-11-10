@@ -143,7 +143,10 @@ segment.start_utc = utc(stream_start_s)      segment.end_utc = utc(stream_end_s)
   unchanged: the supervisor measures the lost time, ends the run, and the finaliser records a
   `source_discontinuity_absorbed` gap and shifts later footage. The drift tracker is told the
   break (`set_break`), so reports after it are measured on the shifted timeline and the shift is
-  never counted as drift. The supervisor's lag baseline already followed slow drift; at 1 %
+  never counted as drift. The lost time itself is now measured as min(m − t) after the break
+  minus min(m − t) over the 4 s before it (`DriftTracker.measure_jump`); the previous
+  lag-minus-slow-baseline figure (kept as fallback) overstated it by the baseline's lag behind
+  drift (~0.3 s at 1 % drift, ~1 ms at 50 ppm). The supervisor's lag baseline already followed slow drift; at 1 %
   drift its excess stays < 0.3 s, far below the 3 s tolerance, so drift causes no false gaps
   (tested).
 * **Interrupted segments** (no CSV entry) start at the previous segment's end (or 0 for the

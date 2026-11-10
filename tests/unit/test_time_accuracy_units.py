@@ -101,9 +101,22 @@ def test_break_registered_by_supervisor_keeps_drift_measurement_clean() -> None:
     tr.knot(30.0, 100.0, 0.0)
     for i in range(60, 120):                            # 12 s of real time lost after stream 59 s
         tr.observe(float(i), 100.0 + i + 12.0 + 0.01)
+    assert tr.measure_jump(59.0) == pytest.approx(12.0)
     tr.set_break(59.0, 12.0)
     k = tr.knot(80.0, 100.0, 0.0)
     assert not k.limited and k.correction_s == pytest.approx(0.01, abs=1e-6)
+
+
+def test_jump_measurement_is_not_biased_by_drift() -> None:
+    # Camera 1 % slow: m - t grows 0.01 s per second; 12 s lost after stream time 40 s.
+    tr = DriftTracker(20000.0)
+    for i in range(1, 41):
+        tr.observe(float(i), i / 0.99 + 0.02)
+    for i in range(41, 47):
+        tr.observe(float(i), i / 0.99 + 12.0 + 0.02)
+    # Bias is the drift over the short pre-break window (4 s x 1 % = 0.04 s), not an EMA lag.
+    assert tr.measure_jump(40.0) == pytest.approx(12.0, abs=0.06)
+    assert DriftTracker(1000.0).measure_jump(5.0) is None
 
 
 def test_wall_clock_step_is_flagged_not_followed() -> None:

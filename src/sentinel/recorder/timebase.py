@@ -148,6 +148,23 @@ class DriftTracker:
         by the finaliser as an explicit gap, never smeared into the drift correction."""
         self._break = (stream_s, shift_s)
 
+    def measure_jump(self, break_stream_s: float) -> float | None:
+        """Real time lost at ``break_stream_s``: min(m - t) over reports after the break minus
+        min(m - t) over the window before it. Unlike a slowly-following baseline this is not
+        biased by clock drift (at 1 % drift an exponential baseline lags by ~0.2-0.3 s).
+        None if either side has no reports."""
+        pre = post = None
+        lo = break_stream_s - 4.0      # short: under drift a longer window biases the minimum
+        for t, m in self._reports:
+            v = m - t
+            if lo <= t <= break_stream_s:
+                pre = v if pre is None or v < pre else pre
+            elif t > break_stream_s:
+                post = v if post is None or v < post else post
+        if pre is None or post is None:
+            return None
+        return post - pre
+
     def offset_at(self, stream_s: float) -> tuple[float | None, int]:
         """min(m - t) over reports within the window around ``stream_s``; (None, 0) if none."""
         lo, hi = stream_s - self.window_before_s, stream_s + self.window_after_s
