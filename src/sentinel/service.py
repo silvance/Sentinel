@@ -388,9 +388,13 @@ class RecorderService:
 
 
 # ---------------------------------------------------------------------- CLI
-def _cmd_run(args: argparse.Namespace) -> int:
+def run_recorder(config_path: str | Path, before_run: Callable[[RecorderService], None] | None = None) -> int:
+    """Load the configuration and run the recorder in this process until stopped.
+
+    ``before_run`` lets a host (the launcher, a Windows service wrapper) attach an extra stop
+    channel to the service before recording starts; it must not block."""
     try:
-        cfg = load_config(args.config)
+        cfg = load_config(config_path)
     except ConfigError as exc:
         print(f"configuration error: {exc}", file=sys.stderr)
         return EXIT_CONFIG
@@ -400,8 +404,14 @@ def _cmd_run(args: argparse.Namespace) -> int:
     signal.signal(signal.SIGTERM, svc.request_stop)
     if hasattr(signal, "SIGBREAK"):
         signal.signal(signal.SIGBREAK, svc.request_stop)  # Windows CTRL_BREAK_EVENT
-    log.info("Sentinel recorder %s starting (camera %s)", __version__, cfg.camera.id)
+    if before_run is not None:
+        before_run(svc)
+    log.info("Sentinel recorder %s starting (camera %s, ffmpeg %s)", __version__, cfg.camera.id, cfg.tools.ffmpeg)
     return svc.run()
+
+
+def _cmd_run(args: argparse.Namespace) -> int:
+    return run_recorder(args.config)
 
 
 def _cmd_check(args: argparse.Namespace) -> int:
