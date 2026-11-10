@@ -51,6 +51,7 @@ class Measurements:
     simulated: bool = False
     scheduled_pause: bool = False               # the recording schedule says pause (planned; P-001)
     resumed_s: float | None = None              # seconds since a scheduled pause ended (reconnect grace)
+    camera_pending: bool = False                # set up with "camera later"; no camera yet (P-002)
 
 
 @dataclass
@@ -115,8 +116,13 @@ def evaluate(m: Measurements, stall_timeout_s: float, segment_seconds: float, co
     starting = False
     paused = False
     fatal = bool(m.component_errors) or bool(m.storage_error)
+    pending = False
     if flowing and not sealing_ok:
         alerts.append(make_alert("R-005", Severity.CRITICAL))
+    elif m.camera_pending and not fatal:
+        # Prepared in advance; nothing to connect to, so no outage alert and no escalation.
+        pending = True
+        alerts.append(make_alert("P-002", Severity.NOTICE))
     elif m.scheduled_pause and not flowing and not fatal:
         # Planned: no outage alert and no escalation. The recorder fills in the resume time.
         paused = True
@@ -138,6 +144,8 @@ def evaluate(m: Measurements, stall_timeout_s: float, segment_seconds: float, co
 
     if fatal:
         overall = OverallStatus.ERROR
+    elif pending:
+        overall = OverallStatus.CAMERA_NOT_SET_UP
     elif m.storage_level is StorageLevel.CRITICAL and not paused:
         overall = OverallStatus.STORAGE_FULL
     elif paused:

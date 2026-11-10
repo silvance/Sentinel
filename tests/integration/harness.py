@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 import json
 import threading
 import time
@@ -68,9 +70,13 @@ def wait_for(pred: Callable[[], T], timeout: float, interval: float = 0.25, what
 
 class Harness:
     def __init__(self, tmp: Path, url: str, clock: SystemClock | None = None, disk: FakeDisk | None = None,
-                 check_chain: bool = True, power_check: bool = False, **sections: dict[str, Any]) -> None:
+                 check_chain: bool = True, power_check: bool = False, camera_pending: bool = False,
+                 **sections: dict[str, Any]) -> None:
         self.tmp = tmp
         self.cfg: AppConfig = make_config(tmp, url, **sections)
+        if camera_pending:   # set up with "camera later": no camera address yet
+            self.cfg = dataclasses.replace(self.cfg, camera=dataclasses.replace(
+                self.cfg.camera, url="", pending=True, development_source=False, input_format=None))
         self.disk = disk
         # The host's own time-synchronisation state (Windows Time service / timedatectl) is not
         # under test here and differs between machines (T-002 on a host whose time service is

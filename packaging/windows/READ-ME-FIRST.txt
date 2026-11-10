@@ -22,6 +22,11 @@ For the installing technician
 -----------------------------
 * First start: Sentinel asks to be set up. Type SETUP and answer the questions
   (camera address, stream path from the camera documentation, camera account).
+* Camera address not known yet? Run  Sentinel.exe setup --camera-later  to set
+  up everything else in advance. The screen then shows "Not recording: camera
+  not added yet" (P-002). On site, run  Sentinel.exe set-camera : it asks only
+  the camera questions, checks that the camera answers, and restarts the
+  recorder. With the Windows service installed, use 'Run as administrator'.
 * Settings and recordings: C:\ProgramData\Sentinel\ (see "Sentinel.exe about").
 * Commands (run from a Command Prompt in this folder):
       Sentinel.exe about [--verify]     version, folders, bundled FFmpeg, file check
@@ -30,6 +35,7 @@ For the installing technician
       Sentinel.exe diagnostics          diagnostic report for support
       Sentinel.exe stop                 stop the background recorder gracefully
       Sentinel.exe setup --force        re-run setup (old settings kept as .bak)
+      Sentinel.exe set-camera           add or change the camera (old settings kept as .bak)
       Sentinel.exe admin-pin            set the administrator PIN of the screen
       Sentinel.exe schedule             show when a recording schedule records/pauses
 * This build does NOT start automatically when Windows starts. Until the Windows

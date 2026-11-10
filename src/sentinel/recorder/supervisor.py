@@ -145,6 +145,9 @@ class RecordingSupervisor:
     # ------------------------------------------------------------------ main loop
     def run_forever(self) -> None:
         self.cam_dir.mkdir(parents=True, exist_ok=True)
+        if self.cfg.camera.pending:
+            self._wait_for_camera()
+            return
         consecutive_internal = 0
         while not self.stop_event.is_set():
             if self._schedule_says_pause():
@@ -196,6 +199,21 @@ class RecordingSupervisor:
                 return
             self._tick()
             self.stop_event.wait(min(remaining, self.cfg.service.poll_interval_s))
+
+    def _wait_for_camera(self) -> None:
+        """Set up in advance without a camera ("setup --camera-later"): record nothing, contact
+        nothing, keep the status fresh (P-002) until stopped. "set-camera" writes the camera and
+        restarts the recorder, which then records normally."""
+        log.warning("no camera has been added yet ([camera] pending = true); nothing is recorded until "
+                    "the technician runs 'Sentinel set-camera'")
+        try:
+            self.ledger.add_event("warning", "config", "camera_pending",
+                                  "Not recording: the camera has not been added yet")
+        except Exception:
+            log.exception("could not record camera_pending event")
+        while not self.stop_event.is_set():
+            self._tick()
+            self.stop_event.wait(self.cfg.service.poll_interval_s)
 
     # ------------------------------------------------------------------ recording schedule
     def _schedule_says_pause(self) -> bool:

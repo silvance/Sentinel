@@ -7,6 +7,8 @@
 Technician / support commands (same executable):
 
     Sentinel.exe setup [--force] [--config FILE]       first-run setup questions
+    Sentinel.exe setup --camera-later                  set up everything except the camera (in advance)
+    Sentinel.exe set-camera [--config FILE]            add or change the camera on site
     Sentinel.exe recorder run [--config FILE]          run the recorder in this window
     Sentinel.exe archive run|swap|resume|status|designate ... --config FILE   archive-drive copy
     Sentinel.exe admin-pin [--config FILE]             set the operator screen's administrator PIN
@@ -37,7 +39,7 @@ from ..logging_setup import FORMAT, RedactingFilter, RedactingFormatter
 from ..paths import (CONFIG_ENV, MANIFEST_NAME, TOOL_NAMES, app_dir, bundled_tool, config_candidates,
                      default_layout, default_tool, find_config, is_frozen)
 from ..platform import InstanceLockError, get_platform
-from . import stopsignal
+from . import setcamera, stopsignal
 from .control import select_control
 from .setup import SetupError, interactive_setup, write_setup
 from .view import alert_banner, select_view, set_console_title
@@ -98,7 +100,8 @@ def cmd_launch(args: argparse.Namespace) -> int:
                 return EXIT_CONFIG
         except (EOFError, KeyboardInterrupt):
             return EXIT_CONFIG
-        rc = cmd_setup(argparse.Namespace(config=args.config, force=False, simulated_camera=None))
+        rc = cmd_setup(argparse.Namespace(config=args.config, force=False, simulated_camera=None,
+                                          camera_later=False))
         if rc != EXIT_OK:
             _pause()
             return rc
@@ -189,7 +192,8 @@ def cmd_setup(args: argparse.Namespace) -> int:
               "the previous file is kept as a dated .bak copy.")
         return EXIT_CONFIG
     try:
-        answers = interactive_setup(layout, simulated_url=args.simulated_camera)
+        answers = interactive_setup(layout, simulated_url=args.simulated_camera,
+                                    camera_later=getattr(args, "camera_later", False))
         path, warnings = write_setup(answers, layout, target, force=args.force)
     except SetupError as exc:
         print(f"\nSetup not completed: {exc}")
@@ -198,6 +202,8 @@ def cmd_setup(args: argparse.Namespace) -> int:
         print("\nSetup cancelled; nothing was written.")
         return EXIT_CONFIG
     print(f"\nConfiguration written: {path}")
+    if answers.camera_later:
+        print("No camera added yet: nothing is recorded until you run 'Sentinel set-camera' on site.")
     for w in warnings:
         print(f"WARNING: {w}")
     print("If the recorder was already running, restart it ('Sentinel stop', then start Sentinel) "
@@ -342,6 +348,10 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("setup", "first-run setup (technician)")
     p.add_argument("--force", action="store_true", help="replace an existing configuration (kept as .bak)")
     p.add_argument("--simulated-camera", metavar="URL", help=argparse.SUPPRESS)  # developer use only
+    p.add_argument("--camera-later", action="store_true",
+                   help="set up everything except the camera now; add it on site with 'set-camera'")
+    p = add("set-camera", "add or change the camera on site (technician)")
+    setcamera.add_arguments(p)
     p = add("admin-pin", "set the administrator PIN of the operator screen (technician)")
     arc = sub.add_parser("archive", help="archive-drive copy commands (run, swap, resume, status, designate, ...)")
     arc.add_argument("archive_args", nargs=argparse.REMAINDER)
@@ -372,6 +382,15 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_setup(args)
     if args.cmd == "recorder":
         return cmd_recorder_run(args)
+    if args.cmd == "set-camera":
+        cfg_path = _resolve(args.config)
+        if cfg_path is None or not cfg_path.exists():
+            print("No configuration file found (run 'setup --camera-later' or 'setup' first).")
+            return EXIT_CONFIG
+        try:
+            return setcamera.set_camera(cfg_path, test=not args.no_test, restart=not args.no_restart)
+        finally:
+            _pause()
     if args.cmd == "admin-pin":
         cfg_path = _resolve(args.config)
         if cfg_path is None:

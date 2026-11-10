@@ -618,7 +618,8 @@ class RecorderService:
             unstable_restarts=unstable, clock_anomaly=clock_anomaly, clock_synchronized=self._ntp,
             corrupt_recent=corrupt_recent, verify_problem=verify_problem, verify_critical=verify_critical,
             ledger_altered=ledger_altered, ledger_unprotected=ledger_unprotected, simulated=cfg.camera.development_source,
-            scheduled_pause=paused, resumed_s=(now - resumed_mono) if resumed_mono is not None else None)
+            scheduled_pause=paused, resumed_s=(now - resumed_mono) if resumed_mono is not None else None,
+            camera_pending=cfg.camera.pending)
         d = evaluate(m, rec.stall_timeout_s, rec.segment_seconds, rec.connect_timeout_s, rec.escalate_after_s)
         if self.schedule is not None:
             for a in d.alerts:
@@ -838,6 +839,9 @@ def _cmd_check(args: argparse.Namespace) -> int:
           f"{'INCLUDED' if cfg.camera.include_audio else 'excluded'}, spool {cfg.storage.spool_dir}")
     if cfg.camera.development_source:
         print("WARNING: development_source = true (simulated/test camera; recordings are not evidence)")
+    if cfg.camera.pending:
+        print("NOTE: no camera added yet (set up with --camera-later). Nothing is recorded until you run "
+              "'Sentinel set-camera' on site.")
     if cfg.schedule.enabled:
         print(render_plan(RecordingSchedule(cfg.schedule), time.time(), days=7))
     for p in problems:
@@ -855,7 +859,8 @@ def banner(doc: dict | None, problem: str | None) -> str:
         title = "RECORDING STOPPED" if alert.get("recording_stopped") else "ATTENTION REQUIRED"
         body = alert["message"]
     else:
-        title = {"RECORDING": "RECORDING NORMALLY", "STARTING": "STARTING", "PAUSED": "PAUSED BY SCHEDULE"}.get(
+        title = {"RECORDING": "RECORDING NORMALLY", "STARTING": "STARTING", "PAUSED": "PAUSED BY SCHEDULE",
+                 "CAMERA_NOT_SET_UP": "NOT RECORDING: CAMERA NOT ADDED YET"}.get(
             (doc or {}).get("overall", ""), str((doc or {}).get("overall", "UNKNOWN")))
         body = alert["message"] if alert else "No problems detected."
     width = 72

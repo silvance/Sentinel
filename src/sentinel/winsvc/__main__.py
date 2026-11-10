@@ -110,6 +110,9 @@ def preflight(cfg_path: Path) -> tuple[InstallInputs | None, list[str], list[str
     host = host_command(cfg_path)
     if cfg.camera.development_source:
         warnings.append("the configuration uses a TEST camera (development_source = true)")
+    if cfg.camera.pending:
+        warnings.append("no camera added yet: the service will run but record nothing until "
+                        "'Sentinel set-camera' is run on site")
     for label, exe in (("ffmpeg", cfg.tools.ffmpeg), ("ffprobe", cfg.tools.ffprobe)):
         if not Path(exe).is_absolute():
             errors.append(f"[tools] {label} must be a full path: the service does not see your personal PATH")

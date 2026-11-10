@@ -125,6 +125,10 @@ CATALOG: dict[str, AlertDef] = {d.code: d for d in [
     # Planned pause ([schedule]); not a fault. The status message names the resume time.
     AlertDef("P-001", "Recording is paused by the recording schedule",
              "Recording resumes automatically at the scheduled time. No action is needed.", False),
+    # Set up in advance ("setup --camera-later"); the technician adds the camera on site (set-camera).
+    AlertDef("P-002", "Not recording: the camera has not been added yet",
+             "Recording starts once the installing technician adds the camera. If the camera should "
+             "already be set up, contact technical support.", False),
     # Host power settings: an unattended laptop that goes to sleep stops recording (sentinel.power).
     AlertDef("H-001", "This computer is set to go to sleep, which would stop recording",
              "Recording continues for now. Do not close the lid. " + SUPPORT, False),

@@ -57,6 +57,7 @@ class SetupAnswers:
     timezone: str = "UTC"
     storage_root: Path | None = None        # None = the layout's default folders
     simulated_url: str | None = None        # developer use only: tcp:// simulator, marked SIMULATED
+    camera_later: bool = False              # prepare everything now; "set-camera" adds the camera on site
 
 
 def check_host(host: str) -> str:
@@ -104,8 +105,13 @@ def build_config(ans: SetupAnswers, layout: Layout, credentials_file: Path | Non
     """Configuration dictionary for ``ans`` (validated by ``sentinel.config``)."""
     if not 1 <= ans.port <= 65535:
         raise SetupError("The camera port must be between 1 and 65535.")
+    if ans.camera_later and (ans.simulated_url or ans.username):
+        raise SetupError("A camera that is added later has no address or account yet.")
     camera: dict[str, Any] = {"id": "CAM01", "name": ans.camera_name.strip() or "Camera 1",
-                              "url": camera_url(ans), "transport": "tcp", "include_audio": False}
+                              "url": "" if ans.camera_later else camera_url(ans), "transport": "tcp",
+                              "include_audio": False}
+    if ans.camera_later:
+        camera["pending"] = True
     if ans.simulated_url:
         camera.update({"input_format": "mpegts", "development_source": True})
     if ans.username:
@@ -320,6 +326,9 @@ def write_setup(ans: SetupAnswers, layout: Layout, config_path: Path | None = No
               "on space (docs/branches/design-local-retention.md). Set [retention] enabled = false\n"
               "to keep every recording on this computer.\n"
               "Camera credentials are kept in the separate credentials file, never here.")
+    if ans.camera_later:
+        header += ("\nNO CAMERA ADDED YET ([camera] pending = true): nothing is recorded until the\n"
+                   "technician runs 'Sentinel set-camera' on site.")
     tmp = config_path.with_name(config_path.name + ".partial")
     tmp.write_text(to_toml(d, header), encoding="utf-8")
     tmp.replace(config_path)
@@ -335,13 +344,16 @@ Press Enter to accept the value shown in [brackets].
 """
 
 
-def interactive_setup(layout: Layout, ask: Callable[[str], str] = input,
-                      ask_secret: Callable[[str], str] | None = None,
-                      out: Callable[[str], None] = print, simulated_url: str | None = None) -> SetupAnswers:
-    if ask_secret is None:
-        ask_secret = getpass.getpass if sys.stdin is not None and sys.stdin.isatty() else ask
-    out(TECHNICIAN_INTRO)
+CAMERA_LATER_INTRO = """\
+Sentinel setup - for the installing technician (camera added later)
 
+Everything except the camera is set up now. Nothing is recorded, and the screen shows
+"Not recording: camera not added yet" (P-002), until you run  Sentinel.exe set-camera  on site.
+Press Enter to accept the value shown in [brackets].
+"""
+
+
+def make_question(ask: Callable[[str], str], out: Callable[[str], None]) -> Callable[..., str]:
     def question(prompt: str, default: str = "", check: Callable[[str], Any] | None = None) -> str:
         while True:
             raw = ask(f"{prompt}{f' [{default}]' if default else ''}: ").strip() or default
@@ -351,16 +363,40 @@ def interactive_setup(layout: Layout, ask: Callable[[str], str] = input,
                 return raw
             except SetupError as exc:
                 out(f"  {exc}")
+    return question
+
+
+def ask_camera(question: Callable[..., str], ask_secret: Callable[[str], str], host: str = "",
+               path: str = "", port: int = 554) -> tuple[str, str, int, str, str]:
+    """The camera questions (setup and set-camera): host, stream path, port, user, password."""
+    host = question("Camera IP address or host name", host, check=check_host)
+    path = question("Camera stream path (from the camera documentation)", path, check=check_stream_path)
+    port = int(question("Camera stream port", str(port), check=_check_port))
+    user = question("Camera account user name (empty if none)")
+    pw = ask_secret("Camera account password (not shown): ") if user else ""
+    return host, path, port, user, pw
+
+
+def default_secret_prompt(ask: Callable[[str], str]) -> Callable[[str], str]:
+    return getpass.getpass if sys.stdin is not None and sys.stdin.isatty() else ask
+
+
+def interactive_setup(layout: Layout, ask: Callable[[str], str] = input,
+                      ask_secret: Callable[[str], str] | None = None,
+                      out: Callable[[str], None] = print, simulated_url: str | None = None,
+                      camera_later: bool = False) -> SetupAnswers:
+    if ask_secret is None:
+        ask_secret = default_secret_prompt(ask)
+    out(CAMERA_LATER_INTRO if camera_later else TECHNICIAN_INTRO)
+    question = make_question(ask, out)
 
     if simulated_url:
         out(f"DEVELOPMENT: using the simulated camera {simulated_url}; recordings are not evidence.")
         host, path, port, user, pw = "", "", 554, "", ""
+    elif camera_later:
+        host, path, port, user, pw = "", "", 554, "", ""
     else:
-        host = question("Camera IP address or host name", check=check_host)
-        path = question("Camera stream path (from the camera documentation)", check=check_stream_path)
-        port = int(question("Camera stream port", "554", check=_check_port))
-        user = question("Camera account user name (empty if none)")
-        pw = ask_secret("Camera account password (not shown): ") if user else ""
+        host, path, port, user, pw = ask_camera(question, ask_secret)
     name = question("Camera label for reports", "Camera 1")
     tz = question("Local time zone (IANA name)", "UTC", check=check_timezone)
     default_root = layout.spool_dir.parent
@@ -368,7 +404,7 @@ def interactive_setup(layout: Layout, ask: Callable[[str], str] = input,
     return SetupAnswers(camera_host=host, stream_path=path, port=port, username=user, password=pw,
                         camera_name=name, timezone=tz,
                         storage_root=None if Path(root) == default_root else Path(root),
-                        simulated_url=simulated_url)
+                        simulated_url=simulated_url, camera_later=camera_later and not simulated_url)
 
 
 def _check_port(raw: str) -> None:

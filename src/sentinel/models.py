@@ -48,6 +48,7 @@ class OverallStatus(StrEnum):
     ERROR = "ERROR"                          # "System error"
     STOPPED = "STOPPED"                      # service shut down cleanly
     PAUSED = "PAUSED"                        # not recording because the recording schedule says so (P-001)
+    CAMERA_NOT_SET_UP = "CAMERA_NOT_SET_UP"  # set up with "camera later"; camera not added yet (P-002)
 
 
 class CameraLink(StrEnum):

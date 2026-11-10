@@ -47,6 +47,9 @@ class CameraConfig:
     include_audio: bool = False               # collection-scope decision; default excluded
     input_format: str | None = None           # "mpegts" for the simulator only; None = auto
     development_source: bool = False          # allow tcp:// / file:// test sources (never in production)
+    # Set up in advance without the camera ("setup --camera-later"): url is empty and nothing is
+    # recorded (status P-002) until "set-camera" fills in the camera and clears this.
+    pending: bool = False
 
 
 @dataclass(frozen=True)
@@ -245,9 +248,21 @@ def _build(cls: type, section: str, raw: dict[str, Any] | None, base_dir: Path) 
 
 
 def _validate(cfg: AppConfig) -> None:
-    cam, rec, sto = cfg.camera, cfg.recording, cfg.storage
+    cam = cfg.camera
     if not _CAMERA_ID_RE.fullmatch(cam.id):
         raise ConfigError("[camera] id must be 1-32 characters: letters, digits, '-' or '_'")
+    if cam.pending:
+        if cam.url or cam.credentials_file or cam.development_source or cam.input_format:
+            raise ConfigError("[camera] pending = true (camera not added yet) requires url = \"\" and no "
+                              "credentials_file; add the camera with 'Sentinel set-camera'")
+    else:
+        _validate_camera_url(cam)
+    _validate_rest(cfg)
+
+
+def _validate_camera_url(cam: CameraConfig) -> None:
+    if not cam.url:
+        raise ConfigError("[camera] url is required (or pending = true until the camera is added)")
     parts = urlsplit(cam.url)
     allowed = PRODUCTION_SCHEMES + (DEVELOPMENT_SCHEMES if cam.development_source else ())
     if parts.scheme not in allowed:
@@ -265,6 +280,10 @@ def _validate(cfg: AppConfig) -> None:
         raise ConfigError("[camera] input_format must be omitted (or \"mpegts\" for the simulator)")
     if cam.input_format and not cam.development_source:
         raise ConfigError("[camera] input_format is only allowed with development_source = true")
+
+
+def _validate_rest(cfg: AppConfig) -> None:
+    cam, rec, sto = cfg.camera, cfg.recording, cfg.storage
     if cam.transport not in ("tcp", "udp"):
         raise ConfigError("[camera] transport must be 'tcp' or 'udp'")
     if not 2.0 <= rec.segment_seconds <= 3600.0:
