@@ -414,6 +414,58 @@ def set_preshutdown_timeout(name: str, timeout_ms: int) -> None:
         adv.CloseServiceHandle(scm)
 
 
+SERVICE_START = 0x0010
+SERVICE_STOP = 0x0020
+ERROR_ACCESS_DENIED = 5
+ERROR_SERVICE_ALREADY_RUNNING = 1056
+ERROR_SERVICE_NOT_ACTIVE = 1062
+
+
+def _service_call(name: str, access: int, call: Callable[[Any, Any], bool], what: str) -> int:
+    """Open ``name`` with ``access`` and run ``call(adv, handle)``. Returns 0 on success or the
+    Windows error code of the failed step (callers map 5 = access denied, 1056/1062 = no-op)."""
+    adv = _advapi()
+    scm = adv.OpenSCManagerW(None, None, SC_MANAGER_CONNECT)
+    if not scm:
+        return ctypes.get_last_error()
+    try:
+        svc = adv.OpenServiceW(scm, name, access)
+        if not svc:
+            return ctypes.get_last_error()
+        try:
+            if not call(adv, svc):
+                err = ctypes.get_last_error()
+                log.info("%s(%s) failed (Windows error %d)", what, name, err)
+                return err
+            return 0
+        finally:
+            adv.CloseServiceHandle(svc)
+    finally:
+        adv.CloseServiceHandle(scm)
+
+
+def start_service(name: str) -> int:
+    """StartServiceW. Integration (launcher defers to the installed service). Needs the
+    SERVICE_START right, which standard users do not have by default: expect error 5.
+    NOT EXECUTED against a real service on the development host (no administrator rights)."""
+    def call(adv: Any, svc: Any) -> bool:
+        adv.StartServiceW.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p]
+        adv.StartServiceW.restype = ctypes.c_int
+        return bool(adv.StartServiceW(svc, 0, None))
+    return _service_call(name, SERVICE_START, call, "StartService")
+
+
+def stop_service(name: str) -> int:
+    """ControlService(SERVICE_CONTROL_STOP): the service host then stops the recorder gracefully
+    (the open segment is finalised). Needs SERVICE_STOP. NOT EXECUTED against a real service."""
+    def call(adv: Any, svc: Any) -> bool:
+        st = _SERVICE_STATUS()
+        adv.ControlService.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.POINTER(_SERVICE_STATUS)]
+        adv.ControlService.restype = ctypes.c_int
+        return bool(adv.ControlService(svc, SERVICE_CONTROL_STOP, ctypes.byref(st)))
+    return _service_call(name, SERVICE_STOP, call, "ControlService")
+
+
 def wait_for_state(name: str, state: int, timeout_s: float, poll_s: float = 1.0) -> ServiceInfo | None:
     end = time.monotonic() + timeout_s
     info = query_service(name)

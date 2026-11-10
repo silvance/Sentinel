@@ -110,6 +110,23 @@ def cmd_launch(args: argparse.Namespace) -> int:
         print(alert_banner("C-001"))
         _pause()
         return EXIT_CONFIG
+    control = select_control(cfg_path, cfg)
+    if getattr(control, "service_managed", False):
+        # Integration: an installed Windows service runs the recorder. Its data, spool and log
+        # folders are service-only, so this (operator) account neither checks nor writes them;
+        # the service checks its own configuration at every start and reports C-001 in the
+        # status folder, which is what this window shows.
+        log.info("Sentinel %s launcher: recorder is managed by the %s", __version__, control.name)
+        started_after = None
+        start_problem = None
+        if not args.no_start and not control.is_running():
+            started_after = time.time()
+            result = control.start()
+            log.info("start via %s: ok=%s %s", control.name, result.ok, result.detail)
+            if not result.ok:
+                start_problem = result.code
+        return select_view().run(cfg.status_path, cfg.camera.name, started_after=started_after,
+                                 once=args.once, start_problem=start_problem)
     # Refuse before creating anything: configuration, credentials, tools and data folders must
     # not be changeable by other accounts; bundled tools must be present (no PATH fallback).
     problems = location_problems(cfg_path, cfg) + check_tools(cfg)
@@ -126,7 +143,6 @@ def cmd_launch(args: argparse.Namespace) -> int:
     setup_launcher_logging(cfg.log_path)
     log.info("Sentinel %s launcher (frozen=%s) using %s", __version__, is_frozen(), cfg_path)
 
-    control = select_control(cfg_path, cfg)
     started_after: float | None = None
     start_problem: str | None = None
     try:
@@ -149,7 +165,7 @@ def cmd_launch(args: argparse.Namespace) -> int:
         finally:
             launcher_lock.close()
     view = select_view()
-    return view.run(cfg.data_path / "status.json", cfg.camera.name, started_after=started_after,
+    return view.run(cfg.status_path, cfg.camera.name, started_after=started_after,
                     once=args.once, start_problem=start_problem)
 
 

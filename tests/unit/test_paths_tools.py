@@ -120,8 +120,11 @@ def test_unknown_tools_key_still_rejected(tmp_path: Path) -> None:
 def test_windows_layout_uses_programdata() -> None:
     lay = paths.default_layout("win32", env={"ProgramData": r"D:\PD"})
     assert lay.scope == "machine"
-    assert str(PureWindowsPath(lay.config_file)) == r"D:\PD\Sentinel\sentinel.toml"
-    assert str(PureWindowsPath(lay.credentials_file)) == r"D:\PD\Sentinel\camera.secret"
+    # Integration: configuration + secret in their own folder, as the Windows service installs it.
+    assert str(PureWindowsPath(lay.config_file)) == r"D:\PD\Sentinel\config\sentinel.toml"
+    assert str(PureWindowsPath(lay.credentials_file)) == r"D:\PD\Sentinel\config\camera.secret"
+    assert str(PureWindowsPath(lay.status_dir)) == r"D:\PD\Sentinel\status"
+    assert lay.storage_defaults()["status_dir"] == str(lay.status_dir)
     assert str(PureWindowsPath(lay.spool_dir)) == r"D:\PD\Sentinel\spool"
     assert str(PureWindowsPath(lay.log_dir)) == r"D:\PD\Sentinel\logs"
     assert str(PureWindowsPath(paths.default_layout("win32", env={}).data_dir)) == r"C:\ProgramData\Sentinel\data"
@@ -169,7 +172,7 @@ def test_camera_section_still_required(tmp_path: Path) -> None:
 def test_config_lookup_order(tmp_path: Path) -> None:
     app, pd = tmp_path / "app", tmp_path / "pd"
     env = {"ProgramData": str(pd)}
-    machine = pd / "Sentinel" / "sentinel.toml"
+    machine = pd / "Sentinel" / "config" / "sentinel.toml"   # integration layout
     assert paths.find_config(env=env, app=app, platform="win32") is None            # first run
     machine.parent.mkdir(parents=True)
     machine.write_text("")

@@ -273,6 +273,8 @@ def build(ffmpeg_dir: Path, dist_root: Path, work: Path, allow_dirty: bool,
     run_pyinstaller(dist_root, work)
     if not (app / f"{'Sentinel' if IS_WIN else 'sentinel'}{EXE_SUFFIX}").is_file():
         raise BuildError(f"PyInstaller did not produce the program in {app}")
+    if IS_WIN and not (app / f"{spec_common.SERVICE_EXE_NAME}{EXE_SUFFIX}").is_file():
+        raise BuildError(f"PyInstaller did not produce the service host {spec_common.SERVICE_EXE_NAME}{EXE_SUFFIX}")
 
     tools_dir = app / "ffmpeg"
     tools_dir.mkdir(exist_ok=True)

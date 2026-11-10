@@ -394,7 +394,10 @@ def test_installed_path_names() -> None:
     from sentinel.drives.installed import installed_config_path
 
     p = installed_config_path()
-    assert p.name == "sentinel.toml" and p.parent.name.lower() in ("sentinel",)
+    # Integration: the installed path is the shared one from sentinel.paths (Windows: ...\Sentinel\config\).
+    assert p.name == "sentinel.toml" and p.parent.name.lower() in ("sentinel", "config")
+    if sys.platform == "win32":
+        assert p.parent.name == "config" and p.parent.parent.name == "Sentinel"
 
 
 # ============================================================================ 1.4 operator wording

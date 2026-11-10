@@ -12,7 +12,8 @@ the file is created with a protected DACL (setup account, SYSTEM, Administrators
 readable by other accounts, not even briefly; any failure aborts setup and deletes the file.
 The configuration and storage folders are created private the same way, so evidence never
 inherits ``%ProgramData%``'s "Users may read and create" permissions. On Linux: 0600 / 0750.
-The Windows-service branch replaces the credentials file with DPAPI-protected storage.
+On Windows the credentials file's content is DPAPI-protected (machine scope), the format of the
+Windows-service branch, so a later service install reads the same file (integration).
 """
 
 from __future__ import annotations
@@ -109,6 +110,8 @@ def build_config(ans: SetupAnswers, layout: Layout, credentials_file: Path | Non
     if ans.storage_root is not None:
         root = Path(ans.storage_root)
         storage = {"spool_dir": str(root / "spool"), "data_dir": str(root / "data"), "log_dir": str(root / "logs")}
+        if layout.status_dir is not None:   # Windows service layout: operator-readable status folder
+            storage["status_dir"] = str(root / "status")
     else:
         storage = layout.storage_defaults()
     return {"camera": camera, "recording": {"display_timezone": check_timezone(ans.timezone)}, "storage": storage}
@@ -152,7 +155,8 @@ def credentials_toml(username: str, password: str) -> str:
 
 # ------------------------------------------------------------------ writing files
 # Names setup may find in a folder it is asked to protect (a previous Sentinel installation).
-_OWN_NAMES = ("spool", "data", "logs", "sentinel.toml", "camera.secret", "recorder.lock", "launcher.lock")
+_OWN_NAMES = ("spool", "data", "logs", "status", "config", "sentinel.toml", "camera.secret", "recorder.lock",
+              "launcher.lock")
 
 
 def _is_own(name: str) -> bool:
@@ -218,16 +222,34 @@ def write_secret(path: Path, username: str, password: str) -> None:
     Windows: created with CreateFileW and an explicit protected DACL (this account, SYSTEM,
     Administrators) under a temporary name, verified, then renamed over the target (a rename
     keeps the file's own DACL). Linux: O_CREAT|O_EXCL with mode 0600, verified, renamed.
-    Any failure is fatal and leaves no plaintext behind."""
-    data = credentials_toml(username, password).encode("utf-8")
+    Any failure is fatal and leaves no plaintext behind.
+
+    Integration (one secret format for setup and the Windows service, docs/INTEGRATION.md): on
+    Windows the *content* is the windows-service branch's DPAPI format (machine scope, the same
+    bytes ``python -m sentinel.winsvc set-camera-credentials`` writes), so the service can read
+    the file setup wrote and the plaintext warning does not apply. The file is read back and
+    decrypted before it replaces the target. Linux keeps the plain TOML (mode 0600)."""
     tmp = path.with_name(f"{path.name}.{os.getpid()}.{time.monotonic_ns()}.partial")
     replaced = False
     try:
         if sys.platform == "win32":
+            from ..credentials import CredentialError, load_credentials
             from ..platform import winacl
+            from ..winsvc.credstore import protected_file_bytes
 
+            try:
+                data = protected_file_bytes(username, password, scope="machine")
+            except (CredentialError, OSError) as exc:
+                raise SetupError(f"The camera password could not be protected with Windows DPAPI: {exc}") from None
             winacl.write_private_file(tmp, data)
+            try:
+                back = load_credentials(tmp)
+            except CredentialError as exc:
+                raise SetupError(f"The protected credentials file could not be read back: {exc}") from None
+            if back.username != username or back.password != password or back.protection != "dpapi":
+                raise SetupError("The protected credentials file did not decrypt to the values entered.")
         else:
+            data = credentials_toml(username, password).encode("utf-8")
             fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             try:
                 os.write(fd, data)
@@ -273,7 +295,8 @@ def write_setup(ans: SetupAnswers, layout: Layout, config_path: Path | None = No
     if config_path.exists() and not force:
         raise SetupError("Sentinel is already set up on this computer (use setup --force to replace it).")
     for folder in dict.fromkeys([config_path.parent, *(Path(d["storage"][k]) for k in
-                                                       ("spool_dir", "data_dir", "log_dir"))]):
+                                                       ("spool_dir", "data_dir", "log_dir", "status_dir")
+                                                       if k in d["storage"])]):
         prepare_private_dir(folder)
     if ans.username:
         write_secret(Path(d["camera"]["credentials_file"]), ans.username, ans.password)

@@ -328,7 +328,7 @@ def cmd_set_credentials(args: argparse.Namespace, prompt: Callable[[str], str] =
             return EXIT_FAILED
         if not cfg.camera.credentials_file:
             print("The configuration has no [camera] credentials_file. Add for example\n"
-                  '  credentials_file = "C:\\\\ProgramData\\\\Sentinel\\\\config\\\\camera.dpapi"\n'
+                  '  credentials_file = "C:\\\\ProgramData\\\\Sentinel\\\\config\\\\camera.secret"\n'
                   "and run this command again.")
             return EXIT_FAILED
         target = Path(cfg.camera.credentials_file)

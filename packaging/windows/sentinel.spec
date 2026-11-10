@@ -5,7 +5,8 @@
 #
 #   .venv-build\Scripts\python packaging\build.py --ffmpeg-dir <folder with ffmpeg.exe, ffprobe.exe>
 #
-# Output: dist\Sentinel\Sentinel.exe + dist\Sentinel\_internal\ (+ ffmpeg\ added by build.py)
+# Output: dist\Sentinel\Sentinel.exe + dist\Sentinel\SentinelService.exe (Windows service host,
+# added at integration) + dist\Sentinel\_internal\ (shared) (+ ffmpeg\ added by build.py)
 import sys
 from pathlib import Path
 
@@ -16,28 +17,35 @@ from PyInstaller.utils.win32.versioninfo import (  # noqa: E402
     FixedFileInfo, StringFileInfo, StringStruct, StringTable, VarFileInfo, VarStruct, VSVersionInfo)
 
 ver = common.version_tuple()
-version_info = VSVersionInfo(
-    ffi=FixedFileInfo(filevers=ver, prodvers=ver, mask=0x3F, flags=0x0, OS=0x40004, fileType=0x1,
-                      subtype=0x0, date=(0, 0)),
-    kids=[
-        StringFileInfo([StringTable("040904B0", [
-            StringStruct("ProductName", "Sentinel"),
-            StringStruct("FileDescription", "Sentinel camera recorder"),
-            StringStruct("FileVersion", common.version()),
-            StringStruct("ProductVersion", common.version()),
-            StringStruct("InternalName", "Sentinel"),
-            StringStruct("OriginalFilename", "Sentinel.exe"),
-        ])]),
-        VarFileInfo([VarStruct("Translation", [0x0409, 1200])]),
-    ],
-)
+
+
+def _version_info(internal_name: str, description: str) -> VSVersionInfo:
+    return VSVersionInfo(
+        ffi=FixedFileInfo(filevers=ver, prodvers=ver, mask=0x3F, flags=0x0, OS=0x40004, fileType=0x1,
+                          subtype=0x0, date=(0, 0)),
+        kids=[
+            StringFileInfo([StringTable("040904B0", [
+                StringStruct("ProductName", "Sentinel"),
+                StringStruct("FileDescription", description),
+                StringStruct("FileVersion", common.version()),
+                StringStruct("ProductVersion", common.version()),
+                StringStruct("InternalName", internal_name),
+                StringStruct("OriginalFilename", f"{internal_name}.exe"),
+            ])]),
+            VarFileInfo([VarStruct("Translation", [0x0409, 1200])]),
+        ],
+    )
+
+
+version_info = _version_info("Sentinel", "Sentinel camera recorder")
+HIDDEN = common.HIDDEN_IMPORTS + common.SERVICE_HIDDEN_IMPORTS
 
 a = Analysis(
     [str(common.ENTRY)],
     pathex=[str(common.SRC)],
     binaries=[],
     datas=[],
-    hiddenimports=common.HIDDEN_IMPORTS,
+    hiddenimports=HIDDEN,
     hookspath=[],
     runtime_hooks=[],
     excludes=common.EXCLUDES,
@@ -66,10 +74,52 @@ exe = EXE(
     # icon=...               # no approved icon yet; add packaging/windows/sentinel.ico when one exists
 )
 
+# Integration (design/windows-service recommendation (b), docs/INTEGRATION.md): the Windows
+# service host as a second executable in the SAME one-folder build (one-file is ruled out for a
+# service: its bootloader re-launches itself as a child, which the SCM rejects). The SCM runs
+# "SentinelService.exe host --config <cfg>" (sentinel.winsvc.commands.host_command).
+# console=True on purpose: a service has no visible console either way (the source install runs
+# the console-subsystem python.exe the same way), and the technician sub-commands (install,
+# status, set-camera-credentials) must be able to print in an elevated Command Prompt.
+a_svc = Analysis(
+    [str(common.SERVICE_ENTRY)],
+    pathex=[str(common.SRC)],
+    binaries=[],
+    datas=[],
+    hiddenimports=HIDDEN,
+    hookspath=[],
+    runtime_hooks=[],
+    excludes=common.EXCLUDES,
+    noarchive=False,
+    optimize=0,
+)
+pyz_svc = PYZ(a_svc.pure)
+exe_svc = EXE(
+    pyz_svc,
+    a_svc.scripts,
+    [],
+    exclude_binaries=True,
+    name=common.SERVICE_EXE_NAME,
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,
+    console=True,
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+    version=_version_info(common.SERVICE_EXE_NAME, "Sentinel recorder Windows service host"),
+)
+
 coll = COLLECT(
     exe,
     a.binaries,
     a.datas,
+    exe_svc,
+    a_svc.binaries,
+    a_svc.datas,
     strip=False,
     upx=False,
     upx_exclude=[],

@@ -25,10 +25,16 @@ Resolution rules (documented in docs/08_PACKAGING.md):
   ============  ==========================================  =====================================
   Platform      Configuration / credentials                 spool, data, logs
   ============  ==========================================  =====================================
-  Windows       ``%ProgramData%\\Sentinel\\sentinel.toml``     ``%ProgramData%\\Sentinel\\spool|data|logs``
+  Windows       ``%ProgramData%\\Sentinel\\config\\*``       ``%ProgramData%\\Sentinel\\spool|data|logs|status``
   Linux, root   ``/etc/sentinel/sentinel.toml``             ``/var/lib/sentinel/spool|data``, ``/var/log/sentinel``
   Linux, user   ``$XDG_CONFIG_HOME/sentinel/sentinel.toml``  ``$XDG_DATA_HOME/sentinel/spool|data|logs``
   ============  ==========================================  =====================================
+
+Integration (docs/INTEGRATION.md): the Windows layout is the one the Windows service installs and
+re-permissions: ``sentinel.toml`` and ``camera.secret`` (DPAPI content on Windows, detected by
+content) in their own ``config`` folder, separate from spool/data/logs, plus an operator-readable
+``status`` folder (``[storage] status_dir``). No release used the earlier
+``%ProgramData%\\Sentinel\\sentinel.toml`` location, so it is not searched.
 
 Every function takes its environment as optional arguments so the rules are unit-tested for
 both platforms on either platform.
@@ -45,6 +51,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 CONFIG_ENV = "SENTINEL_CONFIG"
 CONFIG_NAME = "sentinel.toml"
 SECRET_NAME = "camera.secret"
+CONFIG_SUBDIR = "config"          # Windows: configuration + credentials in their own folder
 TOOLS_SUBDIR = "ffmpeg"
 TOOL_NAMES = ("ffmpeg", "ffprobe")
 MANIFEST_NAME = "BUILD-MANIFEST.json"
@@ -137,9 +144,13 @@ class Layout:
     spool_dir: Path
     data_dir: Path
     log_dir: Path
+    status_dir: Path | None = None  # operator-readable status folder (Windows service layout)
 
     def storage_defaults(self) -> dict[str, str]:
-        return {"spool_dir": str(self.spool_dir), "data_dir": str(self.data_dir), "log_dir": str(self.log_dir)}
+        out = {"spool_dir": str(self.spool_dir), "data_dir": str(self.data_dir), "log_dir": str(self.log_dir)}
+        if self.status_dir is not None:
+            out["status_dir"] = str(self.status_dir)
+        return out
 
 
 def _is_root() -> bool:
@@ -153,8 +164,8 @@ def default_layout(platform: str | None = None, env: Mapping[str, str] | None = 
     env = os.environ if env is None else env
     if platform == "win32":
         root = PureWindowsPath(env.get("ProgramData") or env.get("PROGRAMDATA") or r"C:\ProgramData") / "Sentinel"
-        return Layout("machine", Path(root / CONFIG_NAME), Path(root / SECRET_NAME), Path(root / "spool"),
-                      Path(root / "data"), Path(root / "logs"))
+        return Layout("machine", Path(root / CONFIG_SUBDIR / CONFIG_NAME), Path(root / CONFIG_SUBDIR / SECRET_NAME),
+                      Path(root / "spool"), Path(root / "data"), Path(root / "logs"), Path(root / "status"))
     if _is_root() if is_root is None else is_root:
         etc, var = PurePosixPath("/etc/sentinel"), PurePosixPath("/var/lib/sentinel")
         return Layout("machine", Path(etc / CONFIG_NAME), Path(etc / SECRET_NAME), Path(var / "spool"),
@@ -167,8 +178,12 @@ def default_layout(platform: str | None = None, env: Mapping[str, str] | None = 
 
 
 def default_storage_dirs() -> dict[str, str]:
-    """``[storage]`` directory defaults for this machine (used when the keys are omitted)."""
-    return default_layout().storage_defaults()
+    """``[storage]`` directory defaults for this machine (used when the keys are omitted).
+
+    ``status_dir`` is deliberately not defaulted here: a configuration that names its own
+    data_dir but no status_dir must keep its status beside its data (status_dir = data_dir),
+    never in the machine's status folder. First-run setup writes status_dir explicitly."""
+    return {k: v for k, v in default_layout().storage_defaults().items() if k != "status_dir"}
 
 
 def config_candidates(explicit: str | os.PathLike[str] | None = None, env: Mapping[str, str] | None = None,

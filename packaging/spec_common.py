@@ -12,6 +12,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 ENTRY = ROOT / "packaging" / "entry_sentinel.py"
+# Windows only (integration): the service host as a second executable in the same one-folder
+# build, sharing _internal\ (docs/INTEGRATION.md, sentinel.winsvc.commands.SERVICE_EXE_NAME).
+SERVICE_ENTRY = ROOT / "packaging" / "entry_service.py"
+SERVICE_EXE_NAME = "SentinelService"
 
 # Development-only or unused modules that must not ship in the program:
 # * sentinel.sim opens a TCP listener (simulated camera) - development tool only (docs/07);
@@ -22,6 +26,11 @@ EXCLUDES = ["sentinel.sim", "sentinel.sim.camera", "tkinter", "_tkinter", "pytes
 # analysis never depends on how PyInstaller's bytecode scan treats function-level imports.
 HIDDEN_IMPORTS = ["sentinel.platform.windows", "sentinel.platform.posix", "sentinel.launcher.cli",
                   "sentinel.service"]
+# The service executable (and the launcher's service control) import these lazily.
+SERVICE_HIDDEN_IMPORTS = ["sentinel.winsvc", "sentinel.winsvc.__main__", "sentinel.winsvc.scm",
+                          "sentinel.winsvc.commands", "sentinel.winsvc.control", "sentinel.winsvc.credstore",
+                          "sentinel.winsvc.dpapi", "sentinel.winsvc.eventlog", "sentinel.winsvc.codeacl",
+                          "sentinel.watchdog", "sentinel.platform.winacl"]
 
 
 def version() -> str:

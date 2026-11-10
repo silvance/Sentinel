@@ -84,7 +84,7 @@ folder like `C:\ffmpeg\bin` (which inherits "Authenticated Users: Modify" from `
 
 | Platform | Configuration and camera credentials | Recordings (spool), ledger + status (data), logs |
 |---|---|---|
-| Windows | `%ProgramData%\Sentinel\sentinel.toml`, `...\camera.secret` | `%ProgramData%\Sentinel\spool`, `\data`, `\logs` |
+| Windows | `%ProgramData%\Sentinel\config\sentinel.toml`, `...\config\camera.secret` (DPAPI content; integration: same layout as the Windows service) | `%ProgramData%\Sentinel\spool`, `\data`, `\logs`, `\status` (status_dir) |
 | Linux as root (systemd) | `/etc/sentinel/sentinel.toml`, `/etc/sentinel/camera.secret` | `/var/lib/sentinel/spool`, `/var/lib/sentinel/data`, `/var/log/sentinel` |
 | Linux as a user | `$XDG_CONFIG_HOME/sentinel/` (default `~/.config/sentinel/`) | `$XDG_DATA_HOME/sentinel/spool|data|logs` (default `~/.local/share/sentinel/`) |
 
@@ -120,8 +120,8 @@ written. Everything else keeps the tested defaults (5-minute segments, audio exc
   file's own DACL) and verified again. Linux: `O_CREAT|O_EXCL` with mode `0600`, verified, renamed.
   **Any failure aborts setup and deletes the plaintext**; the configuration is written only after
   the secret succeeded. **Interim:** the recorder has to run under the setup account (run setup
-  while logged in as the account that will use Sentinel). The Windows-service branch replaces
-  this file with DPAPI storage and grants its service account access.
+  while logged in as the account that will use Sentinel). On Windows the file's content is
+  DPAPI-protected (machine scope, integration); installing the service grants its account access.
 * `setup --simulated-camera tcp://127.0.0.1:8554` (hidden, developer only) writes a
   `development_source = true` configuration; every status then shows Z-001.
 
@@ -155,15 +155,23 @@ written. Everything else keeps the tested defaults (5-minute segments, audio exc
   design/windows-service) or, on Linux, the systemd unit.
 
 ### Plug-in points for the other branches (no packaging change needed)
-* **Windows service** (design/windows-service): insert a provider at the **front** of
-  `sentinel.launcher.control.CONTROL_PROVIDERS` that returns a Service-Control-Manager control
-  whenever the service is **installed, in any state**: `is_running` = SCM state RUNNING, `start`
-  = StartService (if access is denied, show C-003 — never fall back), `stop` = ControlService.
-  While the service is installed the launcher must never start a detached recorder (two
-  recorders would race for the lock, and the session one would stop at logoff); setup should
-  then also hand credentials to the service's DPAPI store instead of `camera.secret`. The service host runs the same
-  `Sentinel.exe` (e.g. a new `service` sub-command); `service.run_recorder(config, before_run=…)`
-  lets it attach the SCM stop callback exactly as the launcher attaches its stop channel.
+* **Windows service** (design/windows-service) — **done at integration** (docs/INTEGRATION.md):
+  * `sentinel.winsvc.control.service_control_provider` is the first entry of
+    `CONTROL_PROVIDERS`. It returns a Service-Control-Manager control whenever the service is
+    **installed, in any state**: `is_running` = RUNNING/START_PENDING, `start` = StartService
+    (access denied → C-003, never a fallback; a service that stops again with exit 2 → C-001),
+    `stop` = ControlService. If the SCM cannot be asked, it fails closed (C-003, nothing started).
+    While the service is installed the launcher only shows the status from `[storage] status_dir`;
+    it does not check or write the service-only data/spool/log folders.
+  * Setup writes the service's layout: `%ProgramData%\Sentinel\config\sentinel.toml` and
+    `config\camera.secret` with **DPAPI (machine scope) content** on Windows (the same bytes as
+    `set-camera-credentials`; the format is detected by content), plus `status_dir`.
+  * The service host is a **second executable in the same one-folder build**,
+    `SentinelService.exe` (entry `packaging/entry_service.py` → `sentinel.winsvc.__main__:main`,
+    `host` assumed when no sub-command is given), as the service branch recommended; the SCM runs
+    `"SentinelService.exe" host --config <cfg>`. Added to `packaging/windows/sentinel.spec` and
+    checked by `build.py`. **NOT BUILT at integration** (PyInstaller is not installed in the
+    project venv; installing it would need a download).
 * **Operator GUI** (req/operator-gui): append a provider to `sentinel.launcher.view.VIEW_PROVIDERS`
   returning an object with `run(status_path, camera_name, started_after, once, start_problem)`.
   PyInstaller follows the import and its PySide6 hooks collect Qt automatically; expect the

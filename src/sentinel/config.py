@@ -104,8 +104,8 @@ class ServiceConfig:
 class ExportConfig:
     """Review-drive export (sentinel.export). Byte verification of every file is always done;
     ``content_check`` only controls the additional decoded-picture comparison of MP4 videos:
-    full | sampled | deferred (see docs/branches/req-review-drive-export.md). The provisional
-    default is an OWNER DECISION still open."""
+    full | sampled | deferred (see docs/branches/req-review-drive-export.md). Default
+    "sampled": owner decision, confirmed at integration (docs/INTEGRATION.md)."""
     content_check: str = "sampled"
     sample_edge_frames: int = 30              # sampled: frames checked at the start and at the end
     sample_spans: int = 3                     # sampled: additional spans at pseudo-random positions

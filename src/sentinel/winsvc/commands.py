@@ -68,6 +68,10 @@ def render(step: Step) -> str:
 
 
 # ---------------------------------------------------------------------- service command line
+SERVICE_EXE_NAME = "SentinelService.exe"   # frozen build: service host executable (integration)
+LAUNCHER_EXE_NAME = "Sentinel.exe"         # frozen build: the operator's program (no ``host`` command)
+
+
 @dataclass(frozen=True)
 class HostCommand:
     command_line: str
@@ -94,6 +98,13 @@ def host_command(config_path: Path, *, frozen: bool | None = None, executable: s
     executable = executable or sys.executable
     cfg = str(config_path)
     if frozen:
+        # Integration: the one-folder build ships the service host as its own executable,
+        # SentinelService.exe, next to the operator's Sentinel.exe (packaging/windows/sentinel.spec).
+        # If the operator program runs ``install``, the service still points at SentinelService.exe
+        # (Sentinel.exe has no ``host`` command); any other frozen executable is used as it is.
+        exe_path = Path(executable)
+        if exe_path.name.lower() == LAUNCHER_EXE_NAME.lower():
+            executable = str(exe_path.with_name(SERVICE_EXE_NAME))
         return HostCommand(_command_line(executable, ["host", "--config", cfg]), (), executable,
                            (str(Path(executable).parent),))
     base_executable = base_executable or getattr(sys, "_base_executable", executable)

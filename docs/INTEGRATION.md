@@ -107,3 +107,62 @@ for operators; no credentials are stored in them).
   `status_dir`, `export` and `drives`.
 * `service.py`, `alerts.py` (C-002, C-003), example config, `platform/base.py`/`posix.py`
   auto-merged. Catalogue: 36 codes, no duplicates.
+
+## Cross-branch items after merge 6 (single-executable x windows-service x drive-prepare x export)
+Committed separately after the merge commit. Unit tests afterwards: **493 passed** (480 + 13 new in
+`tests/unit/test_integration_cross_branch.py`).
+
+**(a) Service executable in the frozen build.** As the windows-service branch recommended
+(option b), the one-folder build now contains a second executable, `SentinelService.exe`
+(`packaging/entry_service.py` → `sentinel.winsvc.__main__:main`; with no sub-command `host` is
+assumed), sharing `_internal\` with `Sentinel.exe` (`packaging/windows/sentinel.spec`: second
+`Analysis`/`EXE` in the same `COLLECT`; `spec_common.SERVICE_*`; `build.py` refuses a build
+without it). `winsvc.commands.host_command(frozen=True)` points the service at
+`SentinelService.exe` when `install` is run from `Sentinel.exe`; any other frozen executable is
+used as it is (keeps the service branch's tests valid). Decision: `console=True` for the service
+exe, deviating from "console-less" in the service notes: under the SCM there is no visible
+console either way (the source install already runs console `python.exe`), and the technician
+sub-commands (`install`, `status`, `set-camera-credentials`) must print in an elevated prompt.
+**NOT BUILT**: PyInstaller is not installed in the project venv and installing it needs a
+download; the spec was only syntax-checked (`ast.parse`) and is unit-checked for the entries.
+Linux packaging unchanged (systemd, no second executable).
+
+**(b) One configuration / secret layout, launcher defers to the service.**
+* Layout (`sentinel/paths.py`): Windows `%ProgramData%\Sentinel\config\sentinel.toml` +
+  `config\camera.secret`, spool/data/logs as before, plus `%ProgramData%\Sentinel\status`
+  (`Layout.status_dir`). This is the service branch's proposal (own config folder that its
+  installer re-permissions; the single-exe file name `camera.secret`). The old
+  `%ProgramData%\Sentinel\sentinel.toml` is not searched (never released). Linux unchanged.
+  `default_storage_dirs()` deliberately does **not** default `status_dir`: a configuration with
+  its own `data_dir` but no `status_dir` keeps status beside its data (otherwise e.g. a test
+  configuration would write into the machine's status folder).
+* Setup (`launcher/setup.py`): writes `status_dir` (and creates it private like the others);
+  on Windows the secret's **content** is the service's DPAPI format (machine scope, via
+  `winsvc.credstore.protected_file_bytes`), still created private-at-creation with
+  `winacl.write_private_file`, read back and decrypted before it replaces the target. Linux keeps
+  plain TOML 0600. Test: DPAPI round trip through `credentials.load_credentials`, no plaintext on
+  disk, still private.
+* `drives/installed.py`: the installed-config path now comes from `sentinel.paths`
+  (`…\Sentinel\config\sentinel.toml` on Windows), as drive-prepare asked to agree with packaging.
+* Launcher (`launcher/control.py`, new `winsvc/control.py`, `winsvc/scm.py` `start_service` /
+  `stop_service`): `CONTROL_PROVIDERS[0]` asks the SCM whether `SentinelRecorder` is installed;
+  if so a `ServiceControl` is used (StartService / ControlService; access denied → C-003 with no
+  detached fallback; stopped again with exit 2 → C-001; SCM not queryable → fail closed, C-003).
+  `cmd_launch` with a service-managed control skips the detached-mode location checks, the
+  launcher lock and log in the service-only folders, and shows `cfg.status_path`
+  (`status_dir`). Detached mode now also reads `cfg.status_path` (= `data_dir` unless set).
+  Real StartService/ControlService: **NOT EXECUTED** (no service can be installed without
+  administrator rights); covered with a fake SCM.
+* Tests changed because the agreed layout changed (expected values only, behaviour asserted is
+  the same): `test_paths_tools.py::test_windows_layout_uses_programdata`,
+  `::test_config_lookup_order`, `test_drives_review_fixes.py::test_installed_path_names`.
+* Docs: docs/08 §4/§5, `config/sentinel.windows.example.toml` (`camera.secret`), winsvc help text.
+
+**(c) Owner decisions.** `[export] content_check` default `"sampled"` confirmed (was already the
+code default; "provisional" wording removed from config.py and the example config). Archive
+policy default `"any_drive"`: to be applied when design/archive-drive merges (not merged yet).
+
+**Not integrated here (recorded):** the service host path (`run_recorder_in_host`) does not run
+single-exe's `install_check.location_problems`; it has its own stronger program-file ACL check
+and the credentials-file DACL check. Adding the location check there is left for the owner's
+first real service install, since that path cannot be executed on this machine.

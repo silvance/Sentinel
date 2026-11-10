@@ -53,7 +53,7 @@ log_level = "INFO"
 #   "full"     decode every frame (slow: hours per day of 5MP footage)
 #   "sampled"  frame count check + decode the first/last frames and a few spans per video
 #   "deferred" none now; run `python -m sentinel.export verify-content` later on the drive
-# PROVISIONAL DEFAULT "sampled" - owner decision pending.
+# Default "sampled" (owner decision confirmed at integration, 2026-11-10).
 content_check = "sampled"
 sample_edge_frames = 30
 sample_spans = 3

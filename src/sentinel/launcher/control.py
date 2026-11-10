@@ -4,14 +4,15 @@
 implementation, :class:`DetachedProcessControl`: the launcher starts the recorder as a
 background process of the same executable (``Sentinel.exe recorder run``) with no window.
 
-To plug in the Windows service (branch design/windows-service), insert a provider at the
-**front** of ``CONTROL_PROVIDERS`` that returns a service-backed control whenever the service is
-*installed* (whatever its state): ``is_running`` = SCM state RUNNING, ``start`` = StartService
-(access denied => C-003, never a fallback), ``stop`` = ControlService(STOP). While the service is
-installed the launcher must never start a detached recorder, otherwise two recorders would race
-for the lock and the one running in the user session would stop at logoff. The executable, the
-spec file and the build script do not change: the service host runs the same ``Sentinel.exe``
-with a different sub-command and calls ``service.run_recorder``.
+The Windows service (branch design/windows-service) is plugged in at integration: the first
+entry of ``CONTROL_PROVIDERS`` is ``sentinel.winsvc.control.service_control_provider``, which
+returns a service-backed control whenever the service is *installed* (whatever its state):
+``is_running`` = SCM state RUNNING, ``start`` = StartService (access denied => C-003, never a
+fallback), ``stop`` = ControlService(STOP). While the service is installed the launcher never
+starts a detached recorder, otherwise two recorders would race for the lock and the one running
+in the user session would stop at logoff. The frozen build ships the service host as a second
+executable, ``SentinelService.exe`` (entry ``sentinel.winsvc.__main__:main``), in the same
+one-folder build (docs/08, docs/INTEGRATION.md).
 
 Interim detached mode (this module): the recorder is a child of the logged-on user's session.
 It stops when that user logs off or the PC restarts, depends on that user being logged on, and
@@ -111,7 +112,7 @@ class DetachedProcessControl:
         self._sleep = sleep
         self.command = command or recorder_command(self.config_path)
         self.lock_path = cfg.data_path / LOCK_NAME
-        self.status_path = cfg.data_path / "status.json"
+        self.status_path = cfg.status_path   # [storage] status_dir (default: data_dir)
 
     def is_running(self) -> bool:
         """Non-intrusive check (``stopsignal.recorder_alive``); never touches the instance lock.
@@ -174,7 +175,18 @@ class DetachedProcessControl:
 # Providers are tried in order; the first that returns a control wins. The detached process is
 # the fallback. Signature: (config_path, cfg) -> RecorderControl | None.
 ControlProvider = Callable[[Path, AppConfig], "RecorderControl | None"]
-CONTROL_PROVIDERS: list[ControlProvider] = []
+
+
+def _windows_service_provider(config_path: Path, cfg: AppConfig) -> "RecorderControl | None":
+    """Defer to the installed Windows service (integration; returns None elsewhere)."""
+    if sys.platform != "win32":
+        return None
+    from ..winsvc.control import service_control_provider
+
+    return service_control_provider(config_path, cfg)
+
+
+CONTROL_PROVIDERS: list[ControlProvider] = [_windows_service_provider]
 
 
 def select_control(config_path: Path, cfg: AppConfig) -> RecorderControl:

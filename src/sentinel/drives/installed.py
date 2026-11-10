@@ -4,9 +4,9 @@ The disks that must never be erased (spool, ledger, logs) are taken from the con
 administrator passing the wrong ``--config`` (a copy, a test file, another appliance's) would
 therefore protect the wrong disks. Erasing is refused unless ALL of these hold:
 
-1. the file is the installed configuration path (design choice, must be agreed with packaging):
-   Windows ``%ProgramData%\\Sentinel\\sentinel.toml``; Linux ``/etc/sentinel/sentinel.toml``
-   (the path docs and the example config already name);
+1. the file is the installed configuration path (agreed at integration with packaging and the
+   Windows service, ``sentinel.paths``): Windows ``%ProgramData%\\Sentinel\\config\\sentinel.toml``;
+   Linux ``/etc/sentinel/sentinel.toml``;
 2. its ``spool_dir`` and ``data_dir`` exist as directories (no "nearest existing parent" guess);
 3. ``<data_dir>/sentinel.db`` exists and is a Sentinel ledger (``schema_meta.schema_version``);
 4. ``<data_dir>/recorder.lock`` exists — the recorder service has run with this configuration
@@ -27,9 +27,14 @@ from typing import Any
 
 
 def installed_config_path() -> Path:
+    """Integration: the one installed location shared with packaging (``sentinel.paths``) and the
+    Windows service: ``%ProgramData%\\Sentinel\\config\\sentinel.toml`` on Windows,
+    ``/etc/sentinel/sentinel.toml`` on Linux."""
+    from ..paths import default_layout
+
     if sys.platform == "win32":
-        return Path(os.environ.get("ProgramData", r"C:\ProgramData")) / "Sentinel" / "sentinel.toml"
-    return Path("/etc/sentinel/sentinel.toml")
+        return default_layout("win32").config_file
+    return default_layout(sys.platform, is_root=True).config_file
 
 
 def _same(a: Path, b: Path) -> bool:
