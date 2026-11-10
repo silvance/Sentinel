@@ -428,3 +428,28 @@ Uncommitted on `main` (based on `bd1a445`) at the time of writing.
   built program, the console hiding on a real double-click. **Open:** Qt/PySide6 are LGPL-3.0 like
   FFmpeg — their licence texts and source offer must ship with a release (build.py copies only
   FFmpeg's today).
+
+## Release preparation (branch release-prep, 2026-11-10)
+Commits after main d377626: operator screen bundled; `setup --camera-later` / `set-camera` (P-002);
+third-party licences and LGPL source offer in the build (`licences/`, `packaging/fetch_sources.py`;
+sources archived in `third_party/sources/`, Qt archives matched Qt's md5sums); `export` and `drives`
+reachable from `Sentinel.exe`; bench-test checklist (docs/09); shutdown with a busy fingerprint
+worker made explicit (`LedgerClosed`); test fixes below.
+
+Results (Windows 11, BtbN LGPL FFmpeg n9.0.2-48-gd4070a14ce, simulated camera):
+* Full suite, idle machine: **1107 passed, 2 failed** (18 min). Both failures re-run alone:
+  `test_slow_camera_and_drifting_pc_clock_stay_on_reception_time` passed;
+  `test_camera_offline_shows_interrupted_and_recovers` passed 3/3 here and 3/3 on main — a race in the
+  test (status says INTERRUPTED before the gap row exists while FFmpeg stops gracefully); the test now
+  waits for both. `test_recorder_faults.py` afterwards: 11 passed.
+* Load test (20 CPU burners on 20 cores + PyInstaller builds): the fingerprint-worker shutdown issue
+  (fixed) and sub-second time deviations caused by the starved simulator and poll-based reference,
+  not by the recorder (documented in tests/integration/test_time_accuracy.py). The slow-camera drift
+  test is load-sensitive: it failed once in the idle full suite with a single "time_correction_limited"
+  segment (the recorder declining to follow a 0.18 s reception-time jump), probably background disk
+  activity (Defender scanning the fresh build); it passed when re-run.
+* Build at 22acf7c: 786 files, 373.9 MB; `about --verify` OK; `licences/` present; frozen launcher and
+  GUI launch tests 8 passed; frozen `setup --camera-later` + `recorder run`: no runs, no FFmpeg,
+  `camera_pending` event, clean stop.
+* Not verified: the operator screen on a real display; console hiding on a real double-click; real
+  camera, drives, administrator service install (docs/09).

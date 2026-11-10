@@ -109,7 +109,11 @@ def test_camera_offline_shows_interrupted_and_recovers(tmp_path: Path, cam: Simu
         cam.go_offline()
         st = wait_for(lambda: (s := h.status()).get("overall") == "INTERRUPTED" and s, 25,
                       what="INTERRUPTED status")
-        assert st["camera_link"] == "disconnected" and st["open_gap"] is not None
+        assert st["camera_link"] == "disconnected"
+        # The status says "interrupted" as soon as video stops; the gap row is opened when the run
+        # has ended, i.e. after FFmpeg's graceful stop (up to stop_grace_s), so it can lag a little.
+        wait_for(lambda: (s := h.status()).get("overall") == "INTERRUPTED" and s.get("open_gap") is not None,
+                 15, what="open gap in the status")
         time.sleep(4)                                          # several failed attempts
         cam.go_online()
         wait_for(lambda: h.status().get("overall") == "RECORDING", 40, what="RECORDING after outage")
