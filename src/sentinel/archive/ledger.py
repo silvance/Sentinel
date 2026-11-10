@@ -15,6 +15,7 @@ from typing import Any
 
 from ..clock import iso_utc
 from ..db import Ledger
+from ..export.ledger import retry_locked   # reused: retries a ledger call when SQLite reports locked/busy
 from .layout import KIND_FRAMEHASH, MEDIA_KINDS
 
 SEALED = ("FINALIZED", "INTERRUPTED", "CORRUPT")
@@ -55,6 +56,7 @@ class ArchiveLedger:
         return sql, (self.camera_id, *dp, *dp)
 
     # ------------------------------------------------------------------ queries
+    @retry_locked
     def pending_segments(self, drive_id: str, limit: int = 50, exclude: frozenset[str] = frozenset()) -> list[sqlite3.Row]:
         """Oldest first (insertion order, never wall-clock text): sealed segments with a media file
         or an available per-frame list not yet verified on ``drive_id`` (or on any drive)."""
@@ -63,6 +65,7 @@ class ArchiveLedger:
                                  f"LIMIT ?", (*params, limit + len(exclude)))
         return [r for r in rows if r["segment_id"] not in exclude][:limit]
 
+    @retry_locked
     def has_copy(self, segment_id: str, drive_id: str, kind: str) -> bool:
         """Does ``kind`` of this segment count as archived for ``drive_id`` under the policy?"""
         if kind in MEDIA_KINDS:
@@ -78,10 +81,12 @@ class ArchiveLedger:
                                      f"AND drive_id=? LIMIT 1", (segment_id, *kinds, drive_id))
         return bool(rows)
 
+    @retry_locked
     def copy_at(self, drive_id: str, path: str) -> sqlite3.Row | None:
         rows = self.ledger.query("SELECT * FROM archive_copies WHERE drive_id=? AND path=?", (drive_id, path))
         return rows[0] if rows else None
 
+    @retry_locked
     def copies_on(self, drive_id: str) -> list[sqlite3.Row]:
         return self.ledger.query(
             "SELECT a.*, s.run_id, s.seq, s.state, s.start_utc, s.end_utc, s.duration_s, s.interrupted, "
@@ -90,6 +95,7 @@ class ArchiveLedger:
             "FROM archive_copies a JOIN segments s ON s.segment_id=a.segment_id "
             "WHERE a.drive_id=? ORDER BY s.rowid, a.kind", (drive_id,))
 
+    @retry_locked
     def backlog(self, drive_id: str | None = None) -> Backlog:
         """``drive_id`` None: what is not verified on ANY archive drive (the operator's "Not yet
         archived" — footage that exists only on this system). With a drive: the work queue for that
@@ -111,6 +117,7 @@ class ArchiveLedger:
             f"WHERE a.segment_id=s.segment_id AND a.kind='{KIND_FRAMEHASH}'{dc})", (self.camera_id, *dp))[0]
         return Backlog(int(media["n"]), float(media["d"] or 0.0), int(media["b"] or 0), oldest, int(side["n"]))
 
+    @retry_locked
     def other_drives_holding(self, segment_ids: list[str], drive_id: str) -> dict[str, list[str]]:
         out: dict[str, list[str]] = {}
         kinds = ",".join(f"'{k}'" for k in MEDIA_KINDS)
@@ -122,16 +129,19 @@ class ArchiveLedger:
                 out.setdefault(r["segment_id"], []).append(r["drive_id"])
         return out
 
+    @retry_locked
     def segments_in_span(self, first_rowid: int, last_rowid: int) -> list[sqlite3.Row]:
         return self.ledger.query("SELECT s.*, s.rowid AS _rowid FROM segments s WHERE s.camera_id=? AND s.rowid "
                                  "BETWEEN ? AND ? ORDER BY s.rowid", (self.camera_id, first_rowid, last_rowid))
 
+    @retry_locked
     def next_index_generation(self, drive_id: str) -> int:
         rows = self.ledger.query("SELECT COALESCE(MAX(generation),0)+1 g FROM archive_indexes WHERE drive_id=?",
                                  (drive_id,))
         return int(rows[0]["g"])
 
     # ------------------------------------------------------------------ writes
+    @retry_locked
     def record_verified(self, *, segment_id: str, drive_id: str, kind: str, path: str, sha256: str,
                         size_bytes: int, verify_method: str, already_present: bool = False) -> str:
         """Record a copy that has ALREADY been verified by read-back. Refuses a hash that differs
@@ -152,6 +162,7 @@ class ArchiveLedger:
                        verified))
         return verified
 
+    @retry_locked
     def record_index(self, drive_id: str, generation: int, generated_utc: str, reason: str, copies: int,
                      json_sha256: str, sums_sha256: str) -> None:
         with self.ledger.tx() as c:

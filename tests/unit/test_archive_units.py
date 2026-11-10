@@ -316,6 +316,18 @@ def test_unprepared_drive_is_refused(env: Env, tmp_path: Path) -> None:
     assert len(env.ledger.query("SELECT * FROM archive_copies")) == 1
 
 
+def test_archive_onto_recording_or_system_volume_is_refused(env: Env) -> None:
+    env.segments(1)
+    a = make_drive(env.tmp, "A")             # same volume as spool, ledger and logs in this test
+    w = ArchiveWorker(env.cfg, ledger=env.ledger, locator=SwitchLocator(a), lower_own_priority=False)
+    assert w.step() == "unusable"
+    st = env.status()
+    assert st["state"] == "UNUSABLE" and "A-005" in env.codes()
+    assert "recording storage" in st["problems"]["unusable_reason"]
+    assert list(a.root.iterdir()) == []      # nothing written, not even the probe or the index
+    assert env.ledger.query("SELECT COUNT(*) n FROM archive_copies")[0]["n"] == 0
+
+
 # ------------------------------------------------------------------ swap
 def _drive_ids(env: Env) -> list[str]:
     return [r["drive_id"] for r in env.ledger.query("SELECT drive_id FROM drives ORDER BY rowid")]

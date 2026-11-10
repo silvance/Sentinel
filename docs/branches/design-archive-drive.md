@@ -1,5 +1,14 @@
 # Branch `design/archive-drive` — continuous archive drive (built on `req/review-drive-export`)
 
+> **Rebased** onto `req/review-drive-export` @ `94c778c` (its review fixes). Conflicts were only in
+> `config.py` (both branches add an optional section: `[export]` and `[archive]` kept side by side)
+> and `config/sentinel.example.toml` (both examples kept). Reused from the updated export branch:
+> fail-closed `protected_volume_conflicts` / `system_paths` (the archive now refuses the spool, ledger,
+> log **and** system volumes, and refuses when the volume cannot be examined) and `retry_locked` for
+> every archive ledger call. `fileio.py` / `db.py` / `alerts.py` merged without conflict (my
+> `write_new(fsync_every=...)`, `ARCHIVE_DDL`, WAL-open retry and A-codes are unchanged). Export's new
+> content-check levels do not apply: the archive copies originals only, verified byte-for-byte.
+
 ## 1. Summary
 Recordings still always land on the internal disk first. A new background program copies every
 finished recording, oldest first, to an attached archive drive (for example a 3.5" disk in a
@@ -65,8 +74,9 @@ The drive always carries its own index of what is on it.
   archive drive yet). "Not yet archived: N h" always means *not verified on any archive drive*.
 * **Drive acceptance:** `ConfiguredPathLocator` watches `[archive] drive_path`; with
   `require_drive_marker = true` (default) only a drive with `SENTINEL_DRIVE.json` (`drive_uuid`,
-  written by the drive-preparation branch) is used, else A-005 and nothing is written. The archive
-  folder on the recording volume itself is refused. Identity/`drives` row reused from the export.
+  written by the drive-preparation branch) is used, else A-005 and nothing is written. An archive
+  location on the volume of the recording storage, the ledger, the logs or the operating system is
+  refused (fail closed, same check as the review export). Identity/`drives` row reused from the export.
 * **Index cadence is not "after every copy"**: the journal covers the gap, so a large index is not
   rewritten every few minutes onto a platter drive.
 
@@ -94,13 +104,16 @@ The drive always carries its own index of what is on it.
   (missing/stale archive status ⇒ A-007). Additive field; overall recording status unaffected.
 * `config/sentinel.example.toml` `[archive]` example; `packaging/systemd/sentinel-archive.service`
   (draft, NOT EXECUTED); `docs/04` implementation note.
-* Tests: `tests/archive_helpers.py`, `tests/unit/test_archive_units.py` (29),
+* Tests: `tests/archive_helpers.py`, `tests/unit/test_archive_units.py` (30),
   `tests/integration/test_archive_drive.py` (3).
 
 ## 4. Tests (Windows 11, Python 3.14, FFmpeg 9.0.1, i7-12700K, 96 GB RAM, internal NVMe SSD)
-* `"…\.venv\Scripts\python.exe" -m pytest tests/unit -q -p no:cacheprovider` → **113 passed**
-  (84 pre-existing + 29 new).
-* `… -m pytest tests/integration/test_archive_drive.py -q -p no:cacheprovider -s` → **3 passed**.
+* After the rebase onto `94c778c`: `"…\.venv\Scripts\python.exe" -m pytest tests/unit -q -p no:cacheprovider`
+  → **120 passed** (90 from the export base + 30 archive). Before the rebase: 113 (84 + 29).
+* `… -m pytest tests/integration/test_archive_drive.py -q -p no:cacheprovider -s` → **3 passed**
+  (after the rebase: 3 passed, 138 s; lag −0.034..0.012 s, max progress interval 1.024 s while archiving).
+* After the rebase: `… -m pytest tests/integration/test_review_export.py -q -p no:cacheprovider` →
+  **26 passed** (81 s) — the export branch is unaffected by the archive hooks.
 * Full integration suite: see §4a.
 
 Unit tests cover: backlog drains oldest first, sidecars, periodic fsync, local spool byte-identical
@@ -192,8 +205,8 @@ the throttle, not the disk, should be the limit; over USB 2 (~30 MB/s) expect ro
    archive copy — it is deliberately not implemented (E6).
 3. A-006 / A-005 alerts clear when that drive is removed (the event stays in the ledger).
 4. Index cadence: up to 1 h of copies are documented only in the journal until the next rewrite/swap.
-5. Archive and review drives are different drives; the archive worker refuses only the recording
-   volume itself, not a review drive inserted at the archive location (require the marker, and in
+5. Archive and review drives are different drives; the archive worker refuses the recording,
+   ledger, log and system volumes, not a review drive inserted at the archive location (require the marker, and in
    future a role in `SENTINEL_DRIVE.json`, to prevent mix-ups).
 6. Merge risks: `config.py` (new section), `db.py` (new DDL block + WAL retry), `alerts.py` (A-codes,
    no collision with R/S/V/T/C/D/X/Z/E/M), `service.py` (status hook), `fileio.py` (optional parameter).

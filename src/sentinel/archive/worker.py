@@ -48,7 +48,8 @@ from ..config import AppConfig
 from ..db import Ledger
 from ..export.fileio import PARTIAL, SourceMismatch, is_disk_full
 from ..export.ledger import ExportLedger
-from ..export.target import ExportTarget, ManualRemovalFallback, SafeRemover, TargetError, same_volume
+from ..export.target import (ExportTarget, ManualRemovalFallback, SafeRemover, TargetError,
+                             protected_volume_conflicts, system_paths)
 from ..platform import get_platform
 from ..platform.base import InstanceLockError
 from . import index as idx
@@ -327,10 +328,21 @@ class ArchiveWorker:
         root = Path(target.root)
         if not self.io.root_present(root):
             return False
-        if not self.allow_same_volume and same_volume(root, self.cfg.spool_path):
-            self.unusable_reason = "the archive drive is the recording storage itself"
-            self._set(ST_UNUSABLE, "This drive cannot be used as an archive drive. Recording continues.")
-            return False
+        if not self.allow_same_volume:
+            # Same fail-closed rule as the review export: never archive onto the volume holding the
+            # recordings, the ledger, the logs or the operating system.
+            protected = {"recording storage": self.cfg.spool_path, "recorder database": self.cfg.data_path,
+                         "recorder logs": self.cfg.log_path, **system_paths()}
+            try:
+                clash = protected_volume_conflicts(root, protected)
+            except TargetError as exc:
+                clash = [f"(cannot confirm it is a separate drive: {exc})"]
+            if clash:
+                self.unusable_reason = "the archive location is on the same volume as the " + ", ".join(clash)
+                self._event("warning", "archive_drive_unusable", "Archive location refused",
+                            {"reason": self.unusable_reason, "identity": target.identity})
+                self._set(ST_UNUSABLE, "This drive cannot be used as an archive drive. Recording continues.")
+                return False
         full = False
         try:
             self.io.makedirs(root / layout.INDEX_DIR)
