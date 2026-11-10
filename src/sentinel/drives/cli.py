@@ -160,6 +160,13 @@ def cmd_prepare(env: _Env, args: argparse.Namespace, *, reader: Callable[[str], 
     if env.cfg is None:
         print("prepare needs --config (to know where recordings are kept and where to write the audit record).")
         return EXIT_USAGE
+    if not env.policy.erase_enabled and not args.dry_run:
+        from .classify import ERASE_DISABLED_MESSAGE
+
+        print(f"{_alert_line('M-010')}\n{ERASE_DISABLED_MESSAGE} Nothing was erased.")
+        print("(Administrators: see docs/branches/design-drive-prepare.md section 9 before setting "
+              "[drives] erase_enabled = true.)")
+        return EXIT_REFUSED
     not_installed = _installed.installed_config_problems(env.config_path, env.cfg)
     if not_installed and not args.dry_run:
         print(_alert_line("M-008"))

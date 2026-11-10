@@ -60,13 +60,13 @@ def _ctx(ledger: Ledger, enum: Sequence, runner: FakeRunner, root: Path, *, poli
             return inspect_root(root)
         return (inspector or FakeInspector())(v)
 
-    return PrepareContext(policy=policy or DrivePolicy(), protected=protected_for(), enumerate=enum, runner=runner,
+    return PrepareContext(policy=policy or DrivePolicy(erase_enabled=True), protected=protected_for(), enumerate=enum, runner=runner,
                           audit=ledger, platform="windows", inspector=insp, root_for_volume=lambda v: str(root),
                           settle_s=0.0, work_dir=root.parent / "work")
 
 
 def _conf(d, typed=None, policy=None, inspector=None) -> Confirmation:
-    c = classify(d, policy or DrivePolicy(), protected_for(), inspector=inspector or FakeInspector())
+    c = classify(d, policy or DrivePolicy(erase_enabled=True), protected_for(), inspector=inspector or FakeInspector())
     return Confirmation.for_classification(c, typed)
 
 
@@ -100,7 +100,7 @@ def test_blank_drive_prepared_end_to_end(ledger: Ledger, tmp_path: Path) -> None
     assert len(done) == 1 and done[0]["who"] == "operator7" and done[0]["disk"]["serial"] == d.serial
     assert len(_events(ledger, "drive_prepare_authorized")) == 1
     assert ledger.query("SELECT severity, category FROM events WHERE code='drive_prepared'")[0][:] == ("audit", "drives")
-    assert next_label(DrivePolicy(), ledger, []) == "SENTINEL_2"
+    assert next_label(DrivePolicy(erase_enabled=True), ledger, []) == "SENTINEL_2"
 
 
 def test_wrong_format_needs_single_confirmation_only(ledger: Ledger, tmp_path: Path) -> None:
@@ -169,7 +169,7 @@ def test_ready_drive_refused(ledger: Ledger, tmp_path: Path) -> None:
               "label": "SENTINEL_4", "prepared_utc": "x", "prepared_by": "y"}
     insp = FakeInspector({d.volumes[0].volume_id: RootContents(readable=True, entries=(MARKER_NAME,), marker=marker)})
     runner = FakeRunner(OK)
-    ctx = PrepareContext(policy=DrivePolicy(), protected=protected_for(), enumerate=Sequence([d, SYS]), runner=runner,
+    ctx = PrepareContext(policy=DrivePolicy(erase_enabled=True), protected=protected_for(), enumerate=Sequence([d, SYS]), runner=runner,
                          audit=ledger, platform="windows", inspector=insp, settle_s=0)
     with pytest.raises(PrepareRefused) as ei:
         prepare_drive(ctx, d.disk_id, Confirmation(d.disk_id, d.identity.fingerprint(), DriveClass.READY), ADMIN)
@@ -193,7 +193,7 @@ def test_foreign_serial_mismatch_refused(ledger: Ledger, tmp_path: Path, typed) 
 
 def test_policy_never_refuses_even_administrators(ledger: Ledger, tmp_path: Path) -> None:
     d = foreign_disk()
-    pol = load_policy({"foreign_data_authorization": "never"})
+    pol = load_policy({"erase_enabled": True, "foreign_data_authorization": "never"})
     insp = FakeInspector({d.volumes[0].volume_id: RootContents(readable=True, entries=("x",))})
     e = _refused(ledger, tmp_path, d, _conf(d, "ABCD", policy=pol, inspector=insp), ADMIN, policy=pol, inspector=insp)
     assert e.reason == "policy_never"
@@ -201,7 +201,7 @@ def test_policy_never_refuses_even_administrators(ledger: Ledger, tmp_path: Path
 
 def test_operator_with_serial_policy_allows_operator(ledger: Ledger, tmp_path: Path) -> None:
     d = foreign_disk()
-    pol = load_policy({"foreign_data_authorization": "operator_with_serial"})
+    pol = load_policy({"erase_enabled": True, "foreign_data_authorization": "operator_with_serial"})
     insp = FakeInspector({d.volumes[0].volume_id: RootContents(readable=True, entries=("x",))})
     root = tmp_path / "vol"
     enum, runner = _success_world(d, root)
@@ -310,7 +310,7 @@ def test_linux_flow_mounts_then_writes_marker(ledger: Ledger, tmp_path: Path) ->
 
     prot = ProtectedStorage((ProtectedItem(ROLE_OS, "/", os_device="252:0"),
                              ProtectedItem(ROLE_SPOOL, "/var/lib/sentinel", os_device="259:0")))
-    ctx = PrepareContext(policy=DrivePolicy(), protected=prot, enumerate=enum, runner=FakeRunner(OK, on_run=on_run),
+    ctx = PrepareContext(policy=DrivePolicy(erase_enabled=True), protected=prot, enumerate=enum, runner=FakeRunner(OK, on_run=on_run),
                          audit=ledger, platform="linux", inspector=lambda v: inspect_root(root) if v.mount_paths
                          and v.mount_paths[0] == str(root) else RootContents(readable=True), mount_volume=mount,
                          settle_s=0.0)

@@ -8,6 +8,12 @@ open item in docs/branches/design-drive-prepare.md:
   (admin_only | operator_with_serial | never).
 * ``allowed_bus_types = ("USB",)`` — the archive dock (Sabrent) is a USB device; disks built into
   the computer (SATA/NVMe) are never offered unless an administrator lists their bus here.
+* ``erase_enabled = false`` — OWNER DECISION (2026-11-10): the destructive "Erase and Set Up Drive"
+  path stays OFF until a supervised test with a scratch drive in the real dock has been done
+  (checklist in docs/branches/design-drive-prepare.md §9). Detection, classification and safe
+  removal work regardless. An administrator enables it with ``[drives] erase_enabled = true``.
+* ``approved_filesystem`` / ``foreign_data_authorization`` defaults were confirmed by the owner on
+  2026-11-10 (NTFS, admin_only).
 * ``min_size_gb = 128`` — less than about one day of recording at the upper bitrate estimate
   (12 Mbit/s ≈ 130 GB/day, docs/04 §1) is not useful as an archive drive.
 
@@ -38,6 +44,7 @@ class DrivePolicyError(ValueError):
 
 @dataclass(frozen=True)
 class DrivePolicy:
+    erase_enabled: bool = False
     approved_filesystem: str = "ntfs"
     foreign_data_authorization: str = "admin_only"
     allowed_bus_types: tuple[str, ...] = ("USB",)
@@ -65,6 +72,10 @@ def load_policy(raw: dict[str, Any] | None) -> DrivePolicy:
     if unknown:
         raise DrivePolicyError(f"[drives] unknown key(s): {', '.join(unknown)}")
     kw: dict[str, Any] = {}
+    if "erase_enabled" in raw:
+        if not isinstance(raw["erase_enabled"], bool):
+            raise DrivePolicyError("[drives] erase_enabled must be true or false")
+        kw["erase_enabled"] = raw["erase_enabled"]
     if "approved_filesystem" in raw:
         fs = str(raw["approved_filesystem"]).lower()
         if fs not in APPROVABLE_FILESYSTEMS:

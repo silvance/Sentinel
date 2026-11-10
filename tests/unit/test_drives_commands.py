@@ -209,7 +209,7 @@ def test_parse_linux_result() -> None:
 
 def test_drive_alert_codes_present_and_plain() -> None:
     codes = [c for c in CATALOG if c.startswith("M-")]
-    assert codes == [f"M-00{i}" for i in range(1, 10)]
+    assert codes == [f"M-{i:03d}" for i in range(1, 11)]
     assert "D-001" in CATALOG and CATALOG["D-001"].headline == "Recording database problem"  # unchanged
     for c in codes:
         d = CATALOG[c]

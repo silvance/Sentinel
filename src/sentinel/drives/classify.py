@@ -75,10 +75,12 @@ HARD_UNSUITABLE = ("system_disk", "recording_storage", "page_file")
 CHECKS_UNAVAILABLE = ("protected_unknown", "ledger_unavailable")
 EVIDENCE_MESSAGE = "This drive holds Sentinel recordings and will not be erased. Contact technical support."
 BLANK_MESSAGE = f"This drive is empty and must be set up before use. Press {ACTION_NAME}."
+ERASE_DISABLED_MESSAGE = "Setting up drives is not enabled on this system yet. Contact technical support."
 
 ALERT_FOR_CLASS = {DriveClass.BLANK: "M-001", DriveClass.WRONG_FORMAT: "M-002",
                    DriveClass.FOREIGN_DATA: "M-003", DriveClass.UNSUITABLE: "M-004",
                    DriveClass.SENTINEL_EVIDENCE: "M-009"}
+ERASE_DISABLED_CODE = "M-010"
 
 
 @dataclass(frozen=True)
@@ -251,6 +253,13 @@ def classify(disk: DiskInfo, policy: DrivePolicy, protected: ProtectedStorage, *
 def _preparable(disk: DiskInfo, policy: DrivePolicy, cls: DriveClass, reasons: tuple[str, ...], msg: str, *,
                 filesystem: str | None = None, used: int | None = None, notes: Iterable[str] = ()) -> Classification:
     can, admin, serial, refusal = True, False, False, None
+    code = ALERT_FOR_CLASS[cls]
+    if not policy.erase_enabled:
+        # Owner decision 2026-11-10: the class is still reported, but no erase button is offered.
+        first = msg.split(". ")[0].rstrip(".") + "."
+        return Classification(disk, cls, reasons, f"{first} {ERASE_DISABLED_MESSAGE}", ERASE_DISABLED_CODE,
+                              filesystem=filesystem, used_bytes=used, can_prepare=False, refusal="erase_disabled",
+                              notes=tuple(notes))
     if cls is DriveClass.FOREIGN_DATA:
         mode = policy.foreign_data_authorization
         if mode == "never":
@@ -258,7 +267,7 @@ def _preparable(disk: DiskInfo, policy: DrivePolicy, cls: DriveClass, reasons: t
         else:
             serial = True
             admin = mode == "admin_only"
-    return Classification(disk, cls, reasons, msg, ALERT_FOR_CLASS[cls], filesystem=filesystem, used_bytes=used,
+    return Classification(disk, cls, reasons, msg, code, filesystem=filesystem, used_bytes=used,
                           can_prepare=can, needs_admin=admin, needs_serial=serial, refusal=refusal, notes=tuple(notes))
 
 

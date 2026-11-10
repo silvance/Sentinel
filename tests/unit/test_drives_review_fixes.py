@@ -119,7 +119,7 @@ def test_sentinel_layouts_are_evidence_under_every_policy(tmp_path: Path, layout
     if marker_text is not None:
         (root / MARKER_NAME).write_text(marker_text, encoding="utf-8")
     d = foreign_disk()
-    pol = load_policy({"foreign_data_authorization": policy})
+    pol = load_policy({"erase_enabled": True, "foreign_data_authorization": policy})
     c = classify(d, pol, protected_for(), inspector=_dir_inspector({d.volumes[0].volume_id: root}))
     assert c.drive_class is DriveClass.SENTINEL_EVIDENCE, (layout, c.reasons)
     assert c.message == EVIDENCE_MESSAGE == "This drive holds Sentinel recordings and will not be erased. " \
@@ -139,7 +139,7 @@ def test_valid_marker_on_wrong_filesystem_or_second_partition_is_evidence(tmp_pa
                                data_part(2, vol("00000000-0000-0000-0000-0000000000a2"),
                                          guid="aaaaaaaa-0000-0000-0000-000000000002", offset=2 * 10**12)))
     insp = _dir_inspector({two.volumes[0].volume_id: r1, two.volumes[1].volume_id: r2})
-    assert classify(two, DrivePolicy(), protected_for(), inspector=insp).drive_class is DriveClass.SENTINEL_EVIDENCE
+    assert classify(two, DrivePolicy(erase_enabled=True), protected_for(), inspector=insp).drive_class is DriveClass.SENTINEL_EVIDENCE
 
 
 def test_evidence_drive_never_reaches_the_helper(ledger: Ledger, tmp_path: Path) -> None:
@@ -149,7 +149,7 @@ def test_evidence_drive_never_reaches_the_helper(ledger: Ledger, tmp_path: Path)
     d = foreign_disk()
     insp = _dir_inspector({d.volumes[0].volume_id: root})
     runner = FakeRunner(OK)
-    ctx = PrepareContext(policy=load_policy({"foreign_data_authorization": "operator_with_serial"}),
+    ctx = PrepareContext(policy=load_policy({"erase_enabled": True, "foreign_data_authorization": "operator_with_serial"}),
                          protected=protected_for(), enumerate=Sequence([d, SYS]), runner=runner, audit=ledger,
                          platform="windows", inspector=insp, settle_s=0)
     forged = Confirmation(d.disk_id, d.identity.fingerprint(), DriveClass.FOREIGN_DATA, "ABCD")
@@ -169,15 +169,15 @@ def test_drive_known_in_ledger_is_evidence_even_if_it_now_looks_blank(ledger: Le
     _prepared_event(ledger, earlier, volume_id=earlier.volumes[0].volume_id)
     known = load_known(ledger)
     wiped = blank_disk()  # same hardware, marker and partitions gone
-    c = classify(wiped, DrivePolicy(), protected_for(), inspector=FakeInspector(), known=known)
+    c = classify(wiped, DrivePolicy(erase_enabled=True), protected_for(), inspector=FakeInspector(), known=known)
     assert c.drive_class is DriveClass.SENTINEL_EVIDENCE and "known_hardware" in c.reasons
     # Same volume GUID / filesystem serial on different-looking hardware (e.g. other dock):
     moved = replace(earlier, serial="DOCK0000", unique_id=None)
-    c2 = classify(moved, DrivePolicy(), protected_for(), inspector=FakeInspector(), known=known)
+    c2 = classify(moved, DrivePolicy(erase_enabled=True), protected_for(), inspector=FakeInspector(), known=known)
     assert {"known_volume", "known_filesystem"} <= set(c2.reasons)
     # ...and it stops prepare_drive, which re-reads the ledger itself:
     runner = FakeRunner(OK)
-    ctx = PrepareContext(policy=DrivePolicy(), protected=protected_for(), enumerate=Sequence([wiped, SYS]),
+    ctx = PrepareContext(policy=DrivePolicy(erase_enabled=True), protected=protected_for(), enumerate=Sequence([wiped, SYS]),
                          runner=runner, audit=ledger, platform="windows", inspector=FakeInspector(), settle_s=0)
     with pytest.raises(PrepareRefused) as ei:
         prepare_drive(ctx, wiped.disk_id, Confirmation(wiped.disk_id, wiped.identity.fingerprint(), DriveClass.BLANK),
@@ -191,7 +191,7 @@ def test_known_from_export_branch_drives_table(ledger: Ledger) -> None:
         c.execute("INSERT INTO drives VALUES ('u-1', '  WD-WCC4E1234ABCD ', NULL, NULL, 'x')")
     known = load_known(ledger)
     assert "wd-wcc4e1234abcd" in known.serials
-    c = classify(blank_disk(), DrivePolicy(), protected_for(), inspector=FakeInspector(), known=known)
+    c = classify(blank_disk(), DrivePolicy(erase_enabled=True), protected_for(), inspector=FakeInspector(), known=known)
     assert c.drive_class is DriveClass.SENTINEL_EVIDENCE
 
 
@@ -201,7 +201,7 @@ def test_ready_drive_stays_ready_when_known(ledger: Ledger) -> None:
     insp = FakeInspector({d.volumes[0].volume_id: RootContents(readable=True, entries=(MARKER_NAME, "Sentinel"),
                                                                 marker=GOOD_MARKER,
                                                                 sentinel_signs=("marker", "archive_layout"))})
-    c = classify(d, DrivePolicy(), protected_for(), inspector=insp, known=load_known(ledger))
+    c = classify(d, DrivePolicy(erase_enabled=True), protected_for(), inspector=insp, known=load_known(ledger))
     assert c.drive_class is DriveClass.READY
 
 
@@ -212,7 +212,7 @@ def test_unreadable_ledger_fails_closed() -> None:
 
     known = load_known(Broken())
     assert known.error
-    classes, problems = classify_all([blank_disk()], DrivePolicy(), protected_for(), inspector=FakeInspector(),
+    classes, problems = classify_all([blank_disk()], DrivePolicy(erase_enabled=True), protected_for(), inspector=FakeInspector(),
                                      known=known)
     assert classes[0].drive_class is DriveClass.UNSUITABLE and "ledger_unavailable" in classes[0].reasons
     assert classes[0].alert_code == "M-008" and any("ledger" in p for p in problems)
@@ -241,10 +241,10 @@ def test_identical_model_swap_with_dock_serial_refused(ledger: Ledger, tmp_path:
     files = RootContents(readable=True, entries=("x",))
     insp = FakeInspector({v.volume_id: files for d in disks.values() for v in d.volumes})
     runner = FakeRunner(OK)
-    ctx = PrepareContext(policy=DrivePolicy(), protected=protected_for(), enumerate=Sequence([confirmed, SYS],
+    ctx = PrepareContext(policy=DrivePolicy(erase_enabled=True), protected=protected_for(), enumerate=Sequence([confirmed, SYS],
                                                                                               [swapped, SYS]),
                          runner=runner, audit=ledger, platform="windows", inspector=insp, settle_s=0)
-    c = classify(confirmed, DrivePolicy(), protected_for(), inspector=insp)
+    c = classify(confirmed, DrivePolicy(erase_enabled=True), protected_for(), inspector=insp)
     with pytest.raises(IdentityChanged):
         prepare_drive(ctx, "6", Confirmation.for_classification(c, "0000"), ADMIN)
     assert runner.plans == []
@@ -278,9 +278,9 @@ def test_missing_captured_identifier_refuses(mutate, gap: str) -> None:
     with pytest.raises(PrepareRefused) as ei:
         build_windows_script(d, filesystem="ntfs", label="SENTINEL_1", protected_volume_ids=(), result_path="r")
     assert ei.value.reason == "identity_incomplete"
-    c = classify(d, DrivePolicy(), protected_for(), inspector=FakeInspector())
+    c = classify(d, DrivePolicy(erase_enabled=True), protected_for(), inspector=FakeInspector())
     with pytest.raises(PrepareRefused) as ei2:
-        check_guards(c, Confirmation.for_classification(c, "0000"), ADMIN, DrivePolicy())
+        check_guards(c, Confirmation.for_classification(c, "0000"), ADMIN, DrivePolicy(erase_enabled=True))
     assert ei2.value.reason == "identity_incomplete"
 
 
@@ -353,7 +353,7 @@ def test_cli_prepare_refuses_non_installed_config(tmp_path: Path, monkeypatch, c
     monkeypatch.setattr("sentinel.drives.prepare.prepare_drive", lambda *a: called.append(a))
 
     class Env:
-        policy, protected, windows = DrivePolicy(), protected_for(), True
+        policy, protected, windows = DrivePolicy(erase_enabled=True), protected_for(), True
         cfg = SimpleNamespace(data_path=tmp_path / "data")
         config_path = tmp_path / "x.toml"
 
@@ -381,7 +381,7 @@ def test_destructive_action_never_called_prepare_in_operator_text() -> None:
     texts = list(UNSUITABLE_MESSAGES.values()) + [BLANK_MESSAGE, EVIDENCE_MESSAGE]
     for d in (exfat_disk(), foreign_disk(), blank_disk()):
         insp = FakeInspector({v.volume_id: RootContents(readable=True, entries=("a",)) for v in d.volumes})
-        texts.append(classify(d, DrivePolicy(), protected_for(), inspector=insp).message)
+        texts.append(classify(d, DrivePolicy(erase_enabled=True), protected_for(), inspector=insp).message)
     texts += [CATALOG[c].headline + " " + CATALOG[c].action for c in CATALOG if c.startswith("M-")]
     for t in texts:
         assert "prepar" not in t.lower(), t
@@ -444,7 +444,7 @@ def test_still_running_helper_is_reported_as_possibly_erasing(ledger: Ledger, tm
     d = blank_disk()
     hr = HelperResult(EXIT_TIMEOUT, {"ok": False, "step": "verify", "error": "timeout", "helper_pid": 4242,
                                      "still_running": True, "terminate_error": "access denied"})
-    ctx = PrepareContext(policy=DrivePolicy(), protected=protected_for(), enumerate=Sequence([d, SYS]),
+    ctx = PrepareContext(policy=DrivePolicy(erase_enabled=True), protected=protected_for(), enumerate=Sequence([d, SYS]),
                          runner=FakeRunner(hr), audit=ledger, platform="windows", inspector=FakeInspector(),
                          settle_s=0, work_dir=tmp_path / "w")
     with pytest.raises(PrepareFailed) as ei:

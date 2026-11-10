@@ -44,7 +44,7 @@ from typing import Any, Protocol
 
 from .. import __version__
 from ..clock import iso_utc
-from .classify import Classification, Inspector, classify_all
+from .classify import ERASE_DISABLED_MESSAGE, Classification, Inspector, classify_all
 from .commands import (
     EXIT_ELEVATION_CANCELLED,
     EXIT_IDENTITY_MISMATCH,
@@ -142,6 +142,8 @@ def requirements(c: Classification) -> dict[str, Any]:
 def check_guards(c: Classification, confirmation: Confirmation | None, auth: Authorization | None,
                  policy: DrivePolicy) -> None:
     """Raise PrepareRefused / IdentityChanged unless this exact drive may be prepared now."""
+    if not policy.erase_enabled:  # owner decision 2026-11-10; checked first, independent of classification
+        raise PrepareRefused("erase_disabled", ERASE_DISABLED_MESSAGE, code="M-010")
     if confirmation is None:
         raise PrepareRefused("not_confirmed", "Erasing was not confirmed. Nothing was erased.")
     if auth is None or not auth.who.strip():

@@ -10,7 +10,11 @@ confirmation. For drives holding other files it demands an administrator and the
 of the drive's serial number. The computer's own drive, the drive holding the recordings, and any
 drive that holds or held Sentinel recordings can never be erased by this tool. **No drive was
 actually formatted while building this**: the erase step was tested only by generating, parsing and
-checking its commands, not by running them on a disk.
+checking its commands, not by running them on a disk. **By owner decision the erase button is
+switched OFF** (`[drives] erase_enabled = false`) until a supervised test in the real dock has been
+passed (§9). Until then Sentinel still detects and describes drives and can safely remove them;
+pressing erase only shows "Setting up drives is not enabled on this system yet. Contact technical
+support."
 
 ## 2. Requirements addressed
 | ID | What this branch does | Requirement or design choice |
@@ -58,7 +62,8 @@ Design choices (all mine, all reversible by configuration or small code changes)
 * **Alert prefix `M-`** ("media"), because `D-` is already the recording database. M-001 empty, M-002
   wrong format, M-003 other files, M-004 cannot be used, M-005 setup failed, M-006 drive changed before
   it could be erased (nothing erased), M-007 could not be safely removed, M-008 drive checks
-  unavailable, M-009 holds Sentinel recordings (never erased). None of these stop recording.
+  unavailable, M-009 holds Sentinel recordings (never erased), M-010 setting up drives is not enabled
+  yet. None of these stop recording.
 * **`drives` table not added.** Identity is recorded in `events` (`category='drives'`) instead. A
   `drives` table created by the export branch is *read* if present (recognised column names only).
 
@@ -68,7 +73,8 @@ New package `src/sentinel/drives/`: `model.py`, `windows_enum.py`, `linux_enum.p
 `__main__.py`, `powershell.py`, `errors.py`. Added after review: `known.py` (drives known to the
 ledger) and `installed.py` (installed-configuration check).
 Changed outside the package:
-* `src/sentinel/alerts.py`: M-001…M-009 added. Nothing else changed.
+* `src/sentinel/alerts.py`: M-001…M-010 added. Nothing else changed.
+* `config/sentinel.example.toml`: documented `[drives]` section (`erase_enabled = false`).
 * `src/sentinel/config.py` (review 1.5, +14/−1 lines): accepts and validates a `[drives]` section
   through `sentinel.drives.policy` and exposes `AppConfig.drives`.
 Tests: `tests/unit/test_drives_{classify,prepare,commands,cli_eject,review_fixes}.py` and
@@ -80,7 +86,8 @@ Not changed: `platform/windows.py`, `platform/posix.py`, `db.py`, `src/sentinel/
 
 ## 4. Tests run (development host, Windows 11 Home 10.0.26200, Python 3.14, non-elevated)
 * `"C:\Users\silva\Documents\Proc 6 Build\.venv\Scripts\python.exe" -m pytest tests/unit -q -p no:cacheprovider`
-  → **215 passed** (50 pre-existing + 165 new), 0 failed, 0 skipped.
+  → **227 passed** (50 pre-existing + 177 new, 12 of them for the erase gate), 0 failed, 0 skipped
+  (after the erase gate was added, 2026-11-10).
 * `... -m pytest tests/integration -q -p no:cacheprovider` (run because `config.py` changed)
   → **28 passed, 2 failed** (364 s). The failures were `test_recorder_faults.py::test_short_freeze_is_recorded_as_internal_gap`
   and `::test_corrupted_stream_data_does_not_stop_recording`. **These are timing-sensitive and also
@@ -136,8 +143,9 @@ Not changed: `platform/windows.py`, `platform/posix.py`, `db.py`, `src/sentinel/
 * Python 3.12 not tested.
 
 ## 6. Risks, limitations, open decisions for the owner
-* **OPEN (owner): who may erase a FOREIGN_DATA drive**: `admin_only` (default), `operator_with_serial`, `never`.
-* **OPEN (C1): approved filesystem.** Default NTFS.
+* **DECIDED (owner, 2026-11-10):** FOREIGN_DATA erasing is `admin_only`; the approved filesystem is
+  NTFS (C1). Both are the defaults. The erase path stays OFF (`erase_enabled = false`) until the §9
+  dock test is passed.
 * **OPEN (owner, new): recycling old Sentinel drives.** A drive the ledger knows, or one showing any
   Sentinel marker or layout, can never be erased by this tool. Reusing old archive/review drives
   after retention needs a separate documented procedure, e.g. technical support with a retention
@@ -158,13 +166,14 @@ Not changed: `platform/windows.py`, `platform/posix.py`, `db.py`, `src/sentinel/
   service (session 0), UAC cannot be shown, so erasing must start from the interactive session.
 
 ## 7. Recommendation
-**Merge after** these steps. Until step 4 is done, treat the destructive path as untested.
-1. The owner decides the FOREIGN_DATA policy, C1 and drive recycling (the defaults are safe meanwhile).
+**Merge after** these steps. The erase path ships switched OFF (owner decision), so merging does not
+expose untested erasing; enable it only after the §9 test.
+1. The owner decides drive recycling. FOREIGN_DATA policy and C1 were decided on 2026-11-10.
 2. The installed config path is agreed with packaging.
 3. The docs/01 and docs/02 statements are updated.
-4. One supervised hardware test on scratch drives in the real Sabrent dock, with an administrator
-   present: erase a BLANK drive and a FOREIGN_DATA drive, eject, swap a drive during the UAC prompt
-   (expect M-006), and insert an exported review drive (expect M-009).
+4. The integration suite is re-run on an idle machine.
+
+The §9 dock test is required to *enable* erasing, not to merge.
 
 Read-only detection and classification can be merged now.
 
@@ -177,3 +186,55 @@ Read-only detection and classification can be merged now.
 | 1.4 MED | "Prepare This Drive" collides with "Prepare Review Drive" | Every operator-visible text now says **Erase and Set Up Drive**, "set up", "erase". This covers M-001/M-002/M-003/M-005/M-006, classification messages and CLI messages. S-001 ("Prepare a review drive") is untouched. Internal identifiers (`prepare_drive`, `drive_prepared` events, CLI subcommand `prepare`) are unchanged, for audit continuity and to match the task's CLI spec. | test that no operator text contains "prepar" | GUI wording (Phase 4) must follow |
 | 1.5 MED | config.py rejects `[drives]` | `config.py` accepts `drives`, validates it via `load_policy` (DrivePolicyError → ConfigError), and adds `AppConfig.drives`. The CLI uses `load_config` directly. | valid/invalid/absent section; other unknown sections still rejected; example config loads | Merge-conflict risk with other branches editing `config.py` |
 | 1.6 LOW | Elevated helper keeps running after timeout | The helper writes step and PID to its result file at every step. On timeout, the runner reads it and tries `terminate_process(pid)`. That function checks the image name first, so a reused PID is never killed. The runner reports `still_running` honestly. `prepare_drive` then raises "Drive setup is taking too long and may still be running. Do not unplug the drive." and audits `erase_started: true`, even if last seen at "verify". On Linux, `Popen` + kill and PermissionError are reported the same way. | runner timeout → still_running; orchestration message and audit; terminate refuses non-helper and nonexistent PIDs | A non-elevated parent is expected to be unable to stop an elevated child (mandatory integrity). This is reported, not solved, and NOT VERIFIED against a real elevated helper. |
+
+## 9. Erase gate (owner decision 2026-11-10): how to enable after the dock test
+
+**What the gate does.** `[drives] erase_enabled` defaults to `false`. While it is false:
+* Detection, classification (all six classes and their reasons) and `list`/`classify` work unchanged.
+* `safe_remove` / `eject` work unchanged.
+* For BLANK / WRONG_FORMAT / FOREIGN_DATA drives the operator sees the first sentence of the normal
+  message plus "Setting up drives is not enabled on this system yet. Contact technical support."
+  (alert **M-010**). No erase button is offered (`can_prepare = false`, refusal `erase_disabled`).
+* `check_guards` refuses first, before any other check. So `prepare_drive` never starts the elevated
+  helper and writes no audit event, even with a valid confirmation.
+* The CLI `prepare` refuses with M-010 before doing anything else. `prepare --dry-run` still prints the
+  script that *would* run, so the administrator can review it before the test.
+
+**Dock test checklist.** Supervised, with an administrator present, on the real appliance with the
+real Sabrent dock, using only **scratch drives that hold nothing of value**. Record each result
+(pass/fail, screenshots, `list --json` output) in the test log required by E7.
+1. Preconditions:
+   * The recorder is installed and has run, and its configuration is at the installed path (§8, 1.3).
+   * `python -m sentinel.drives list --config <installed>` shows the system disk and the
+     recording disk as UNSUITABLE. Check that both show the right reasons.
+2. Identity through the dock (C2):
+   * For each scratch drive, `classify --json` shows a serial, model and size matching the drive's label.
+   * Note whether the serial is the disk's or the dock's.
+   * Note that the content identifiers are present: `identity_gaps` is empty and the refusal is not
+     `identity_incomplete`.
+3. Temporarily enable: in the installed config set `[drives] erase_enabled = true`.
+4. Run these cases on scratch drives:
+   * BLANK drive (new or wiped): erase and set up, approve UAC. Expect "Drive erased and set up:
+     SENTINEL_n (ntfs)" with "cache bypassed", then `list` shows READY.
+   * WRONG_FORMAT drive (empty exFAT): erase with a single ERASE confirmation, as above.
+   * FOREIGN_DATA drive (scratch files): erase without `--admin`, expect refusal; with `--admin` and
+     a wrong serial tail, expect refusal; with the correct tail, expect success.
+   * **Swap during the UAC prompt:** start erasing drive A. While the UAC prompt is shown, replace A
+     with drive B of the same model if available. Approve UAC. Expect M-006 "The drive changed…
+     Nothing was erased", and check that B's files are intact.
+   * **Decline UAC:** expect "Administrator approval was not given. Nothing was erased."
+   * **Evidence protection:** insert a review drive produced by the export feature, and an archive
+     drive whose `SENTINEL_DRIVE.json` was deleted or renamed. Both must show M-009, with no erase possible.
+   * **Safe removal:** eject a READY drive. Expect "SAFE TO REMOVE DRIVE" and the drive disappears.
+     Repeat with a file open on it; expect the "still in use" refusal.
+   * **Pull during setup:** unplug a scratch drive during formatting. Expect M-005, an audited
+     failure, and the drive classifying as FOREIGN_DATA afterwards (never READY).
+   * **Audit:** check the ledger `events` (`category='drives'`) for authorised / refused / failed /
+     prepared rows with the right person and disk identity.
+   * On an exported/archived drive Sentinel set up, check that a non-elevated user could write
+     `SENTINEL_DRIVE.json` (if not, M-005 "could not be written to" occurs and must be fixed first).
+5. Decide:
+   * If every case passes, leave `erase_enabled = true` and file the test log.
+   * If any case fails, set it back to `false` and report the failure.
+   * Enabling is a configuration change by an administrator, recorded in the configuration-change
+     log (E5). The operator interface has no switch for it.

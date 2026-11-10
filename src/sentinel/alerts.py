@@ -76,6 +76,8 @@ CATALOG: dict[str, AlertDef] = {d.code: d for d in [
     AlertDef("M-008", "Drive checks are unavailable", SUPPORT, False),
     AlertDef("M-009", "This drive holds Sentinel recordings and will not be erased",
              "Contact technical support.", False),
+    AlertDef("M-010", "Setting up drives is not enabled on this system yet",
+             "Contact technical support.", False),
     AlertDef("Z-001", "A test camera is configured. These recordings are not evidence",
              "Contact technical support before any operational use.", False),
 ]}

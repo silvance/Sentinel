@@ -34,8 +34,8 @@ from sentinel.drives.policy import DrivePolicy, DrivePolicyError, load_policy
 from sentinel.drives.protected import ROLE_OS, ROLE_SPOOL, ProtectedItem, ProtectedStorage
 from sentinel.drives.windows_enum import parse_windows_snapshot
 
-POL = DrivePolicy()
-ALL_BUSES = DrivePolicy(allowed_bus_types=("USB", "SATA", "NVME", "FILE BACKED VIRTUAL"), min_size_gb=1)
+POL = DrivePolicy(erase_enabled=True)
+ALL_BUSES = DrivePolicy(erase_enabled=True, allowed_bus_types=("USB", "SATA", "NVME", "FILE BACKED VIRTUAL"), min_size_gb=1)
 MARKER = {"format": MARKER_FORMAT, "version": 1, "drive_uuid": "0b0e5f0a-1c2d-4e3f-8a9b-0c1d2e3f4a5b",
           "label": "SENTINEL_3", "prepared_utc": "2026-11-09T00:00:00.000000Z", "prepared_by": "admin1"}
 
@@ -149,7 +149,7 @@ def test_wrong_format_empty(fs: str, shown: str) -> None:
 
 
 def test_approved_filesystem_is_configurable() -> None:
-    exfat_pol = load_policy({"approved_filesystem": "exfat"})
+    exfat_pol = load_policy({"erase_enabled": True, "approved_filesystem": "exfat"})
     assert classify(exfat_disk(), exfat_pol, protected_for(), inspector=FakeInspector()).drive_class is DriveClass.BLANK
     ntfs_empty = usb_disk(partitions=(data_part(1, vol("00000000-0000-0000-0000-0000000000e3", "ntfs")),))
     c = classify(ntfs_empty, exfat_pol, protected_for(), inspector=FakeInspector())
@@ -262,7 +262,7 @@ def test_fail_closed_when_protected_path_unresolvable() -> None:
 def test_foreign_data_policy(mode: str, can: bool, admin: bool, serial: bool) -> None:
     d = foreign_disk()
     insp = FakeInspector({d.volumes[0].volume_id: RootContents(readable=True, entries=("a",))})
-    c = classify(d, load_policy({"foreign_data_authorization": mode}), protected_for(), inspector=insp)
+    c = classify(d, load_policy({"erase_enabled": True, "foreign_data_authorization": mode}), protected_for(), inspector=insp)
     assert (c.can_prepare, c.needs_admin, c.needs_serial) == (can, admin, serial)
     if mode == "never":
         assert c.refusal == "policy_never"
@@ -278,9 +278,9 @@ def test_policy_defaults_and_validation() -> None:
                 {"allowed_bus_types": []}):
         with pytest.raises(DrivePolicyError):
             load_policy(bad)
-    assert load_policy({"approved_filesystem": "exfat"}).label_for(99) == "SENTINEL_99"
+    assert load_policy({"erase_enabled": True, "approved_filesystem": "exfat"}).label_for(99) == "SENTINEL_99"
     with pytest.raises(DrivePolicyError):  # exFAT labels are limited to 11 characters
-        load_policy({"approved_filesystem": "exfat"}).label_for(100)
+        load_policy({"erase_enabled": True, "approved_filesystem": "exfat"}).label_for(100)
 
 
 def test_serial_normalisation_and_tail() -> None:
@@ -310,7 +310,7 @@ def test_linux_real_wsl_capture() -> None:
     assert by["sdd"].volumes[0].mount_paths == ("/mnt/wslg/distro", "/")
     prot = ProtectedStorage((ProtectedItem(ROLE_OS, "/", os_device="8:48"),
                              ProtectedItem(ROLE_SPOOL, "/var/lib/sentinel", os_device="8:48")))
-    classes, problems = classify_all(disks, load_policy({"allowed_bus_types": ["UNKNOWN"], "min_size_gb": 1}), prot,
+    classes, problems = classify_all(disks, load_policy({"erase_enabled": True, "allowed_bus_types": ["UNKNOWN"], "min_size_gb": 1}), prot,
                                      inspector=FakeInspector())
     assert problems == []
     cls = {c.disk.disk_id: c for c in classes}

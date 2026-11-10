@@ -20,7 +20,7 @@ from sentinel.drives.policy import DrivePolicy
 
 class FakeEnv:
     def __init__(self, tmp: Path, disks, inspector=None, cfg=True) -> None:
-        self.policy = DrivePolicy()
+        self.policy = DrivePolicy(erase_enabled=True)
         self.protected = protected_for()
         self.windows = True
         self.cfg = SimpleNamespace(data_path=tmp / "data") if cfg else None
