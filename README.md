@@ -18,7 +18,14 @@ Linux or against the real camera. See [docs/PHASE2_REPORT.md](docs/PHASE2_REPORT
 
 ## Not yet built
 Removable-drive archive/export (Phase 3, design in [docs/04](docs/04_EXPORT_STATE_MACHINE.md)),
-operator GUI (Phase 4), packaging as a single click-to-run program (Phase 6).
+operator GUI (Phase 4), Windows service / auto-start.
+
+## Click-to-run program (branch design/single-executable)
+`Sentinel.exe` (one-folder PyInstaller build with FFmpeg bundled next to it) sets itself up on
+first start (technician questions), starts the recorder in the background and shows its
+status. Build: `packaging\windows\build.ps1 -FfmpegDir <dir>` (Linux: `packaging/linux/build.sh`).
+From source the same launcher is `python -m sentinel.launcher`. See
+[docs/08](docs/08_PACKAGING.md), including the FFmpeg licensing decision that is still open.
 
 ## Developer quick start (Windows or Linux)
 Requires Python ≥ 3.12 and FFmpeg/FFprobe ≥ 6.0 on PATH.
@@ -56,3 +63,4 @@ example). `python -m sentinel.service status --config dev.toml` shows the operat
 | [05 Failure analysis](docs/05_FAILURE_ANALYSIS.md) | each failure: behaviour, operator message, recovery, test |
 | [06 Verification & traceability](docs/06_VERIFICATION.md) | test results and requirements matrix |
 | [07 Security](docs/07_SECURITY.md) | controls, residual risks, deployment checklist |
+| [08 Packaging](docs/08_PACKAGING.md) | click-to-run build, tool/config resolution, FFmpeg licensing |

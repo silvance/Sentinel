@@ -39,6 +39,8 @@ warning_free_gb = 50
 critical_free_gb = 5
 
 [tools]
+# Omit these two lines to use the FFmpeg bundled next to a built Sentinel program (then PATH);
+# see docs/08_PACKAGING.md. [storage] keys may likewise be omitted to use the per-machine defaults.
 ffmpeg = "/usr/bin/ffmpeg"
 ffprobe = "/usr/bin/ffprobe"
 
