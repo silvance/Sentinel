@@ -38,7 +38,7 @@ For the installing technician
       Sentinel.exe set-camera           add or change the camera (old settings kept as .bak)
       Sentinel.exe admin-pin            set the administrator PIN of the screen
       Sentinel.exe schedule             show when a recording schedule records/pauses
-      Sentinel.exe drives list          list drives (prepare/eject: see docs/09)
+      Sentinel.exe drives list          list drives (prepare/eject: administrator only)
       Sentinel.exe export run --config <file> --target E:\   export to a review drive
 * This build does NOT start automatically when Windows starts. Until the Windows
   service is installed, someone must double-click Sentinel.exe after every restart.
