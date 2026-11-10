@@ -192,8 +192,16 @@ docs/branches/design-local-retention.md §7); the file's header says how to swit
 Since 2026-11-10 the build also bundles the operator screen (PySide6-Essentials 6.11.3, from
 `requirements/build.txt`, hash-pinned): `Sentinel.exe` opens it after starting the recorder; the
 console banner remains the fallback (`sentinel/launcher/view.py`). Size with it: 373 MB.
-Qt and PySide6 are LGPL-3.0: ship their licence texts and honour the source offer (not yet
-automated in build.py).
+Qt and PySide6 are LGPL-3.0-only. The wheels carry only Qt's commercial licence file, so the build
+writes `dist/Sentinel/licences/` itself (`packaging/licences_bundle.py`): LGPL-3.0 and GPL-3.0 texts
+(verbatim from gnu.org, committed in `packaging/licences/`), Python's licence (which carries the
+OpenSSL/libffi/SQLite notices), the bundled packages' own licence files, `THIRD-PARTY-NOTICES.txt`,
+and `SOURCE-OFFER.txt` naming the exact source archives of FFmpeg (git commit + BtbN build scripts),
+PySide6 and Qt, plus a three-year written offer. `--source-offer-contact "<unit, phone>"` puts the
+organisation's contact in the offer (default: generic wording). The Qt DLLs stay replaceable
+(LGPL-3.0 §4(d)(1)); `about --verify` would then report the changed files, which is intended.
+Keep the source archives with each release: `python packaging/fetch_sources.py` downloads exactly the
+versions named in the build manifest into `third_party/sources/` (git-ignored) with SHA-256s.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File packaging\windows\build.ps1 -FfmpegDir <folder with ffmpeg.exe and ffprobe.exe>
@@ -351,8 +359,10 @@ tested on 9.0.1 and requires ≥ 6.0), 64-bit, LGPL variant. Options, in order o
   LGPL-3.0-or-later. Real outputs captured in `tests/fixtures/ffmpeg/btbn-9.0.2-lgpl.*.txt` and
   checked by `tests/unit/test_build_licence.py` (licence and required components); the synthetic
   LGPL text used before matches FFmpeg's real wording.
-* Source offer: keep the tagged FFmpeg source for `n9.0.2-48-gd4070a14ce` with each release (§8.5 step 6) —
-  NOT yet archived.
+* Source offer: `licences/SOURCE-OFFER.txt` in the build. Sources archived 2026-11-10 by
+  `packaging/fetch_sources.py` into `third_party/sources/` (FFmpeg commit d4070a14ce, BtbN scripts at
+  the release tag, PySide6 6.11.3, qtbase/qtsvg/qttranslations 6.11.3; the Qt archives matched Qt's
+  published md5sums). Copy that folder to the organisation's release archive; it is not on GitHub.
 * Suite and build results with this FFmpeg: see docs/INTEGRATION.md ("LGPL FFmpeg").
 
 Separately from copyright: H.264/HEVC are patent-encumbered formats; whether decoding them in
