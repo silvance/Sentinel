@@ -176,8 +176,13 @@ class IntegrityWorker:
     def verify_chain_once(self) -> VerifyReport:
         """Verify the ledger's hash chain (read-only snapshot). Records an event when the first
         problem found changes, so an hourly check does not flood the ledger."""
-        rep = verify_ledger(self.ledger.path)
+        # Many short read snapshots with a pause between them: never starves the recorder's WAL
+        # checkpoint and keeps memory bounded (see verify_ledger).
+        rep = verify_ledger(self.ledger.path, chunk=2000, pause_s=0.005)
         self.chain_report = rep
+        if rep.faults:
+            log.error("recording-log chain has %d protection gap(s) (entries that could not be written)",
+                      len(rep.faults))
         first = rep.first
         problem = f"{first.code}@{first.position}" if first is not None else None
         if first is not None:
@@ -197,6 +202,10 @@ class IntegrityWorker:
     @property
     def chain_altered(self) -> bool:
         return self.chain_report is not None and not self.chain_report.ok
+
+    @property
+    def chain_unprotected(self) -> bool:
+        return self.chain_report is not None and bool(self.chain_report.faults)
 
     def outstanding_audit_failures(self) -> int:
         rows = self.ledger.query("SELECT COUNT(*) n FROM segments WHERE audit_status IS NOT NULL "

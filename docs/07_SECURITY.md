@@ -60,9 +60,16 @@ its latest entry; if they differ, the row was changed outside the recorder, and 
 `discrepancy` entry plus a `ledger_discrepancy` event are written first. A later legitimate update
 therefore cannot "launder" an edit by snapshotting the edited values.
 
-If a chain entry cannot be written (e.g. the table was dropped while running) the evidence change
-is still committed (a savepoint isolates the chain write), the failure is counted and alert V-003
-is raised. The chain must never be a reason to lose a recording.
+If a chain entry cannot be written (an internal fault, e.g. a disk error) the evidence change is
+still committed (a savepoint isolates the chain write). The affected rows are remembered in
+`ledger_chain_pending`, and operator alert **V-004 "Part of the recording log could not be
+protected against changes"** (warning) is raised. This is a system fault, not V-003. At the next
+ledger write (also after a restart) each pending row gets a `protection_gap` entry (when and why
+the entry failed) and a `chain_repair` snapshot. Its next update is therefore not mistaken for an
+outside change. If SQLite has aborted the whole transaction, or the savepoint cannot be undone, the
+complete transaction is rolled back (`ChainTransactionAborted`). Nothing half-written is committed,
+and the finaliser retries the seal as it does any other failed seal. The chain must never be a
+reason to lose or corrupt a recording.
 
 ### Anchoring (copies of the chain head)
 The head `(sequence, hash, UTC)` is copied to:
@@ -87,14 +94,30 @@ head with a higher sequence number shows the end of the log was removed.
 
 ### Verification
 `python -m sentinel.ledgerchain verify --config sentinel.toml [--check-files] [--expect-head SEQ:HASH]`
-(read-only, safe while recording; exit 0 = intact, 1 = altered, 2 = cannot check) and, every
-`chain_verify_interval_s` (default 1 h, first run ~90 s after start) in the integrity worker:
+checks the log. It is read-only and safe while recording. Exit status: 0 = intact, 1 = altered,
+2 = cannot check, 3 = intact with protection gaps. The integrity worker also runs it every
+`chain_verify_interval_s` (default 1 h; the first run is about 90 s after start):
 1. recompute every entry hash and link; first missing / reordered / edited entry is reported;
-2. compare each covered row with its latest entry (edited, deleted, un-sealed, or never-logged rows);
-3. compare with every saved head found (`chain_heads.log`, `status.json`, `--expect-head`);
-4. `--check-files`: re-hash every sealed recording file against the SHA-256 in the chain
+2. **recorder rules across each row's entries** (review finding C1, below): a later entry may only
+   make changes the recorder makes. Rejected:
+   * sealed segments: any change to state or to a write-once column (`db.WRITE_ONCE`: hashes, size,
+     path, times, duration; these may only go from empty to a value), and any change to the other
+     covered columns. The exceptions are `audit_status`, and `clock_anomaly` going from 0 to 1.
+   * events: changed at all;
+   * gaps: any change once closed, or a change to their start, reason, kind or detail, or the retry
+     count going down;
+   * runs: any change to their identity or launch columns, write-once anchor and timeline values
+     that are changed, or end columns changed after the run ended;
+   * `genesis` / `adopted` entries anywhere except the start of the log, and unknown kinds;
+3. compare each covered row with its latest entry (edited, deleted, un-sealed, or never-logged rows);
+4. compare with every saved head found (`chain_heads.log`, `status.json`, `--expect-head`);
+5. `--check-files`: re-hash every sealed recording file against the SHA-256 in the chain
    (the periodic check skips this — the rolling audit already compares files with their rows,
    and rows are compared with the chain).
+It works in many short read snapshots (at most 2 000 entries, keys or rows each, with a short
+pause between them), not in one long snapshot, so memory stays bounded. The chain is append-only.
+It is verified up to the head seen at the start, and each row is compared with its entries inside
+one snapshot, so results are consistent while the recorder keeps writing.
 The report names the first log position that can no longer be confirmed, in plain language,
 e.g. *"First problem at log entry 57: The recording segment CAM01/…/seg_000003.ts was changed
 after log entry 57 recorded it: end_utc was '…' and is now '…'."* A failure raises the operator
@@ -103,12 +126,19 @@ alert **V-003 "The recording log has been altered"** (critical, recording contin
 
 Measured cost (Windows 11 dev host, this branch's tests): chain bookkeeping ~0.13–0.2 ms per seal
 (median), i.e. ~0.2 % of the real per-segment sealing work with 2 s test segments (75 ms median;
-production 300 s segments hash far more data, so the share is smaller still). Verification runs at
-~22 000 entries/s (measured: 25 922 entries = 30 simulated days of 300 s segments, each sealed,
-content-hashed and audited once, in 1.16 s; peak memory 5.7 MB). A year is therefore ~0.32 M
-entries, ~15 s per hourly check and ~70 MB peak memory, in a background thread on a separate
-read-only connection (it never holds the recorder's ledger lock). Storage: each segment's three
-snapshots add ~7 KB to the ledger (~2 MB/day at 300 s segments), negligible next to the video.
+production 300 s segments hash far more data, so the share is smaller still).
+
+Verification was measured on a synthetic ledger the size of one year: 105 000 segments of 300 s,
+each sealed, content-hashed and audited, plus events. That is 325 502 entries and 746 MB.
+* One full check took **26 s** in 292 short snapshots. The longest single snapshot was **0.28 s**.
+* Peak Python memory was **9.9 MB** (measured with `tracemalloc`, which made that run 80 s long).
+* While a check ran, 435 seals with a checkpoint every 20 took at most **132 ms** each.
+
+The check runs in a background thread on a separate read-only connection, so it never holds the
+recorder's ledger lock. The ledger checkpoint is now `PASSIVE`, which never waits for readers, so
+it no longer holds the ledger lock while a reader keeps a snapshot open; the WAL is limited with
+`journal_size_limit = 64 MB`. Each segment's three snapshots add ~7 KB to the ledger (~2 MB/day at
+300 s segments), which is negligible next to the video.
 
 ### Ledgers created before this feature
 On first start with this software the chain begins with a `genesis` entry recording how many rows
@@ -119,10 +149,27 @@ and the verify report says so. If the chain is found empty although an earlier c
 verification reports it as a failure: wiping the chain cannot silently restart it.
 
 ### What this does NOT protect against (honest limits)
-* **An attacker with full control before the first anchor leaves the machine.** With write access
-  to the data directory they can edit rows, recompute a perfect chain, and rewrite
-  `chain_heads.log`, `status.json` and local reports. Verification will then pass. Only a head
-  held elsewhere (review drive, support, paper) exposes it. Ship heads off the machine routinely.
+* **Anything after the last head that left the machine.** The chain has no key. Anyone with write
+  access to the data directory can write well-formed entries, and can rewrite `chain_heads.log`,
+  `status.json` and local reports. Let *A* be the last chain head copied off the machine (review
+  drive, report sent to support, custody form):
+  * **Detected:** any change to history up to *A*. That covers rewriting or reordering entries up
+    to *A*, cutting the log back below *A*, deleting rows, and appending entries that break the
+    recorder rules above. Once a segment's hash, size, times and state, an event, a closed gap or
+    an ended run were in the log at *A*, they cannot be changed afterwards without detection,
+    whether by editing old entries or by appending new ones.
+  * **Not detected:**
+    * entries after *A* rewritten or removed (cutting back to *A* and writing a new tail);
+    * invented new rows: events, gaps, runs, and even sealed segments together with matching
+      invented files;
+    * values the recorder itself fills in later, entered falsely. Examples: a content hash not yet
+      computed at *A* (asserted by `test_rule_compliant_appends_are_the_documented_limit`), the
+      end of a gap or run still open at *A*, an audit status, a clock-anomaly flag.
+  * **No off-machine head at all:** the attacker can rebuild the whole chain consistently, and
+    verification passes.
+  * Going further needs entries the attacker cannot produce. Options are a signature or HMAC key
+    the recorder account cannot use (TPM-held, see below), an external append-only witness, or
+    copying heads off the machine much more often. Ship heads off the machine routinely.
 * **A compromised recorder.** Whoever runs code as the recorder can write false data through the
   normal path; the chain then faithfully records the false data. The chain proves the log was not
   changed *after* writing, not that what was written is true.
@@ -137,6 +184,16 @@ verification reports it as a failure: wiping the chain cannot silently restart i
   them (correctly) as unlogged. A fresh installation must archive the old `chain_heads.log`
   together with the old database, or its saved heads will (correctly) not match the new log.
 * There is no acknowledgement mechanism: once V-003 is raised it stays raised for that ledger.
+* `ledger_chain_pending` is not chained. Someone who writes a pending marker for a row can make a
+  later *rule-compliant* change to it be reported as a protection gap (V-004) rather than an
+  alteration (V-003). Rule-breaking changes are still V-003, and V-004 still calls support.
+
+### Review findings (independent QA, wave 2)
+| ID | Finding | Status |
+|---|---|---|
+| C1 HIGH | An edit to a sealed segment's `sha256`/`size_bytes`, plus one well-formed appended `segment_updated` entry, passed verification even with an earlier off-machine anchor, and was later anchored. | **Fixed:** recorder rules are enforced across each row's entries (finding `illegal_change`/`illegal_entry`). The reviewer's script is a regression test (`test_reviewer_forged_append_with_earlier_anchor_is_detected`), and 13 more append cases are tested. **Remaining (by design, documented above):** rule-compliant appends after the last off-machine anchor. These need a keyed or attested chain. |
+| C2 MED | Internal chain faults raised V-003 and left rows permanently "unlogged". The next normal update was then reported as a change made outside the software. | **Fixed:** new V-004 (system-fault wording); pending rows are persisted and re-recorded with `protection_gap` + `chain_repair`; verify reports them as protection gaps (CLI exit 3), and still flags rule-breaking changes across the gap. An aborted transaction, or a savepoint that cannot be undone, rolls the whole seal back and it is retried (tested; nothing half-written, no blocking). |
+| C3 LOW-MED | The hourly verify held one read snapshot for 15–25 s at year scale while the hourly `wal_checkpoint(TRUNCATE)` waited under the ledger lock; peak memory ~100 MB. | **Fixed:** verification uses short snapshots (longest 0.28 s at year scale); the checkpoint is `PASSIVE` plus `journal_size_limit`; peak memory is 9.9 MB; seal latency while verifying is at most 132 ms (measured above; unit test with a concurrent writer). |
 
 ### Why key-less (no HMAC / signature key) on this branch
 * A key-less SHA-256 chain can be verified by anyone, including an examiner with no Sentinel
@@ -178,7 +235,11 @@ Normative text: the docstring of `src/sentinel/ledgerchain.py`; summarised here.
   the stored text). The current row must equal `data` of the latest entry with that table/key.
 * Kinds: `genesis`, `adopted`, `run_started`, `run_updated`, `run_ended`, `segment_sealed`,
   `segment_updated`, `gap_opened`, `gap_recorded`, `gap_updated`, `gap_closed`, `event`,
-  `discrepancy` (table/key null; data = `{table, key, expected_entry, expected, found}`).
+  `chain_repair`, `discrepancy` (table/key null; data = `{table, key, expected_entry, expected, found}`),
+  `protection_gap` (table/key null; data = `{table, key, failed_utc, error}`).
+* Between two consecutive entries of the same row, only the recorder's own transitions are
+  allowed (Verification step 2; normative code `ledgerchain.illegal_changes`). `genesis` only at
+  0; `adopted` only directly after genesis.
 * Anchor log line: `<anchored UTC> seq=<n> hash=<64 hex> entry_utc=<UTC> reason=<word>`.
 `tests/unit/test_ledgerchain.py::test_an_examiner_can_verify_from_the_written_specification`
 re-implements this with only `sqlite3`, `hashlib` and `json` and agrees with the recorder.

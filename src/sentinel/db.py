@@ -155,7 +155,18 @@ CREATE TABLE IF NOT EXISTS ledger_chain (
     entry_hash        TEXT NOT NULL           -- SHA-256(prev_hash || record), lowercase hex
 );
 CREATE INDEX IF NOT EXISTS ix_chain_ref ON ledger_chain(ref_table, ref_key, seq);
+
+-- Rows whose chain entry could not be written (system fault). Re-recorded, with a
+-- protection_gap entry, at the next ledger write; then deleted. Not evidence in itself.
+CREATE TABLE IF NOT EXISTS ledger_chain_pending (
+    ref_table         TEXT NOT NULL,
+    ref_key           TEXT NOT NULL,
+    failed_utc        TEXT NOT NULL,
+    error             TEXT,
+    PRIMARY KEY (ref_table, ref_key)
+);
 """
+WAL_SIZE_LIMIT = 64 * 1024 * 1024
 
 # Columns that may be written once (NULL -> value) on a sealed segment, never changed after.
 WRITE_ONCE = frozenset({
@@ -166,6 +177,10 @@ WRITE_ONCE = frozenset({
 
 class IllegalTransition(RuntimeError):
     pass
+
+
+class ChainTransactionAborted(RuntimeError):
+    """The transaction was rolled back completely while writing a chain entry; retry the write."""
 
 
 def _now_iso() -> str:
@@ -200,6 +215,7 @@ class Ledger:
         self._lock = threading.RLock()
         self.chain_discrepancies = 0     # rows found changed outside the recorder (this process)
         self.chain_failures = 0          # chain entries that could not be written (this process)
+        self._pending_maybe = False      # ledger_chain_pending may hold rows to re-record
         if readonly:
             uri = f"{self.path.resolve().as_uri()}?mode=ro"
             self._conn = sqlite3.connect(uri, uri=True, check_same_thread=False, isolation_level=None)
@@ -226,7 +242,8 @@ class Ledger:
             try:
                 yield self._conn
             except BaseException:
-                self._conn.execute("ROLLBACK")
+                if self._conn.in_transaction:      # SQLite may already have rolled back (e.g. I/O error)
+                    self._conn.execute("ROLLBACK")
                 raise
             else:
                 self._conn.execute("COMMIT")
@@ -244,36 +261,79 @@ class Ledger:
             # New ledger, or one created before tamper evidence existed: start the chain with a
             # genesis entry and adopt the rows already present (docs/07).
             chain.ensure_genesis(self._conn, self.path.parent / chain.ANCHOR_LOG_NAME)
+            # WAL is reset (and truncated to this size) after checkpoints; see checkpoint().
+            self._conn.execute(f"PRAGMA journal_size_limit={WAL_SIZE_LIMIT}")
+            self._pending_maybe = self._conn.execute("SELECT 1 FROM ledger_chain_pending LIMIT 1").fetchone() is not None
 
     # ------------------------------------------------------------------ hash chain
     def chain_head(self) -> chain.ChainHead | None:
         with self._lock:
             return chain.head_in(self._conn)
 
-    def _chain_guard(self, c: sqlite3.Connection, what: str, fn: Any) -> None:
-        """Run chain bookkeeping inside a savepoint. A chain failure must never stop evidence
-        from being recorded: the change is committed without its entry, the failure is counted
-        (operator alert V-003) and verification reports the unlogged row."""
+    def _undo_savepoint(self, c: sqlite3.Connection) -> None:
+        c.execute("ROLLBACK TO chain_entry")
+        c.execute("RELEASE chain_entry")
+
+    def _chain_fault(self, c: sqlite3.Connection, what: str, keys: list[tuple[str, Any]], exc: BaseException,
+                     savepoint: bool) -> None:
+        """A chain entry could not be written (system fault, NOT tampering): operator alert V-004.
+
+        * If SQLite aborted the whole transaction, or the savepoint cannot be undone, raise
+          ChainTransactionAborted: the caller's transaction is rolled back completely (nothing
+          half-written is ever committed) and the finaliser retries the seal later.
+        * Otherwise the evidence change is committed without its entry, and the affected rows are
+          remembered in ``ledger_chain_pending`` (same transaction) so their next write records a
+          ``protection_gap`` + re-snapshot instead of a false "changed outside the software"."""
+        self.chain_failures += 1
+        log.critical("could not write recording-log chain entry (%s)", what, exc_info=exc)
+        if savepoint:
+            try:
+                self._undo_savepoint(c)
+            except Exception as undo_exc:
+                raise ChainTransactionAborted(f"chain savepoint could not be undone ({undo_exc})") from exc
+        if not c.in_transaction:
+            raise ChainTransactionAborted("SQLite aborted the transaction while writing a chain entry") from exc
+        try:
+            msg = f"{type(exc).__name__}: {exc}"[:300]
+            for table, key in keys:
+                c.execute("INSERT OR REPLACE INTO ledger_chain_pending(ref_table, ref_key, failed_utc, error) "
+                          "VALUES (?,?,?,?)", (table, str(key), _now_iso(), msg))
+            self._pending_maybe = True
+        except Exception:
+            log.critical("could not remember rows left without a chain entry", exc_info=True)
+            if not c.in_transaction:
+                raise ChainTransactionAborted("SQLite aborted the transaction while recording a chain fault") from exc
+
+    def _chain_guard(self, c: sqlite3.Connection, what: str, fn: Any, keys: list[tuple[str, Any]]) -> None:
+        """Run chain bookkeeping inside a savepoint; failures are handled by _chain_fault."""
         c.execute("SAVEPOINT chain_entry")
         try:
             fn()
-        except Exception:
-            c.execute("ROLLBACK TO chain_entry")
-            c.execute("RELEASE chain_entry")
-            self.chain_failures += 1
-            log.critical("could not write recording-log chain entry (%s)", what, exc_info=True)
+        except Exception as exc:
+            self._chain_fault(c, what, keys, exc, savepoint=True)
         else:
             c.execute("RELEASE chain_entry")
+
+    def _repair_if_pending(self, c: sqlite3.Connection) -> None:
+        if not self._pending_maybe:
+            return
+        done: list[int] = []
+        self._chain_guard(c, "repair", lambda: done.append(chain.repair_pending(c, _now_iso())), [])
+        if done:
+            self._pending_maybe = False
+            if done[0]:
+                log.warning("re-recorded %d ledger row(s) whose chain entry had failed (protection gap)", done[0])
 
     @contextmanager
     def _chained(self, c: sqlite3.Connection, table: str, keys: Iterable[Any]) -> Iterator[None]:
         """Track covered rows around a write in the caller's transaction (see ledgerchain)."""
+        keys = list(keys)
+        self._repair_if_pending(c)
         tracked: list[chain.Tracked] | None = None
         try:
             tracked = [chain.track(c, table, k) for k in keys]
-        except Exception:
-            self.chain_failures += 1
-            log.critical("could not read recording-log chain before a write to %s", table, exc_info=True)
+        except Exception as exc:
+            self._chain_fault(c, f"{table} read", [(table, k) for k in keys], exc, savepoint=False)
         yield
         if tracked is None:
             return
@@ -296,11 +356,13 @@ class Ledger:
                                      "discrepancy_entry": d.seq})))
                 chain.record_insert(c, "events", cur.lastrowid, now)
 
-        self._chain_guard(c, f"{table} update", work)
+        self._chain_guard(c, f"{table} update", work, [(table, t.key) for t in tracked])
         self.chain_discrepancies += len(found)
 
     def _chain_insert(self, c: sqlite3.Connection, table: str, key: Any) -> None:
-        self._chain_guard(c, f"{table} insert", lambda: chain.record_insert(c, table, key, _now_iso()))
+        self._repair_if_pending(c)
+        self._chain_guard(c, f"{table} insert", lambda: chain.record_insert(c, table, key, _now_iso()),
+                          [(table, key)])
 
     def query(self, sql: str, params: Iterable[Any] = ()) -> list[sqlite3.Row]:
         with self._lock:
@@ -310,9 +372,14 @@ class Ledger:
         return self.query("PRAGMA integrity_check")[0][0]
 
     def checkpoint(self) -> None:
-        """Fold the WAL back into the main file so it cannot grow without bound over long runs."""
+        """Fold the WAL back into the main file so it cannot grow without bound over long runs.
+
+        PASSIVE never waits for readers (e.g. a chain verification or diagnostic report holding a
+        read snapshot), so the ledger lock - and with it sealing - is never held waiting. Frames a
+        reader still needs are copied by a later checkpoint; once the WAL is fully checkpointed it
+        is reused from the start and truncated to ``journal_size_limit``."""
         with self._lock:
-            self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            self._conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
 
     # ------------------------------------------------------------------ events
     def _event_in(self, c: sqlite3.Connection, e: EventSpec) -> None:

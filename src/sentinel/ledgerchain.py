@@ -49,8 +49,14 @@ of values inside ``record``; only ``record``, ``prev_hash`` and ``entry_hash`` c
    values (NULL -> null, INTEGER -> integer, REAL -> number, TEXT -> string). Columns that hold
    JSON (``detail``, ``warnings``...) are hashed as the TEXT they are stored as.
 7. A row's current covered values must equal ``data`` of the latest entry naming that
-   ``table``/``key``. Kinds with ``table = null`` (``genesis``, ``discrepancy``) describe the log
-   itself, not a row.
+   ``table``/``key``. Kinds with ``table = null`` (``genesis``, ``discrepancy``, ``protection_gap``)
+   describe the log itself, not a row.
+8. Between consecutive entries of the same row only the recorder's own transitions are allowed
+   (:func:`illegal_changes`: sealed segments' integrity fields are write-once and their state is
+   final, events never change, closed gaps and ended runs never change). ``genesis`` appears only
+   at 0 and ``adopted`` only directly after it. This is what stops a well-formed APPENDED entry from
+   changing history the recorder treats as final; a key-less chain cannot stop rule-compliant
+   appends after the last head copied off the machine (docs/07).
 Anchor log line: ``<anchored UTC> seq=<n> hash=<64 hex> entry_utc=<UTC of entry n> reason=<word>``.
 """
 
@@ -66,7 +72,8 @@ import re
 import sqlite3
 import sys
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from json.encoder import encode_basestring as _escape   # C-accelerated; = json.dumps(s, ensure_ascii=False)
 from pathlib import Path
@@ -83,7 +90,7 @@ CHAIN_FORMAT = 1
 ZERO_HASH = "0" * 64
 ANCHOR_LOG_NAME = "chain_heads.log"
 TERMINAL = frozenset({"FINALIZED", "INTERRUPTED", "CORRUPT"})
-STRUCTURAL_KINDS = frozenset({"genesis", "discrepancy"})
+STRUCTURAL_KINDS = frozenset({"genesis", "discrepancy", "protection_gap"})   # describe the log, not a row
 
 # ---------------------------------------------------------------------- covered columns
 # Columns NOT listed are bookkeeping that legitimately changes without evidential meaning
@@ -376,6 +383,27 @@ def record_insert(c: sqlite3.Connection, table: str, key: Any, utc: str) -> None
         append_entry(c, _derive_kind(table, None, post), table, str(key), post, utc)
 
 
+def repair_pending(c: sqlite3.Connection, utc: str) -> int:
+    """Re-record rows whose chain entry could not be written earlier (``ledger_chain_pending``).
+
+    For each: a structural ``protection_gap`` entry (table/key, when and why the entry failed),
+    then a ``chain_repair`` snapshot of the row as it is now. Verification reports the gap as a
+    protection fault (V-004), not as tampering, but still checks that the change across the gap
+    is one the recorder makes (``illegal_changes``). Returns the number of rows repaired."""
+    rows = c.execute("SELECT ref_table, ref_key, failed_utc, error FROM ledger_chain_pending ORDER BY rowid").fetchall()
+    for table, key, failed, err in rows:
+        if table in COVERED:
+            append_entry(c, "protection_gap", None, None,
+                         {"table": table, "key": key, "failed_utc": failed, "error": err}, utc)
+            post = projection(table, _fetch_row(c, table, key))
+            latest = _latest_entry(c, table, key)
+            post_c = canonical_json(post) if post is not None else None
+            if (latest is None and post is not None) or (latest is not None and post_c != latest[1]):
+                append_entry(c, "chain_repair", table, str(key), post, utc)
+        c.execute("DELETE FROM ledger_chain_pending WHERE ref_table=? AND ref_key=?", (table, key))
+    return len(rows)
+
+
 def _genesis_data(c: sqlite3.Connection, *, previous_missing: bool, adopted: int,
                   last_anchor: dict[str, Any] | None) -> dict[str, Any]:
     from . import __version__
@@ -501,6 +529,66 @@ def parse_expected_head(text: str, source: str = "given on the command line") ->
     return Anchor(int(m[1]), m[2].lower(), source)
 
 
+# ---------------------------------------------------------------------- recorder semantics (format 1)
+# What the recorder legitimately does to a covered row AFTER its first chain entry. Verification
+# flags every later entry that does anything else. This matters because the chain has no key:
+# someone who edits the database can APPEND a well-formed entry for the edit. Hash links and
+# anchors only prove that history was not REWRITTEN; these rules make an appended entry that
+# changes something the recorder treats as final (a sealed segment's hash, size, times or state,
+# a written event, a closed gap, an ended run) a finding too. docs/07 states what remains possible.
+SEGMENT_WRITE_ONCE = frozenset({          # must equal db.WRITE_ONCE (unit-tested)
+    "sha256", "size_bytes", "rel_path", "start_utc", "end_utc", "duration_s",
+    "content_sha256", "content_hash_method", "decoded_frame_count", "framehash_rel_path", "framehash_sha256",
+})
+_SEG_FREE = frozenset({"audit_status"})                  # rolling audit result: may change any time
+_RAISE_ONLY = frozenset({"clock_anomaly"})               # 0 -> 1 only
+_RUN_END = frozenset({"ended_utc", "end_reason", "exit_code", "end_detail", "last_stream_time_s"})
+_RUN_WRITE_ONCE = frozenset({"anchor_utc", "anchor_method", "timeline_break_stream_s", "timeline_shift_s"})
+_GAP_WHILE_OPEN = frozenset({"ended_run_id", "end_utc", "duration_s", "next_segment_id", "closed_utc"})
+VALID_KINDS = frozenset({"genesis", "adopted", "run_started", "run_updated", "run_ended", "segment_sealed",
+                         "segment_updated", "gap_opened", "gap_recorded", "gap_updated", "gap_closed", "event",
+                         "discrepancy", "protection_gap", "chain_repair"})
+
+
+def _same(a: Any, b: Any) -> bool:
+    return canonical_json(a) == canonical_json(b)
+
+
+def _raised(a: Any, b: Any) -> bool:
+    return a in (0, None) and b == 1
+
+
+def illegal_changes(table: str, prev: dict[str, Any], cur: dict[str, Any]) -> list[str]:
+    """Why the change ``prev -> cur`` between two entries of one row is NOT something the recorder
+    does (empty list = a legitimate change)."""
+    if table == "events":
+        changed = _diff(prev, cur) if not _same(prev, cur) else "entered twice"
+        return [f"log events are never changed once written ({changed})"]
+    out: list[str] = []
+    for f in sorted(set(prev) | set(cur)):
+        a, b = prev.get(f), cur.get(f)
+        if _same(a, b) or (f in _RAISE_ONLY and _raised(a, b)):
+            continue
+        if table == "segments":
+            if f in _SEG_FREE or (f in SEGMENT_WRITE_ONCE and a is None):
+                continue
+            when = "after the segment was sealed"
+        elif table == "recording_gaps":
+            if prev.get("closed_utc") is None and (f in _GAP_WHILE_OPEN or (
+                    f == "attempts" and isinstance(a, int) and isinstance(b, int) and b >= a)):
+                continue
+            when = "after the gap was closed" if prev.get("closed_utc") is not None else "after the gap was opened"
+        elif table == "recording_runs":
+            ended = prev.get("ended_utc") is not None
+            if not ended and (f in _RUN_END or (f in _RUN_WRITE_ONCE and a is None)):
+                continue
+            when = "after the run ended" if ended else "after the run started"
+        else:
+            when = ""
+        out.append(f"{f} changed from '{_short(a)}' to '{_short(b)}' {when}".rstrip())
+    return out
+
+
 # ---------------------------------------------------------------------- verification
 @dataclass
 class Finding:
@@ -517,19 +605,26 @@ class VerifyReport:
     checked_utc: str
     entries: int = 0
     head: ChainHead | None = None
-    findings: list[Finding] = field(default_factory=list)
+    findings: list[Finding] = field(default_factory=list)   # signs of alteration -> V-003
+    faults: list[Finding] = field(default_factory=list)     # protection gaps (system faults) -> V-004
     notes: list[str] = field(default_factory=list)
     anchors_checked: int = 0
     rows_checked: int = 0
     files_checked: int = 0
     seconds: float = 0.0
+    transactions: int = 0
+    longest_read_s: float = 0.0     # longest single read snapshot held (checkpoint / WAL impact)
 
     @property
     def ok(self) -> bool:
         return not self.findings
 
+    @staticmethod
+    def _sorted(items: list[Finding]) -> list[Finding]:
+        return sorted(items, key=lambda f: (f.position is None, f.position or 0))
+
     def sorted_findings(self) -> list[Finding]:
-        return sorted(self.findings, key=lambda f: (f.position is None, f.position or 0))
+        return self._sorted(self.findings)
 
     @property
     def first(self) -> Finding | None:
@@ -541,40 +636,44 @@ class VerifyReport:
                 "head": self.head.to_dict() if self.head else None,
                 "first_problem": self.first.to_dict() if self.first else None,
                 "findings": [f.to_dict() for f in self.sorted_findings()[:max_findings]],
-                "findings_total": len(self.findings), "notes": self.notes,
+                "findings_total": len(self.findings),
+                "protection_gaps": [f.to_dict() for f in self._sorted(self.faults)[:max_findings]],
+                "protection_gaps_total": len(self.faults), "notes": self.notes,
                 "anchors_checked": self.anchors_checked, "rows_checked": self.rows_checked,
-                "files_checked": self.files_checked, "seconds": round(self.seconds, 3)}
+                "files_checked": self.files_checked, "seconds": round(self.seconds, 3),
+                "transactions": self.transactions, "longest_read_s": round(self.longest_read_s, 3)}
 
     def render_text(self, max_findings: int = 50) -> str:
         lines = ["RECORDING LOG CHECK", "==================="]
-        if self.ok:
-            lines.append("RESULT: INTACT - no sign that the recording log was altered.")
-        else:
+        if not self.ok:
             f = self.first
             assert f is not None
             where = f"at log entry {f.position}" if f.position is not None else "(position unknown)"
             lines += ["RESULT: ALTERED - the recording log has been altered.",
                       f"First problem {where}: {f.message}"]
+        elif self.faults:
+            lines.append(f"RESULT: INTACT, WITH {len(self.faults)} PROTECTION GAP(S) - no sign of alteration, but "
+                         "some log entries could not be written when they should have been (system fault).")
+        else:
+            lines.append("RESULT: INTACT - no sign that the recording log was altered.")
         lines.append(f"Checked: {self.entries} log entries, {self.rows_checked} records, "
                      f"{self.anchors_checked} saved copies of the log fingerprint, {self.files_checked} recording files.")
         if self.head:
             lines.append(f"Log head: entry {self.head.seq}, fingerprint {self.head.hash}, written {self.head.utc}")
-        if len(self.findings) > 1:
-            lines.append("")
-            lines.append(f"All problems ({len(self.findings)}):")
-            for x in self.sorted_findings()[:max_findings]:
-                pos = f"entry {x.position}" if x.position is not None else "-"
-                lines.append(f"  [{pos}] {x.message}")
-            if len(self.findings) > max_findings:
-                lines.append(f"  ... and {len(self.findings) - max_findings} more")
+        for title, items in (("All problems", self.findings), ("Protection gaps", self.faults)):
+            if len(items) > (1 if items is self.findings else 0):
+                lines += ["", f"{title} ({len(items)}):"]
+                for x in self._sorted(items)[:max_findings]:
+                    pos = f"entry {x.position}" if x.position is not None else "-"
+                    lines.append(f"  [{pos}] {x.message}")
+                if len(items) > max_findings:
+                    lines.append(f"  ... and {len(items) - max_findings} more")
         if self.notes:
-            lines.append("")
-            lines.append("Notes:")
-            lines += [f"  - {n}" for n in self.notes]
-        lines.append("")
-        lines.append("This check shows whether the log is consistent with itself and with saved copies of its "
-                     "fingerprint. Someone able to rewrite the whole log can make it consistent again; only a "
-                     "fingerprint saved off this computer earlier (review drive, diagnostic report) exposes that.")
+            lines += ["", "Notes:"] + [f"  - {n}" for n in self.notes]
+        lines += ["", "This check shows whether the log is consistent with itself, with the rules the recording "
+                      "software follows, and with saved copies of its fingerprint. It cannot rule out entries added "
+                      "after the last fingerprint saved off this computer (review drive, diagnostic report) that "
+                      "follow those rules; see the security documentation."]
         return "\n".join(lines)
 
 
@@ -620,12 +719,20 @@ def status_anchor(status_path: Path) -> Anchor | None:
     return None
 
 
+MAX_MARKERS = 10_000            # bound on remembered discrepancy / protection-gap positions
+
+
 def verify_ledger(db_path: Path | str, *, spool_path: Path | None = None, check_files: bool = False,
-                  anchors: Iterable[Anchor] = (), use_local_anchors: bool = True) -> VerifyReport:
+                  anchors: Iterable[Anchor] = (), use_local_anchors: bool = True, chunk: int = 2000,
+                  pause_s: float = 0.0) -> VerifyReport:
     """Verify the chain of the ledger at ``db_path`` (opened read-only; safe while recording).
 
-    Local anchors (``chain_heads.log`` and ``status.json`` beside the ledger) are read BEFORE the
-    database snapshot is taken, so an anchor can never be newer than the snapshot."""
+    Works in many SHORT read transactions of at most ``chunk`` entries/keys/rows each (with
+    ``pause_s`` between them), so it never holds one snapshot for long (the recorder's WAL
+    checkpoint is not starved) and memory stays bounded. Correctness across snapshots: the chain
+    is append-only, so it is verified up to the head seen at the start; each row is compared with
+    its entries inside one snapshot. Local anchors (``chain_heads.log``, ``status.json``) are read
+    BEFORE the starting head, so an anchor can never be newer than the part verified."""
     t0 = time.monotonic()
     db_path = Path(db_path)
     rep = VerifyReport(checked_utc=iso_utc(time.time()))
@@ -642,212 +749,300 @@ def verify_ledger(db_path: Path | str, *, spool_path: Path | None = None, check_
         return rep
     conn = _ro_connect(db_path)
     try:
-        conn.execute("BEGIN")                 # one consistent snapshot; does not block the recorder
-        try:
-            _verify_snapshot(conn, rep, all_anchors, spool_path, check_files)
-        finally:
-            conn.execute("ROLLBACK")
+        _Verifier(conn, rep, all_anchors, max(1, chunk), pause_s).run(spool_path, check_files)
     finally:
         conn.close()
     rep.seconds = time.monotonic() - t0
     return rep
 
 
-def _verify_snapshot(conn: sqlite3.Connection, rep: VerifyReport, anchors: list[Anchor],
-                     spool_path: Path | None, check_files: bool) -> None:
-    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='ledger_chain'").fetchone() is None:
-        rep.findings.append(Finding(0, "chain_missing",
-                                    "The recording log has no tamper-evidence chain (it was made by older "
-                                    "software, or the chain was removed)."))
-        return
-    by_seq: dict[int, list[Anchor]] = {}
-    for a in anchors:
-        by_seq.setdefault(a.seq, []).append(a)
-    last_confirmed: int | None = None          # highest anchored position that matched
+class _Verifier:
+    def __init__(self, conn: sqlite3.Connection, rep: VerifyReport, anchors: list[Anchor], chunk: int,
+                 pause_s: float) -> None:
+        self.conn, self.rep, self.anchors, self.chunk, self.pause_s = conn, rep, anchors, chunk, pause_s
+        self.disc: dict[tuple[str, str], list[int]] = {}      # discrepancy entry positions per row
+        self.pending: dict[tuple[str, str], tuple[str, str]] = {}
+        self.end = -1
+        self.broken = False
 
-    latest: dict[tuple[str, str], tuple[int, bytes]] = {}
-    seg_files: dict[str, tuple[int, str, str | None, int | None]] = {}
-    expected_seq, prev = 0, ZERO_HASH
-    broken = False
-    count = 0
-    for row in conn.execute("SELECT seq, kind, ref_table, ref_key, record, prev_hash, entry_hash "
-                            "FROM ledger_chain ORDER BY seq"):
-        seq = int(row[0])
-        count += 1
+    # ---------------------------------------------------------------- helpers
+    @contextmanager
+    def snapshot(self) -> Iterator[sqlite3.Connection]:
+        self.conn.execute("BEGIN")
+        t = time.monotonic()
         try:
-            rec = json.loads(row[4])
-            data = rec.get("data")
-            data_c = canonical_json(data)
-            well_formed = (rec.get("v") == CHAIN_FORMAT and make_record(
-                rec["seq"], rec["utc"], rec["kind"], rec["table"], rec["key"], data_c) == row[4])
-        except (ValueError, KeyError, TypeError, AttributeError):
-            rec, data, data_c, well_formed = None, None, None, False
-        if not broken:
-            if seq != expected_seq:
-                rep.findings.append(Finding(expected_seq, "entry_missing",
-                                            f"Log entry {expected_seq} is missing (the next entry present is {seq})."))
-                broken = True
-            elif rec is None or not well_formed:
-                rep.findings.append(Finding(seq, "entry_unreadable",
-                                            f"Log entry {seq} is not in the recorded format: it was altered."))
-                broken = True
-            elif rec["seq"] != seq:
-                rep.findings.append(Finding(seq, "entry_out_of_place",
-                                            f"Log entry {seq} holds the record written as entry {rec['seq']}: "
-                                            "entries were reordered or replaced."))
-                broken = True
-            elif seq == 0 and rec["kind"] != "genesis":
-                rep.findings.append(Finding(0, "entry_unreadable", "The first log entry is not a starting entry."))
-                broken = True
-            elif row[5] != prev:
-                pos = max(seq - 1, 0)
-                rep.findings.append(Finding(pos, "link_broken",
-                                            f"Log entry {pos} is not the entry that entry {seq} was linked to when "
-                                            f"it was written: entry {pos} was altered or replaced."))
-                broken = True
+            yield self.conn
+        finally:
+            self.conn.execute("ROLLBACK")
+            self.rep.transactions += 1
+            self.rep.longest_read_s = max(self.rep.longest_read_s, time.monotonic() - t)
+            if self.pause_s:
+                time.sleep(self.pause_s)
+
+    def find(self, pos: int | None, code: str, msg: str) -> None:
+        self.rep.findings.append(Finding(pos, code, msg))
+
+    def fault(self, pos: int | None, code: str, msg: str) -> None:
+        self.rep.faults.append(Finding(pos, code, msg))
+
+    # ---------------------------------------------------------------- passes
+    def run(self, spool_path: Path | None, check_files: bool) -> None:
+        with self.snapshot() as c:
+            if c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='ledger_chain'").fetchone() is None:
+                self.find(0, "chain_missing", "The recording log has no tamper-evidence chain (it was made by "
+                                              "older software, or the chain was removed).")
+                return
+            row = c.execute("SELECT MAX(seq) FROM ledger_chain").fetchone()
+            self.end = int(row[0]) if row[0] is not None else -1
+            if c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND "
+                         "name='ledger_chain_pending'").fetchone() is not None:
+                self.pending = {(str(r[0]), str(r[1])): (str(r[2]), str(r[3])) for r in c.execute(
+                    "SELECT ref_table, ref_key, failed_utc, error FROM ledger_chain_pending")}
+        expected = self.chain_pass()
+        self.rep.entries = expected
+        if expected == 0 and self.end < 0:
+            self.find(0, "chain_empty", "The recording log's tamper-evidence chain is empty: its entries were removed.")
+        for a in self.anchors:
+            if a.seq >= expected:
+                self.rep.anchors_checked += 1
+                when = f" at {a.anchored_utc}" if a.anchored_utc else ""
+                self.find(expected, "log_truncated",
+                          f"The log ends at entry {expected - 1} but a copy of its fingerprint saved {a.source}{when} "
+                          f"shows it had reached entry {a.seq}: entries were removed from the end.")
+        if self.broken:
+            self.rep.notes.append("Checks after the first broken entry are reported but cannot be fully trusted.")
+        files: list[tuple[int, str, str, int | None]] = []
+        for table in COVERED:
+            self.key_pass(table, files if check_files else None, spool_path)
+            self.unlogged_pass(table, expected)
+        if check_files:
+            if spool_path is None:
+                self.rep.notes.append("Recording files were not checked (recording storage location unknown).")
             else:
+                self.check_files(files, spool_path)
+
+    def chain_pass(self) -> int:
+        """Structure, links, anchors, kind rules. Returns the number of confirmed-contiguous entries."""
+        by_seq: dict[int, list[Anchor]] = {}
+        for a in self.anchors:
+            by_seq.setdefault(a.seq, []).append(a)
+        last_confirmed: int | None = None
+        prev, expected, prev_kind = ZERO_HASH, 0, None
+        while expected <= self.end and not self.broken:
+            with self.snapshot() as c:
+                rows = c.execute("SELECT seq, kind, ref_table, ref_key, record, prev_hash, entry_hash FROM ledger_chain "
+                                 "WHERE seq >= ? AND seq <= ? ORDER BY seq LIMIT ?",
+                                 (expected, self.end, self.chunk)).fetchall()
+            if not rows:
+                self.find(expected, "entry_missing", f"Log entry {expected} is missing (the log should reach entry "
+                                                     f"{self.end}).")
+                self.broken = True
+                break
+            for row in rows:
+                seq = int(row[0])
+                if seq != expected:
+                    self.find(expected, "entry_missing",
+                              f"Log entry {expected} is missing (the next entry present is {seq}).")
+                    self.broken = True
+                    break
+                try:
+                    rec = json.loads(row[4])
+                    data = rec.get("data")
+                    well_formed = (rec.get("v") == CHAIN_FORMAT and make_record(
+                        rec["seq"], rec["utc"], rec["kind"], rec["table"], rec["key"], canonical_json(data)) == row[4])
+                except (ValueError, KeyError, TypeError, AttributeError):
+                    rec, data, well_formed = None, None, False
+                if rec is None or not well_formed:
+                    self.find(seq, "entry_unreadable", f"Log entry {seq} is not in the recorded format: it was altered.")
+                    self.broken = True
+                    break
+                if rec["seq"] != seq:
+                    self.find(seq, "entry_out_of_place", f"Log entry {seq} holds the record written as entry "
+                                                         f"{rec['seq']}: entries were reordered or replaced.")
+                    self.broken = True
+                    break
+                if row[5] != prev:
+                    pos = max(seq - 1, 0)
+                    self.find(pos, "link_broken", f"Log entry {pos} is not the entry that entry {seq} was linked to "
+                                                  f"when it was written: entry {pos} was altered or replaced.")
+                    self.broken = True
+                    break
                 h = entry_hash(prev, row[4])
                 if h != row[6]:
-                    rep.findings.append(Finding(seq, "entry_altered",
-                                                f"Log entry {seq} was altered after it was written (its "
-                                                "fingerprint no longer matches its contents)."))
-                    broken = True
-                else:
-                    if (row[1], row[2], row[3]) != (rec["kind"], rec["table"], rec["key"]):
-                        rep.findings.append(Finding(seq, "entry_index_altered",
-                                                    f"The look-up columns of log entry {seq} were altered."))
-                    for a in by_seq.get(seq, []):
-                        rep.anchors_checked += 1
-                        if a.hash != h:
-                            since = f"after entry {last_confirmed}" if last_confirmed is not None else "anywhere"
-                            when = f" at {a.anchored_utc}" if a.anchored_utc else ""
-                            rep.findings.append(Finding(seq, "anchor_mismatch",
-                                                        f"Log entry {seq} differs from the copy of the log "
-                                                        f"fingerprint saved {a.source}{when}: the log was rewritten "
-                                                        f"({since} up to entry {seq})."))
-                        else:
-                            last_confirmed = seq if last_confirmed is None else max(last_confirmed, seq)
-                    prev = h
-                    rep.head = ChainHead(seq, h, str(rec.get("utc", "")))
-        expected_seq = seq + 1
-        if rec is None:
-            continue
-        kind, table, key = rec.get("kind"), rec.get("table"), rec.get("key")
-        if kind == "genesis" and isinstance(data, dict):
+                    self.find(seq, "entry_altered", f"Log entry {seq} was altered after it was written (its "
+                                                    "fingerprint no longer matches its contents).")
+                    self.broken = True
+                    break
+                kind, table, key = rec["kind"], rec["table"], rec["key"]
+                if (row[1], row[2], row[3]) != (kind, table, key):
+                    self.find(seq, "entry_index_altered", f"The look-up columns of log entry {seq} were altered.")
+                self.kind_rules(seq, kind, table, key, data, prev_kind, rec.get("utc"))
+                for a in by_seq.get(seq, []):
+                    self.rep.anchors_checked += 1
+                    if a.hash != h:
+                        since = f"after entry {last_confirmed}" if last_confirmed is not None else "anywhere"
+                        when = f" at {a.anchored_utc}" if a.anchored_utc else ""
+                        self.find(seq, "anchor_mismatch", f"Log entry {seq} differs from the copy of the log fingerprint "
+                                                          f"saved {a.source}{when}: the log was rewritten ({since} up "
+                                                          f"to entry {seq}).")
+                    else:
+                        last_confirmed = seq if last_confirmed is None else max(last_confirmed, seq)
+                prev, prev_kind, expected = h, kind, seq + 1
+                self.rep.head = ChainHead(seq, h, str(rec.get("utc", "")))
+        return expected
+
+    def kind_rules(self, seq: int, kind: str, table: Any, key: Any, data: Any, prev_kind: str | None,
+                   utc: Any) -> None:
+        if kind not in VALID_KINDS or (kind in STRUCTURAL_KINDS) != (table is None):
+            self.find(seq, "illegal_entry", f"Log entry {seq} is of a kind the recording software never writes.")
+        elif (kind == "genesis") != (seq == 0) or (kind == "adopted" and prev_kind not in ("genesis", "adopted")):
+            self.find(seq, "illegal_entry", f"Log entry {seq} ({kind}) is out of place: such entries are written only "
+                                            "when the log is first started.")
+        elif kind == "genesis" and isinstance(data, dict):
             if data.get("previous_chain_missing"):
-                rep.findings.append(Finding(seq, "chain_restarted",
-                                            f"The log's tamper-evidence chain was missing when the recorder started "
-                                            f"at {rec.get('utc')} and had to be started again; what happened "
-                                            "before that cannot be checked."))
+                self.find(seq, "chain_restarted", f"The log's tamper-evidence chain was missing when the recorder "
+                                                  f"started at {utc} and had to be started again; what happened "
+                                                  "before that cannot be checked.")
             pre = data.get("pre_existing_rows") or {}
-            if seq == 0 and any(pre.values()):
-                rep.notes.append(f"{sum(pre.values())} records created before {rec.get('utc')} (before "
-                                 "tamper evidence was introduced) were adopted into the log at that time; changes "
-                                 "made to them before then cannot be detected.")
+            if any(pre.values()):
+                self.rep.notes.append(f"{sum(pre.values())} records created before {utc} (before tamper evidence "
+                                      "was introduced) were adopted into the log at that time; changes made to them "
+                                      "before then cannot be detected.")
         elif kind == "discrepancy" and isinstance(data, dict):
             t = str(data.get("table"))
-            rep.findings.append(Finding(seq, "discrepancy_recorded",
-                                        f"At {rec.get('utc')} the recording software found that the "
-                                        f"{_NOUN.get(t, t)} {_label(t, str(data.get('key')), data.get('found') or data.get('expected'))} "
-                                        f"had been changed outside it ({_diff(data.get('expected'), data.get('found'))})."))
-        elif table in COVERED and key is not None and data is None:
-            latest.pop((table, str(key)), None)        # entry says: row no longer covered
-            seg_files.pop(str(key), None)
-        elif table in COVERED and key is not None and data_c is not None:
-            latest[(table, str(key))] = (seq, hashlib.sha256(data_c.encode("utf-8")).digest())
-            if check_files and table == "segments" and isinstance(data, dict):
-                seg_files[str(key)] = (seq, str(data.get("rel_path")), data.get("sha256"), data.get("size_bytes"))
-    rep.entries = count
-    if count == 0:
-        rep.findings.append(Finding(0, "chain_empty", "The recording log's tamper-evidence chain is empty: its "
-                                                      "entries were removed."))
-    for a in anchors:
-        if a.seq >= expected_seq:
-            rep.anchors_checked += 1
-            when = f" at {a.anchored_utc}" if a.anchored_utc else ""
-            rep.findings.append(Finding(expected_seq, "log_truncated",
-                                        f"The log ends at entry {expected_seq - 1} but a copy of its fingerprint "
-                                        f"saved {a.source}{when} shows it had reached entry {a.seq}: entries were "
-                                        "removed from the end."))
-    if broken:
-        rep.notes.append("Checks after the first broken entry are reported but cannot be fully trusted.")
-    _check_rows(conn, rep, latest, expected_seq)
-    if check_files:
-        _check_files(rep, seg_files, spool_path)
+            self.find(seq, "discrepancy_recorded",
+                      f"At {utc} the recording software found that the {_NOUN.get(t, t)} "
+                      f"{_label(t, str(data.get('key')), data.get('found') or data.get('expected'))} had been changed "
+                      f"outside it ({_diff(data.get('expected'), data.get('found'))}).")
+            if sum(map(len, self.disc.values())) < MAX_MARKERS:
+                self.disc.setdefault((t, str(data.get("key"))), []).append(seq)
+        elif kind == "protection_gap" and isinstance(data, dict):
+            t = str(data.get("table"))
+            self.fault(seq, "protection_gap",
+                       f"The log entry for the {_NOUN.get(t, t)} #{data.get('key')} could not be written at "
+                       f"{data.get('failed_utc')} ({_short(data.get('error'))}); it was recorded again at entry "
+                       f"{seq + 1}. Only changes the recording software would make were found across the gap.")
+        elif kind == "row_uncovered" or (table in COVERED and data is None):
+            self.find(seq, "illegal_entry", f"Log entry {seq} removes a record from protection, which the recording "
+                                            "software never does.")
 
-
-def _record_data(conn: sqlite3.Connection, seq: int) -> dict[str, Any] | None:
-    row = conn.execute("SELECT record FROM ledger_chain WHERE seq=?", (seq,)).fetchone()
-    try:
-        d = _data_of(row[0]) if row else None
-    except (ValueError, KeyError):
-        return None
-    return d if isinstance(d, dict) else None
-
-
-def _check_rows(conn: sqlite3.Connection, rep: VerifyReport, latest: dict[tuple[str, str], tuple[int, bytes]],
-                end_seq: int) -> None:
-    for table, (pk, _) in COVERED.items():
-        noun = _NOUN[table]
-        try:
-            rows = conn.execute(f"SELECT * FROM {table} ORDER BY rowid")
-        except sqlite3.OperationalError as exc:
-            rep.findings.append(Finding(None, "table_missing", f"The {noun} table cannot be read ({exc})."))
-            continue
-        for row in rows:
-            rep.rows_checked += 1
-            key = str(row[pk])
-            try:
-                p = projection(table, row)
-            except (IndexError, KeyError):
-                rep.findings.append(Finding(None, "table_altered", f"The {noun} table's structure was changed."))
-                break
-            ent = latest.pop((table, key), None)
-            if p is None:
-                if ent is not None:
-                    rep.findings.append(Finding(ent[0], "record_unsealed",
-                                                f"The {noun} {_label(table, key, _record_data(conn, ent[0]))} was "
-                                                f"sealed in log entry {ent[0]} but is no longer marked sealed "
-                                                f"(state is now {row['state']})."))
-                continue
-            if ent is None:
-                rep.findings.append(Finding(end_seq, "record_unlogged",
-                                            f"The {noun} {_label(table, key, p)} is in the database but was never "
-                                            "entered in the log: it was added or changed outside the recording "
-                                            "software, or the end of the log was removed."))
-                continue
-            if hashlib.sha256(canonical_json(p).encode("utf-8")).digest() != ent[1]:
-                exp = _record_data(conn, ent[0])
-                rep.findings.append(Finding(ent[0], "record_altered",
-                                            f"The {noun} {_label(table, key, exp)} was changed after log entry "
-                                            f"{ent[0]} recorded it: {_diff(exp, p)}."))
-    for (table, key), (seq, _) in latest.items():
-        exp = _record_data(conn, seq)
-        rep.findings.append(Finding(seq, "record_deleted",
-                                    f"The {_NOUN.get(table, table)} {_label(table, key, exp)} recorded in log entry "
-                                    f"{seq} has been deleted from the database."))
-
-
-def _check_files(rep: VerifyReport, seg_files: dict[str, tuple[int, str, str | None, int | None]],
+    def key_pass(self, table: str, files: list[tuple[int, str, str, int | None]] | None,
                  spool_path: Path | None) -> None:
-    from .hashing import sha256_file
-    if spool_path is None:
-        rep.notes.append("Recording files were not checked (recording storage location unknown).")
-        return
-    for _key, (seq, rel, sha, size) in sorted(seg_files.items(), key=lambda kv: kv[1][0]):
-        if not sha:
-            continue                          # sealed without a file (file was already missing at sealing)
-        p = spool_path / rel
-        rep.files_checked += 1
-        if not p.exists():
-            rep.findings.append(Finding(seq, "file_missing",
-                                        f"The recording file {rel} recorded in log entry {seq} is missing."))
-            continue
-        got, n = sha256_file(p)
-        if got != sha or (size is not None and n != size):
-            rep.findings.append(Finding(seq, "file_altered",
-                                        f"The recording file {rel} no longer matches the fingerprint recorded in "
-                                        f"log entry {seq}: the file was changed."))
+        noun, last = _NOUN[table], ""
+        while True:
+            with self.snapshot() as c:
+                keys = [r[0] for r in c.execute("SELECT DISTINCT ref_key FROM ledger_chain WHERE ref_table=? AND "
+                                                "ref_key > ? ORDER BY ref_key LIMIT ?", (table, last, self.chunk))]
+                for key in keys:
+                    self.check_key(c, table, noun, str(key), files)
+            if not keys:
+                return
+            last = keys[-1]
+
+    def check_key(self, c: sqlite3.Connection, table: str, noun: str, key: str,
+                  files: list[tuple[int, str, str, int | None]] | None) -> None:
+        pk, _ = COVERED[table]
+        prev_seq, prev = None, None
+        last_seq, last = None, None
+        for seq, kind, record in c.execute("SELECT seq, kind, record FROM ledger_chain WHERE ref_table=? AND ref_key=? "
+                                           "ORDER BY seq", (table, key)):
+            try:
+                data = _data_of(record)
+            except (ValueError, KeyError, TypeError):
+                continue                                   # reported by the chain pass
+            if not isinstance(data, dict):
+                continue
+            if prev is not None and not any(prev_seq < d < seq for d in self.disc.get((table, key), ())):
+                why = illegal_changes(table, prev, data)
+                if why:
+                    self.find(seq, "illegal_change",
+                              f"Log entry {seq} records a change the recording software never makes to the {noun} "
+                              f"{_label(table, key, data)}: {'; '.join(why)}.")
+            prev_seq, prev = seq, data
+            last_seq, last = seq, data
+        if last is None or last_seq is None:
+            return
+        try:
+            row = c.execute(f"SELECT * FROM {table} WHERE {pk}=?", (key,)).fetchone()
+            p = projection(table, row)
+        except (sqlite3.OperationalError, IndexError, KeyError) as exc:
+            self.find(None, "table_altered", f"The {noun} table cannot be read as recorded ({exc}).")
+            return
+        if row is None:
+            self.find(last_seq, "record_deleted", f"The {noun} {_label(table, key, last)} recorded in log entry "
+                                                  f"{last_seq} has been deleted from the database.")
+            return
+        if p is None:
+            self.find(last_seq, "record_unsealed", f"The {noun} {_label(table, key, last)} was sealed in log entry "
+                                                   f"{last_seq} but is no longer marked sealed (state is now "
+                                                   f"{row['state']}).")
+            return
+        if not _same(p, last):
+            pend = self.pending.get((table, key))
+            if pend is not None and not illegal_changes(table, last, p):
+                self.fault(last_seq, "not_yet_protected",
+                           f"The latest change to the {noun} {_label(table, key, p)} could not be entered in the log "
+                           f"at {pend[0]} ({_short(pend[1])}); it will be re-recorded at the next write.")
+            else:
+                self.find(last_seq, "record_altered", f"The {noun} {_label(table, key, last)} was changed after log "
+                                                      f"entry {last_seq} recorded it: {_diff(last, p)}.")
+        if files is not None and table == "segments" and last.get("sha256"):
+            files.append((last_seq, str(last.get("rel_path")), str(last["sha256"]), last.get("size_bytes")))
+
+    def unlogged_pass(self, table: str, end_pos: int) -> None:
+        pk, _ = COVERED[table]
+        noun, last_rowid = _NOUN[table], 0
+        while True:
+            with self.snapshot() as c:
+                try:
+                    rows = c.execute(f"SELECT rowid AS _rowid_, * FROM {table} WHERE rowid > ? ORDER BY rowid LIMIT ?",
+                                     (last_rowid, self.chunk)).fetchall()
+                except sqlite3.OperationalError as exc:
+                    self.find(None, "table_missing", f"The {noun} table cannot be read ({exc}).")
+                    return
+                if not rows:
+                    return
+                keys = [str(r[pk]) for r in rows]
+                have: set[str] = set()
+                for i in range(0, len(keys), 500):
+                    part = keys[i:i + 500]
+                    marks = ",".join("?" for _ in part)
+                    have.update(str(r[0]) for r in c.execute(
+                        f"SELECT DISTINCT ref_key FROM ledger_chain WHERE ref_table=? AND ref_key IN ({marks})",
+                        (table, *part)))
+                for r, key in zip(rows, keys):
+                    self.rep.rows_checked += 1
+                    try:
+                        p = projection(table, r)
+                    except (IndexError, KeyError):
+                        self.find(None, "table_altered", f"The {noun} table's structure was changed.")
+                        return
+                    if p is None or key in have:
+                        continue
+                    pend = self.pending.get((table, key))
+                    if pend is not None:
+                        self.fault(end_pos, "not_yet_protected",
+                                   f"The {noun} {_label(table, key, p)} could not be entered in the log at {pend[0]} "
+                                   f"({_short(pend[1])}); it will be recorded at the next write.")
+                    else:
+                        self.find(end_pos, "record_unlogged",
+                                  f"The {noun} {_label(table, key, p)} is in the database but was never entered in "
+                                  "the log: it was added or changed outside the recording software, or the end of "
+                                  "the log was removed.")
+                last_rowid = int(rows[-1]["_rowid_"])
+
+    def check_files(self, files: list[tuple[int, str, str, int | None]], spool_path: Path) -> None:
+        from .hashing import sha256_file
+        for seq, rel, sha, size in sorted(files):          # outside any read snapshot: hashing is slow
+            p = spool_path / rel
+            self.rep.files_checked += 1
+            if not p.exists():
+                self.find(seq, "file_missing", f"The recording file {rel} recorded in log entry {seq} is missing.")
+                continue
+            got, n = sha256_file(p)
+            if got != sha or (size is not None and n != size):
+                self.find(seq, "file_altered", f"The recording file {rel} no longer matches the fingerprint recorded "
+                                               f"in log entry {seq}: the file was changed.")
 
 
 # ---------------------------------------------------------------------- CLI
@@ -855,7 +1050,8 @@ def main(argv: list[str] | None = None) -> int:
     from .config import ConfigError, load_config
 
     ap = argparse.ArgumentParser(prog="python -m sentinel.ledgerchain",
-                                 description="Check the recording log for alteration.")
+                                 description="Check the recording log for alteration. Exit status: 0 intact, "
+                                             "1 altered, 2 cannot check, 3 intact with protection gaps.")
     sub = ap.add_subparsers(dest="cmd", required=True)
     v = sub.add_parser("verify", help="recompute and check the recording log's hash chain")
     v.add_argument("--config", required=True)
@@ -894,7 +1090,7 @@ def main(argv: list[str] | None = None) -> int:
     rep = verify_ledger(db, spool_path=cfg.spool_path, check_files=args.check_files, anchors=expected,
                         use_local_anchors=not args.no_local_anchors)
     print(json.dumps(rep.to_dict(), indent=2) if args.json else rep.render_text())
-    return 0 if rep.ok else 1
+    return 1 if not rep.ok else (3 if rep.faults else 0)   # 0 intact, 1 altered, 2 cannot check, 3 gaps
 
 
 if __name__ == "__main__":

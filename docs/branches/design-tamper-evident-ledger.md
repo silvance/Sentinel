@@ -45,6 +45,24 @@ tampering impossible; see §6.
 All commands were run from the worktree root with `"C:\Users\silva\Documents\Proc 6 Build\.venv\Scripts\python.exe"`
 (Windows 11, Python 3.14, FFmpeg 9.0.1).
 
+**After the review fixes (§8):**
+* `-m pytest tests/unit -q` → **130 passed** (50 existing + 80 in `test_ledgerchain.py`).
+* `-m pytest tests/integration/test_ledger_chain.py tests/integration/test_unattended.py -q` →
+  **10 passed**.
+* Full suite `-m pytest tests -q` → **160 passed, 3 failed**. The three failures were:
+  * `test_service_process::test_hard_kill_restart_recovery_and_graceful_stop`: `sqlite3.OperationalError:
+    disk I/O error`, from the test's own read-only query right after it kills the recorder;
+  * `test_recorder_faults::test_camera_offline_shows_interrupted_and_recovers`: the status showed
+    INTERRUPTED before the gap row existed;
+  * `test_recorder_faults::test_short_freeze_is_recorded_as_internal_gap`: no gap row appeared.
+
+  None of the three was a chain check. Re-run individually on this branch they pass intermittently.
+  **Two of them also failed on an unmodified copy of `main`:** `test_hard_kill…` failed with the same
+  disk I/O error (1 of 6, then again at run 3 of a second loop), and `test_camera_offline…` failed
+  1 of 5. I believe they are load-dependent flakes (other engineers' suites run on this machine at
+  the same time). The short-freeze one was discussed below.
+
+**Before the review fixes:**
 * `-m pytest tests/unit -q` → **107 passed** (50 existing + 57 new in `test_ledgerchain.py`).
 * `-m pytest tests -q -p no:cacheprovider` (unit + all integration) → **140 passed in 363 s**. This
   run includes the harness change, so every integration scenario (camera loss, stalls, freezes,
@@ -89,7 +107,11 @@ All commands were run from the worktree root with `"C:\Users\silva\Documents\Pro
 * Verification against an independent third-party RFC 8785 library was not done (no new
   dependencies); numbers were checked against the RFC 8785 Appendix B vectors and an independent
   re-implementation in the test file.
-* Year-scale ledgers were extrapolated from a 30-simulated-day ledger (25 922 entries), not run.
+* The year-scale measurement used a synthetic ledger (105 000 segments, 325 502 entries) built with
+  direct SQL and chain appends, not a year of real recording.
+* `PASSIVE` checkpoint + `journal_size_limit`: verified to not block seals while a check runs
+  (unit test + measurement). WAL growth over days with a reader repeatedly active was not observed
+  long-term.
 * No HMAC/TPM/DPAPI keying (deliberate; see docs/07).
 
 ## 6. Risks, limitations, open decisions
@@ -109,8 +131,30 @@ All commands were run from the worktree root with `"C:\Users\silva\Documents\Pro
   block avoids schema-text conflicts.
 * Uncovered: bookkeeping columns (retry counters, last audit time), segments still being written,
   and columns other branches add (add them to `ledgerchain.COVERED` only with a new chain format).
-* Ledger growth ~7 KB per sealed segment (~2 MB/day at 300 s segments); verification ~15 s/hour of
-  CPU after a year (one core, background thread).
+* Ledger growth ~7 KB per sealed segment (~2 MB/day at 300 s segments). Verification takes ~26 s of
+  CPU per hourly check after a year (one core, background thread, short snapshots).
+* **Rule-compliant appends after the last off-machine head are undetectable** (review C1,
+  remaining part). Examples: invented new rows, false values for fields still empty at that head
+  (a content hash not yet computed, the end of an open gap), or a rewritten tail. Going further
+  needs a keyed or attested chain (docs/07).
+* V-004 is new: if another branch also uses V-004, renumber at merge.
+
+## 8. Review findings (independent QA, wave 2)
+* **C1 HIGH, fixed.** Verification now enforces the recorder's rules across each row's entries
+  (`ledgerchain.illegal_changes`, matching `db.WRITE_ONCE`). The reviewer's `forge_append.py` is
+  now the regression test `test_reviewer_forged_append_with_earlier_anchor_is_detected`, and 13
+  more append cases are tested. Remaining by design: rule-compliant appends (see §6).
+* **C2 MED, fixed.** Chain write or read faults raise V-004 (system fault), not V-003. The
+  affected rows are persisted in `ledger_chain_pending` and re-recorded at the next write
+  (`protection_gap` + `chain_repair`), so there is no false discrepancy, including after a
+  restart. Rule-breaking changes made across a protection gap are still V-003 (tested). If SQLite
+  aborts the transaction, or the savepoint cannot be undone, the whole seal rolls back and is
+  retried: nothing is half-written and nothing blocks (2 tests). CLI exit 3 = intact with
+  protection gaps.
+* **C3 LOW-MED, fixed.** Verification uses short snapshots of at most 2 000 items, with a pause
+  between them in the worker. The checkpoint is now `PASSIVE` with `journal_size_limit` 64 MB.
+  Year-scale synthetic ledger (325 502 entries): 26 s, 292 snapshots, longest snapshot 0.28 s,
+  peak memory 9.9 MB, at most 132 ms per seal + checkpoint while a check ran.
 
 ## 7. Recommendation
 **Merge after** (a) the owner accepts the limits in §6 (detection, not prevention; the protection

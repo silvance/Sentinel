@@ -111,7 +111,7 @@ def build_report(cfg: AppConfig, reason: str = "requested", out_dir: Path | None
         try:
             chain_rep = verify_ledger(db_path)
             chain_doc = chain_rep.to_dict(max_findings=100)
-            chain_line = ("intact" if chain_rep.ok else
+            chain_line = ((f"intact, {len(chain_rep.faults)} protection gap(s)" if chain_rep.faults else "intact") if chain_rep.ok else
                           f"ALTERED - first problem at entry {chain_rep.first.position}: {chain_rep.first.message}"
                           if chain_rep.first else "ALTERED")
         except Exception as exc:  # the report must still be written

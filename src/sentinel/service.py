@@ -334,7 +334,7 @@ class RecorderService:
         integrity_d["last_diagnostic_report"] = self.last_report
 
         last_seg = gap = None
-        ledger_altered = False
+        ledger_altered = ledger_unprotected = False
         ever_recorded = last_media is not None
         outage = None
         outage_since = None
@@ -371,12 +371,16 @@ class RecorderService:
                 if rep is not None and rep.first is not None:
                     chain_d["first_problem_entry"] = rep.first.position
                     chain_d["problems"] = len(rep.findings)
+                if rep is not None and rep.faults:
+                    chain_d["protection_gaps"] = len(rep.faults)
                 if self.ledger.chain_discrepancies or self.ledger.chain_failures:
                     chain_d["discrepancies_found_on_write"] = self.ledger.chain_discrepancies
                     chain_d["entries_not_written"] = self.ledger.chain_failures
                 integrity_d["ledger_chain"] = chain_d
-                ledger_altered = bool((integ is not None and integ.chain_altered)
-                                      or self.ledger.chain_discrepancies or self.ledger.chain_failures)
+                # V-003: signs of alteration. V-004: entries could not be written (system fault).
+                ledger_altered = bool((integ is not None and integ.chain_altered) or self.ledger.chain_discrepancies)
+                ledger_unprotected = bool((integ is not None and integ.chain_unprotected)
+                                          or self.ledger.chain_failures)
             except Exception as exc:  # ledger trouble is itself a system error
                 log.exception("ledger query failed while building status")
                 errors.append("D-001")
@@ -403,7 +407,7 @@ class RecorderService:
             last_end_reason=last_end, ever_recorded=ever_recorded, attempts=attempts,
             unstable_restarts=unstable, clock_anomaly=clock_anomaly, clock_synchronized=self._ntp,
             corrupt_recent=corrupt_recent, verify_problem=verify_problem, verify_critical=verify_critical,
-            ledger_altered=ledger_altered, simulated=cfg.camera.development_source)
+            ledger_altered=ledger_altered, ledger_unprotected=ledger_unprotected, simulated=cfg.camera.development_source)
         d = evaluate(m, rec.stall_timeout_s, rec.segment_seconds, rec.connect_timeout_s, rec.escalate_after_s)
 
         storage_d = {}

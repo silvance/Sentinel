@@ -602,3 +602,271 @@ def test_chain_cost_per_seal_is_negligible(tmp_path: Path, monkeypatch: pytest.M
               f"({100 * med_chain / med_seal:.1f}%); verify {rep.entries} entries in {verify_s:.3f} s "
               f"({rep.entries / verify_s:.0f} entries/s)")
     assert med_chain < 0.002                      # < 2 ms per seal (a seal happens once per segment period)
+
+
+# ====================================================================== review findings (QA wave 2)
+# C1: appended, well-formed entries must still obey what the recorder does to a row.
+def _forge_append(path: Path, table: str, key: Any, sets: dict[str, Any], kind: str | None = None) -> int:
+    """Attacker: edit the row with plain sqlite3, then APPEND a well-formed entry for the edit
+    (no history is rewritten, so hash links and earlier anchors all still match)."""
+    pk, _ = lc.COVERED[table]
+    c = sqlite3.connect(path, isolation_level=None)
+    c.row_factory = sqlite3.Row
+    c.execute("BEGIN IMMEDIATE")
+    if sets:
+        c.execute(f"UPDATE {table} SET {', '.join(f'{k}=?' for k in sets)} WHERE {pk}=?", (*sets.values(), key))
+    post = lc.projection(table, c.execute(f"SELECT * FROM {table} WHERE {pk}=?", (key,)).fetchone())
+    default = {"segments": "segment_updated", "events": "event", "recording_gaps": "gap_updated",
+               "recording_runs": "run_updated"}[table]
+    h = lc.append_entry(c, kind or default, table, str(key), post, T0)
+    c.execute("COMMIT")
+    c.close()
+    return h.seq
+
+
+def test_reviewer_forged_append_with_earlier_anchor_is_detected(tmp_path: Path) -> None:
+    """Regression for review finding C1 (scratchpad/review_wave2_integrity/forge_append.py)."""
+    path = tmp_path / "sentinel.db"
+    led = Ledger(path)
+    info = _populate(led)
+    head_before = led.chain_head()
+    lc.append_anchor(tmp_path / lc.ANCHOR_LOG_NAME, head_before, "export")
+    led.close()
+    assert _verify(path).ok
+    seg = info["segs"][1]
+    seq = _forge_append(path, "segments", seg, {"sha256": "ff" * 32, "size_bytes": 1})
+    rep = _verify(path, anchors=[lc.Anchor(head_before.seq, head_before.hash, "export manifest")])
+    assert not rep.ok and rep.first.code == "illegal_change" and rep.first.position == seq
+    assert "sha256 changed" in rep.first.message and "size_bytes changed" in rep.first.message
+    led = Ledger(path)                                  # the recorder's next write cannot launder it either
+    led.update_segment(seg, audit_status="ok")
+    led.close()
+    lc.append_anchor(tmp_path / lc.ANCHOR_LOG_NAME, lc.current_chain_head(path), "periodic")   # later anchored
+    rep = _verify(path)
+    assert rep.first.code == "illegal_change" and rep.first.position == seq
+
+
+@pytest.mark.parametrize("table,which,sets,kind", [
+    ("segments", 1, {"state": "CORRUPT"}, None),
+    ("segments", 1, {"end_utc": "2026-11-09T09:00:00.000000Z"}, None),
+    ("segments", 1, {"start_utc": "2026-11-09T08:00:00.000000Z"}, None),
+    ("segments", 1, {"duration_s": 99.0}, None),
+    ("segments", 0, {"content_sha256": "00" * 32}, None),        # already set: write-once
+    ("segments", 1, {"warnings": '["edited"]'}, None),            # not write-once, but frozen after sealing
+    ("events", 2, {"message": "rewritten"}, None),
+    ("recording_gaps", "gap", {"duration_s": 1.0}, "gap_updated"),          # closed gap
+    ("recording_gaps", "gap", {"reason": "graceful_stop"}, "gap_updated"),
+    ("recording_runs", "R1", {"end_reason": "graceful_stop"}, "run_updated"),  # ended run
+    ("recording_runs", "R2", {"launched_utc": "2026-11-08T00:00:00.000000Z"}, "run_updated"),
+])
+def test_appended_entry_breaking_recorder_rules_is_detected(db: tuple[Path, dict[str, Any]], table: str, which: Any,
+                                                            sets: dict[str, Any], kind: str | None) -> None:
+    path, info = db
+    key = {"gap": info["gap"]}.get(which, info["segs"][which] if table == "segments" else which)
+    seq = _forge_append(path, table, key, sets, kind)
+    rep = _verify(path)
+    assert rep.first.code == "illegal_change" and rep.first.position == seq, rep.render_text()
+    assert next(iter(sets)) in rep.first.message
+
+
+@pytest.mark.parametrize("kind", ["genesis", "adopted"])
+def test_appended_structural_entries_are_detected(db: tuple[Path, dict[str, Any]], kind: str) -> None:
+    path, info = db
+    c = sqlite3.connect(path, isolation_level=None)
+    c.execute("BEGIN IMMEDIATE")
+    if kind == "genesis":
+        h = lc.append_entry(c, "genesis", None, None, {"pre_existing_rows": {}}, T0)
+    else:
+        h = lc.append_entry(c, "adopted", "events", "999", {"event_id": 999}, T0)
+    c.execute("COMMIT")
+    c.close()
+    rep = _verify(path)
+    assert rep.first.code == "illegal_entry" and rep.first.position == h.seq
+
+
+def test_rule_compliant_appends_are_the_documented_limit(tmp_path: Path) -> None:
+    """What an attacker CAN still append undetected after the last off-machine anchor (docs/07):
+    values the recorder itself fills in later, e.g. a content hash not computed yet."""
+    path = tmp_path / "sentinel.db"
+    led = Ledger(path)
+    _run(led, "R1")
+    seg = _sealed_segment(led, "R1", 0)
+    led.close()
+    _forge_append(path, "segments", seg, {"content_sha256": "00" * 32, "content_hash_method": "fake"})
+    assert _verify(path).ok
+
+
+def test_semantic_rules_match_the_ledger_write_once_columns() -> None:
+    from sentinel.db import WRITE_ONCE
+    assert lc.SEGMENT_WRITE_ONCE == WRITE_ONCE
+    seg = {"sha256": "a", "end_utc": "x", "content_sha256": None, "clock_anomaly": 0, "audit_status": None}
+    assert lc.illegal_changes("segments", seg, dict(seg, content_sha256="b", clock_anomaly=1, audit_status="ok")) == []
+    assert lc.illegal_changes("segments", seg, dict(seg, clock_anomaly=1, sha256="b"))
+    assert lc.illegal_changes("segments", dict(seg, clock_anomaly=1), dict(seg, clock_anomaly=0))
+    gap_open = {"start_utc": "s", "end_utc": None, "closed_utc": None, "attempts": 2, "ended_run_id": "R1"}
+    closed = dict(gap_open, end_utc="e", closed_utc="c", attempts=3, ended_run_id="R2")
+    assert lc.illegal_changes("recording_gaps", gap_open, closed) == []
+    assert lc.illegal_changes("recording_gaps", gap_open, dict(gap_open, attempts=1))
+    assert lc.illegal_changes("recording_gaps", closed, dict(closed, end_utc="f"))
+    run = {"launched_utc": "l", "ended_utc": None, "anchor_utc": None, "end_reason": None}
+    ended = dict(run, ended_utc="e", end_reason="stall", anchor_utc="a", last_stream_time_s=3.0)
+    assert lc.illegal_changes("recording_runs", run, ended) == []
+    assert lc.illegal_changes("recording_runs", ended, dict(ended, end_reason="graceful_stop"))
+    assert lc.illegal_changes("events", {"m": 1}, {"m": 1})
+
+
+# C2: internal faults are protection gaps (V-004), not tampering (V-003), and never corrupt a seal.
+def _closed_segment(led: Ledger, i: int = 0) -> str:
+    s = led.insert_segment(camera_id="CAM01", run_id="R1", seq=i, rel_path=f"CAM01/R1/seg_{i:06d}.ts")
+    led.transition(s, SegmentState.CLOSED, start_utc=_utc(i), end_utc=_utc(i + 1))
+    return s
+
+
+def _fail_once(monkeypatch: pytest.MonkeyPatch, name: str, exc: Exception) -> None:
+    real, state = getattr(lc, name), {"done": False}
+
+    def flaky(*a: Any, **kw: Any) -> Any:
+        if not state["done"]:
+            state["done"] = True
+            raise exc
+        return real(*a, **kw)
+    monkeypatch.setattr(lc, name, flaky)
+
+
+@pytest.mark.parametrize("failing", ["record_change", "track"])
+def test_chain_write_failure_is_a_protection_gap_not_tampering(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                               failing: str) -> None:
+    path = tmp_path / "sentinel.db"
+    led = Ledger(path)
+    _run(led, "R1")
+    s = _closed_segment(led)
+    _fail_once(monkeypatch, failing, sqlite3.OperationalError("disk I/O error"))
+    led.seal(s, SegmentState.FINALIZED, {"sha256": "ab" * 32, "size_bytes": 10}, [], None, [])
+    assert led.get_segment(s)["state"] == "FINALIZED" and led.chain_failures == 1    # evidence kept
+    rep = _verify(path)
+    assert rep.ok and [f.code for f in rep.faults] == ["not_yet_protected"]
+    led.close()
+    led = Ledger(path)                                    # survives a restart (pending is persisted)
+    led.update_segment(s, content_sha256="cd" * 32)       # next legitimate write re-records the row
+    assert led.chain_discrepancies == 0
+    assert not led.query("SELECT 1 FROM ledger_chain_pending")
+    led.close()
+    rep = _verify(path)
+    assert rep.ok and [f.code for f in rep.faults] == ["protection_gap"], rep.render_text()
+    m = Measurements(now_mono=100.0, service_started_mono=0.0, ffmpeg_running=True, media_seen_this_run=True,
+                     seconds_since_media_advance=1.0, seconds_since_last_seal=5.0, storage_level=StorageLevel.OK,
+                     storage_error=None, component_errors=[], in_backoff=False, ledger_unprotected=True)
+    codes = {a.code: a for a in evaluate(m, 6, 2, 10).alerts}
+    assert "V-003" not in codes and codes["V-004"].severity == Severity.WARNING
+    assert codes["V-004"].message == ("Error V-004: Part of the recording log could not be protected against "
+                                      "changes. Contact technical support and provide diagnostic report.")
+
+
+def test_illegal_change_across_a_protection_gap_is_still_tampering(tmp_path: Path,
+                                                                   monkeypatch: pytest.MonkeyPatch) -> None:
+    path = tmp_path / "sentinel.db"
+    led = Ledger(path)
+    _run(led, "R1")
+    s = _sealed_segment(led, "R1", 0)
+    _fail_once(monkeypatch, "record_change", sqlite3.OperationalError("disk I/O error"))
+    led.update_segment(s, content_sha256="cd" * 32)       # entry fails: row pending
+    _sql(path, "UPDATE segments SET sha256=? WHERE segment_id=?", ("ee" * 32, s))   # attacker uses the window
+    rep = _verify(path)
+    assert rep.first.code == "record_altered"             # a pending marker excuses only legal changes
+    led.update_segment(s, audit_status="ok")              # repair snapshots the row...
+    led.close()
+    rep = _verify(path)                                   # ...but the change across the gap is illegal
+    assert rep.first.code == "illegal_change" and "sha256" in rep.first.message
+
+
+def test_transaction_aborted_by_sqlite_never_half_seals(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from sentinel.db import ChainTransactionAborted
+    path = tmp_path / "sentinel.db"
+    led = Ledger(path)
+    _run(led, "R1")
+    s = _closed_segment(led)
+    before = led.chain_head()
+    real = lc.record_change
+
+    def abort_tx(c: sqlite3.Connection, *a: Any, **kw: Any) -> Any:
+        c.execute("ROLLBACK")                              # what SQLite does on e.g. SQLITE_FULL / IOERR
+        raise sqlite3.OperationalError("database or disk is full")
+    monkeypatch.setattr(lc, "record_change", abort_tx)
+    with pytest.raises(ChainTransactionAborted):
+        led.seal(s, SegmentState.FINALIZED, {"sha256": "ab" * 32}, [], None, [EventSpec("info", "x", "y", "z")])
+    assert led.get_segment(s)["state"] == "CLOSED" and led.chain_head() == before   # nothing half-written
+    monkeypatch.setattr(lc, "record_change", real)
+    led.seal(s, SegmentState.FINALIZED, {"sha256": "ab" * 32}, [], None, [])         # retry succeeds
+    assert led.get_segment(s)["state"] == "FINALIZED"
+    led.close()
+    assert _verify(path).ok
+
+
+def test_savepoint_that_cannot_be_undone_rolls_back_whole_seal(tmp_path: Path,
+                                                               monkeypatch: pytest.MonkeyPatch) -> None:
+    from sentinel.db import ChainTransactionAborted
+    path = tmp_path / "sentinel.db"
+    led = Ledger(path)
+    _run(led, "R1")
+    s = _closed_segment(led)
+    before = led.chain_head()
+    _fail_once(monkeypatch, "record_change", sqlite3.OperationalError("disk I/O error"))
+
+    def broken_undo(c: sqlite3.Connection) -> None:
+        raise sqlite3.OperationalError("cannot rollback savepoint")
+    monkeypatch.setattr(Ledger, "_undo_savepoint", lambda self, c: broken_undo(c))
+    t = time.monotonic()
+    with pytest.raises(ChainTransactionAborted):
+        led.seal(s, SegmentState.FINALIZED, {"sha256": "ab" * 32}, [], None, [])
+    assert time.monotonic() - t < 2.0                      # never blocks
+    assert led.get_segment(s)["state"] == "CLOSED" and led.chain_head() == before
+    led.seal(s, SegmentState.FINALIZED, {"sha256": "ab" * 32}, [], None, [])        # ledger still usable
+    led.close()
+    assert _verify(path).ok
+
+
+# C3: verification in short snapshots, bounded memory, never holding up sealing or checkpoints.
+def test_chunked_verification_gives_the_same_answer(db: tuple[Path, dict[str, Any]]) -> None:
+    path, info = db
+    big = _verify(path)
+    small = _verify(path, chunk=3)
+    assert big.ok and small.ok and small.entries == big.entries and small.rows_checked == big.rows_checked
+    assert small.transactions > big.transactions
+    _sql(path, "UPDATE segments SET end_utc=? WHERE segment_id=?", (_utc(500), info["segs"][4]))
+    a, b = _verify(path), _verify(path, chunk=2)
+    assert [(f.code, f.position) for f in a.findings] == [(f.code, f.position) for f in b.findings]
+
+
+def test_verification_while_recording_is_consistent_and_does_not_hold_up_sealing(tmp_path: Path) -> None:
+    import threading
+    path = tmp_path / "sentinel.db"
+    led = Ledger(path)
+    _run(led, "R1")
+    for i in range(300):
+        _sealed_segment(led, "R1", i)
+    stop, reports, errors = threading.Event(), [], []
+
+    def verifier() -> None:
+        try:
+            while not stop.is_set():
+                reports.append(lc.verify_ledger(path, chunk=100, pause_s=0.001))
+        except Exception as exc:       # pragma: no cover - surfaced below
+            errors.append(exc)
+    th = threading.Thread(target=verifier)
+    th.start()
+    worst = 0.0
+    try:
+        for i in range(300, 380):
+            t = time.perf_counter()
+            s = _sealed_segment(led, "R1", i)
+            led.update_segment(s, content_sha256="cd" * 32)
+            if i % 10 == 0:
+                led.checkpoint()                             # PASSIVE: never waits for the reader
+            worst = max(worst, time.perf_counter() - t)
+    finally:
+        stop.set()
+        th.join(60)
+    led.close()
+    assert not errors and reports and all(r.ok for r in reports), [r.render_text() for r in reports if not r.ok][:1]
+    assert worst < 1.0, f"a seal waited {worst:.2f} s while verification ran"
+    assert max(r.longest_read_s for r in reports) < 1.0
