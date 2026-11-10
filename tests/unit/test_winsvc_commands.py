@@ -96,7 +96,7 @@ def test_install_plan_exact_commands() -> None:
     assert r"C:\ProgramData\Sentinel\status" in mk.params["paths"]
     # The service must exist before folder ACLs name its SID? Not required (SIDs are literal), but
     # the order is: register -> configure -> folders -> start.
-    assert [s.argv[1] for s in steps if s.argv and s.argv[0] == "sc.exe"] == [
+    assert [s.argv[1] for s in steps if s.argv and s.argv[0] == "sc.exe" and s.argv[2] == "SentinelRecorder"] == [
         "create", "description", "failure", "failureflag", "sidtype", "privs", "start"]
 
 
@@ -129,7 +129,7 @@ def test_install_plan_rendering_is_what_subprocess_runs() -> None:
 
 def test_install_plan_options() -> None:
     steps = install_plan(_inputs(start=False, creds=False), forbidden=FORBIDDEN)
-    assert not any(s.argv and s.argv[:2] == ("sc.exe", "start") for s in steps)
+    assert not any(s.argv == ("sc.exe", "start", "SentinelRecorder") for s in steps)
     assert not any(s.argv and "camera.dpapi" in " ".join(s.argv) for s in steps)
     assert FAILURE_ACTIONS.endswith("restart/60000")
 
@@ -195,3 +195,71 @@ def test_exit_meanings_cover_service_exit_codes() -> None:
     for code in (service.EXIT_OK, service.EXIT_CONFIG, service.EXIT_LOCKED, service.EXIT_RUNTIME,
                  service.EXIT_WATCHDOG):
         assert code in EXIT_MEANINGS
+
+
+# ------------------------------------------------------------------ owner decisions (8) and (9)
+def test_status_readers_default_is_the_operators_group() -> None:
+    import argparse
+
+    from sentinel.winsvc import __main__ as cli
+
+    assert InstallInputs(Path("c"), (), None, _inputs().host).status_readers == "group"
+    captured: dict = {}
+
+    def fake_install(args: argparse.Namespace) -> int:
+        captured["args"] = args
+        return 0
+    old = cli.cmd_install
+    cli.cmd_install = fake_install
+    try:
+        cli.main(["install", "--config", "x.toml"])
+    finally:
+        cli.cmd_install = old
+    assert captured["args"].status_readers == "group" and captured["args"].time_server is None
+
+
+def test_time_service_steps_exact_commands() -> None:
+    from sentinel.winsvc.commands import time_service_steps
+
+    steps = time_service_steps("ntp1.sentinel.lan")
+    assert [s.argv for s in steps] == [
+        ("sc.exe", "config", "w32time", "start=", "auto"),
+        ("sc.exe", "start", "w32time"),
+        ("w32tm", "/config", "/manualpeerlist:ntp1.sentinel.lan,0x8", "/syncfromflags:manual", "/update"),
+        ("w32tm", "/resync", "/nowait"),
+    ]
+    assert [s.may_fail for s in steps] == [False, True, False, True]
+    assert [s.argv for s in time_service_steps(None)] == [("sc.exe", "config", "w32time", "start=", "auto"),
+                                                          ("sc.exe", "start", "w32time")]
+
+
+def test_install_plan_configures_time_before_starting_the_recorder() -> None:
+    inp = _inputs()
+    plan = install_plan(InstallInputs(inp.config_path, inp.data_dirs, inp.credentials_path, inp.host,
+                                      status_dir=inp.status_dir, time_server="192.0.2.123"), forbidden=FORBIDDEN)
+    argvs = [s.argv for s in plan if s.argv]
+    i_time = argvs.index(("w32tm", "/config", "/manualpeerlist:192.0.2.123,0x8", "/syncfromflags:manual", "/update"))
+    assert argvs.index(("sc.exe", "config", "w32time", "start=", "auto")) < i_time
+    assert i_time < argvs.index(("sc.exe", "start", "SentinelRecorder"))
+
+
+@pytest.mark.parametrize("host", ["ntp", "ntp1.sentinel.lan", "time-1.example.org", "192.0.2.1", "10.0.0.255",
+                                  "ntp.example.org.", "a" * 63 + ".lan"])
+def test_valid_time_servers(host: str) -> None:
+    from sentinel.winsvc.commands import validate_time_server
+
+    assert validate_time_server(host) == host.rstrip(".")
+
+
+@pytest.mark.parametrize("host", [
+    "", " ", "ntp lan", "ntp1 evil", "ntp,0x1", "ntp\"", "ntp'", "ntp&calc", "ntp|x", "ntp>x", "ntp^x", "%PATH%",
+    "/update", "ntp/x", "ntp\\x", "-ntp", "ntp-", "ntp..lan", ".ntp", "256.1.1.1", "1.2.3", "01.2.3.4",
+    "ntp\nlan", "ntp\tlan", "ntp\x00", "nt\u0440.lan", "[2001:db8::1]", "2001:db8::1", "ntp:123",
+    "http://ntp.lan", "a" * 64 + ".lan", ("a" * 60 + ".") * 5])
+def test_invalid_time_servers_are_refused(host: str) -> None:
+    from sentinel.winsvc.commands import time_service_steps, validate_time_server
+
+    with pytest.raises(PlanError):
+        validate_time_server(host)
+    with pytest.raises(PlanError):
+        time_service_steps(host)

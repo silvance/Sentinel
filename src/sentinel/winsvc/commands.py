@@ -21,6 +21,7 @@ ACLs use language-neutral ``*S-1-...`` SIDs so the same commands work on any Win
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 from collections.abc import Iterable
@@ -193,6 +194,7 @@ class InstallInputs:
     start: bool = True
     status_dir: Path | None = None       # operator-readable folder ([storage] status_dir); required
     status_readers: str = "group"        # "group" (local group Sentinel Operators) | "users" (BUILTIN\Users)
+    time_server: str | None = None       # local NTP server for W32Time (validated); None = keep Windows' source
 
 
 def install_plan(inp: InstallInputs, forbidden: Iterable[str] | None = None) -> list[Step]:
@@ -255,8 +257,58 @@ def install_plan(inp: InstallInputs, forbidden: Iterable[str] | None = None) -> 
     if inp.credentials_path is not None:
         steps.append(Step("Camera credentials file: Administrators and the service account only",
                           secret_file_acl_argv(inp.credentials_path, sid)))
+    steps += time_service_steps(inp.time_server)
     if inp.start:
         steps.append(Step("Start the service now", ("sc.exe", "start", name)))
+    return steps
+
+
+# ---------------------------------------------------------------------- Windows Time (owner decision)
+_HOST_LABEL = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
+_IPV4 = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
+
+
+def validate_time_server(host: str) -> str:
+    """Accept exactly one DNS name or dotted IPv4 address; reject everything else.
+
+    The value ends up inside a ``w32tm`` argument, so anything that could change the command —
+    spaces (w32tm's peer-list separator), commas (peer flags), quotes, slashes, ``&|<>^%``,
+    non-ASCII look-alikes, IPv6 or URLs — is refused rather than escaped.
+    """
+    if not isinstance(host, str) or not host or len(host) > 253 or not host.isascii():
+        raise PlanError("time server must be a host name or IPv4 address (at most 253 characters)")
+    h = host[:-1] if host.endswith(".") else host
+    if _IPV4.fullmatch(h):
+        if any(int(o) > 255 or (len(o) > 1 and o.startswith("0")) for o in h.split(".")):
+            raise PlanError(f"time server {host!r} is not a valid IPv4 address")
+        return h
+    labels = h.split(".")
+    if not all(_HOST_LABEL.fullmatch(lbl) for lbl in labels) or labels[-1].isdigit():
+        raise PlanError(f"time server {host!r} is not a valid host name (letters, digits, '-' and '.')")
+    return h
+
+
+# Peer flag 0x8 = "client mode" requests, the mode ordinary (non-Windows) NTP servers answer.
+NTP_PEER_FLAGS = "0x8"
+
+
+def time_service_steps(time_server: str | None) -> list[Step]:
+    """Owner decision: a small local time server; Windows Time starts automatically.
+    Syntax checked against ``sc.exe config`` and ``w32tm /?`` help text on the dev host.
+    NOT EXECUTED (administrator rights)."""
+    steps = [
+        Step("Windows Time service: start automatically at boot", ("sc.exe", "config", "w32time", "start=", "auto")),
+        # Fails harmlessly when it is already running (error 1056); w32tm /config below needs it running.
+        Step("Start the Windows Time service now", ("sc.exe", "start", "w32time"), may_fail=True),
+    ]
+    if time_server is not None:
+        host = validate_time_server(time_server)
+        steps += [
+            Step(f"Synchronise the clock from the local time server {host}",
+                 ("w32tm", "/config", f"/manualpeerlist:{host},{NTP_PEER_FLAGS}", "/syncfromflags:manual", "/update")),
+            # A server that is not reachable yet must not abort the installation; status shows T-002.
+            Step("Ask Windows to synchronise now", ("w32tm", "/resync", "/nowait"), may_fail=True),
+        ]
     return steps
 
 

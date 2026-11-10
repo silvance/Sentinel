@@ -67,9 +67,9 @@ network. Approval is the deploying organisation's decision.
 
 - [ ] Program (Python or the PyInstaller **one-folder** build, Sentinel, FFmpeg) under `C:\Program Files\Sentinel` — not in a personal user folder (the service account cannot read those; `install` refuses).
 - [ ] Configuration in `C:\ProgramData\Sentinel\config\` with full `[tools]` paths; data/spool/logs and a separate `status_dir` in dedicated folders (example: `config/sentinel.windows.example.toml`). Never under a folder created directly in `C:\` without fixing its permissions (Authenticated Users: Modify).
-- [ ] Owner decision recorded: who may read the status (`Sentinel Operators` group — add each operator account with `net localgroup "Sentinel Operators" <account> /add` — or all local users).
+- [ ] Status readers (owner decision: local group `Sentinel Operators`, the install default): add each operator account with `net localgroup "Sentinel Operators" <account> /add`. `--status-readers users` exists only as an explicit alternative.
 - [ ] Elevated Command Prompt: `python -m sentinel.winsvc set-camera-credentials --config …`, then `install --config … --dry-run`, review, then `install --config …`.
 - [ ] `python -m sentinel.winsvc status --config …` shows RUNNING, folders "OK", credentials "DPAPI-protected; permissions: OK", time synchronisation "yes".
-- [ ] Windows Time service set to Automatic with an approved NTP source (`w32tm /config …`); otherwise T-002 is shown permanently.
+- [ ] Time (owner decision): a small local time server on the camera network; `install --time-server <host>` sets the Windows Time service to start automatically, starts it, and points it at that server (`sc.exe config w32time start= auto`, `sc.exe start w32time`, `w32tm /config /manualpeerlist:<host>,0x8 /syncfromflags:manual /update`, `w32tm /resync /nowait`). Without `--time-server` the service is still set to automatic but keeps the Windows default source (no Internet on the appliance ⇒ T-002 until a server is configured). Afterwards `winsvc status` must show time synchronisation "yes".
 - [ ] Operators are standard users (not administrators); BitLocker per policy; sleep/hibernate disabled; power-on after power loss.
 - [ ] Reboot test: recording resumes with nobody logged in; kill test (`taskkill /F` on the service process) shows a restart within ~5 s.

@@ -173,7 +173,7 @@ def cmd_install(args: argparse.Namespace) -> int:
     try:
         steps = install_plan(InstallInputs(inp.config_path, inp.data_dirs, inp.credentials_path, inp.host,
                                            start=not args.no_start, status_dir=inp.status_dir,
-                                           status_readers=args.status_readers))
+                                           status_readers=args.status_readers, time_server=args.time_server))
     except PlanError as exc:
         print(f"PROBLEM: {exc}")
         return EXIT_FAILED
@@ -504,8 +504,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--dry-run", action="store_true", help="only print the commands")
     p.add_argument("--no-start", action="store_true", help="do not start the service after installing")
     p.add_argument("--status-readers", choices=("group", "users"), default="group",
-                   help="who may read the status folder: the local group 'Sentinel Operators' (default) "
-                        "or every local user")
+                   help="who may read the status folder: the local group 'Sentinel Operators' (default, "
+                        "owner decision) or, only if explicitly chosen, every local user")
+    p.add_argument("--time-server", metavar="HOST",
+                   help="local NTP server (host name or IPv4 address) for the Windows Time service")
     p = sub.add_parser("uninstall", help="remove the service registration (recordings are kept)")
     p.add_argument("--dry-run", action="store_true")
     p = sub.add_parser("status", help="service, time synchronisation, permissions and recorder status")

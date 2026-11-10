@@ -236,3 +236,24 @@ Full integration suite after the fixes (32 tests): **28 passed, 4 failed** — t
   `…\config\camera.secret` (keeping the other branch's file name, DPAPI content on Windows), and
   have that branch's first-run wizard call `set-camera-credentials`' writer
   (`winsvc.credstore.write_protected_credentials`) instead of writing plain text.
+
+## 10. Owner decisions applied
+
+* **(8) Status readers = local group "Sentinel Operators".** This is the install default
+  (`--status-readers group`, unit-tested via the CLI parser); `--status-readers users` remains only
+  as an explicit alternative.
+* **(9) Time = a small local time server, Windows Time starting automatically.** `install` now
+  always generates `sc.exe config w32time start= auto` and `sc.exe start w32time` (ignored if
+  already running), and with `--time-server <host>` also
+  `w32tm /config /manualpeerlist:<host>,0x8 /syncfromflags:manual /update` and
+  `w32tm /resync /nowait` (a server not reachable yet does not abort the install; status shows
+  T-002). `0x8` = client-mode requests, which ordinary NTP servers answer. These steps run before the
+  recorder service is started. Syntax checked only against the help text of `sc.exe config` and
+  `w32tm /?` on the dev host — **NOT EXECUTED** (administrator rights).
+  The host is validated strictly before it reaches the command: exactly one DNS name (labels of
+  letters/digits/hyphens, ≤63 each, ≤253 total, not all-numeric TLD) or a dotted IPv4 address
+  without leading zeros; spaces (w32tm's peer separator), commas (peer flags), quotes, slashes,
+  `& | < > ^ %`, control characters, non-ASCII look-alikes, IPv6, ports and URLs are refused
+  (30 rejection cases unit-tested).
+
+Tests: `tests/unit` **177 passed**.
