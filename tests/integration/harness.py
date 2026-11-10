@@ -14,6 +14,7 @@ from sentinel.clock import SystemClock, parse_iso_utc
 from sentinel.config import AppConfig
 from sentinel.db import Ledger
 from sentinel.hashing import sha256_file
+from sentinel.ledgerchain import verify_ledger
 from sentinel.platform import get_platform
 from sentinel.service import RecorderService
 from sentinel.storage.monitor import DiskUsage
@@ -54,10 +55,13 @@ def wait_for(pred: Callable[[], T], timeout: float, interval: float = 0.25, what
 
 class Harness:
     def __init__(self, tmp: Path, url: str, clock: SystemClock | None = None, disk: FakeDisk | None = None,
-                 **sections: dict[str, Any]) -> None:
+                 check_chain: bool = True, **sections: dict[str, Any]) -> None:
         self.tmp = tmp
         self.cfg: AppConfig = make_config(tmp, url, **sections)
         self.disk = disk
+        # After every stop, the recording-log hash chain must verify: no fault scenario may
+        # produce a false "log altered" finding. Tests that tamper on purpose pass False.
+        self.check_chain = check_chain
         self.svc = RecorderService(self.cfg, clock=clock, disk_usage=disk)
         self._thread: threading.Thread | None = None
         self.exit_code: int | None = None
@@ -74,6 +78,10 @@ class Harness:
         if self._thread is not None:
             self._thread.join(timeout)
             assert not self._thread.is_alive(), "service did not stop"
+        db = self.cfg.data_path / "sentinel.db"
+        if self.check_chain and db.exists():
+            rep = verify_ledger(db)
+            assert rep.ok, rep.render_text()
 
     # --------------------------------------------------------------- inspection
     def q(self, sql: str, params: tuple = ()) -> list[dict[str, Any]]:
