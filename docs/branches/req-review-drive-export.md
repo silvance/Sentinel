@@ -124,7 +124,7 @@ SHA256SUMS.txt (`<hash>  <path>`, LF line endings, no comments) covers every fil
 After the review fixes:
 * `"…\.venv\Scripts\python.exe" -m pytest tests/unit -q` → **90 passed**.
 * `… -m pytest tests/integration/test_review_export.py -q -p no:cacheprovider` → **26 passed** (86 s).
-* The recorder integration suites were not rerun after the review fixes. The only change outside `sentinel/export` they load is `config.py`: a new optional `[export]` section with defaults. Earlier full run: 29 passed, 1 failed. The failure was the timing-sensitive `test_short_freeze_is_recorded_as_internal_gap`; it passed when rerun alone.
+* Recorder integration suites (`test_media_hashing`, `test_recorder_faults`, `test_unattended`, `test_service_process`) after the review fixes → **29 passed, 1 failed** (318 s). The failure was the timing-sensitive `test_recorder_faults.py::test_camera_offline_shows_interrupted_and_recovers`, while other engineers' FFmpeg tests were running; rerun alone → **1 passed**. Before the review fixes the same suites also gave 29 passed / 1 failed, with a different timing test (`test_short_freeze_is_recorded_as_internal_gap`) that likewise passed alone. This branch does not change recorder code; `config.py` only gains the optional `[export]` section.
 
 What the integration tests cover:
 * Happy path in `sampled` mode: ffprobe plays every MP4; `moov` comes before `mdat`; every SHA256SUMS entry is re-hashed; manifest, CSV and ledger agree; written hash equals read-back hash; local originals are untouched and read-only; a second press finds nothing to export.
