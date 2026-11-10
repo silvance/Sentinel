@@ -8,8 +8,11 @@ docs/02 risk A1), its recording account, a label, the display time zone and wher
 go. Everything else keeps the tested defaults of ``sentinel.config``.
 
 Credentials are written to a separate file, never into the configuration (docs/07). On Windows
-the file is restricted to the setup account, SYSTEM and Administrators with ``icacls``; the
-Windows-service branch replaces this file with DPAPI-protected storage. On Linux it is 0600.
+the file is created with a protected DACL (setup account, SYSTEM, Administrators) — it is never
+readable by other accounts, not even briefly; any failure aborts setup and deletes the file.
+The configuration and storage folders are created private the same way, so evidence never
+inherits ``%ProgramData%``'s "Users may read and create" permissions. On Linux: 0600 / 0750.
+The Windows-service branch replaces the credentials file with DPAPI-protected storage.
 """
 
 from __future__ import annotations
@@ -19,7 +22,6 @@ import ipaddress
 import logging
 import os
 import re
-import subprocess
 import sys
 import time
 from collections.abc import Callable
@@ -149,71 +151,143 @@ def credentials_toml(username: str, password: str) -> str:
 
 
 # ------------------------------------------------------------------ writing files
-def current_user_sid() -> str:
-    out = subprocess.run(["whoami", "/user", "/fo", "csv", "/nh"], capture_output=True, text=True,
-                         timeout=30, check=True, creationflags=0x08000000).stdout
-    sid = out.strip().rsplit(",", 1)[-1].strip().strip('"')
-    if not sid.startswith("S-1-"):
-        raise OSError(f"could not determine the current account SID from {out!r}")
-    return sid
+# Names setup may find in a folder it is asked to protect (a previous Sentinel installation).
+_OWN_NAMES = ("spool", "data", "logs", "sentinel.toml", "camera.secret", "recorder.lock", "launcher.lock")
 
 
-def icacls_restrict_argv(path: Path, user_sid: str) -> list[str]:
-    """Owner account, SYSTEM (S-1-5-18) and Administrators (S-1-5-32-544) only; no inheritance."""
-    return ["icacls", str(path), "/inheritance:r", "/grant:r", f"*{user_sid}:(F)", "*S-1-5-18:(F)",
-            "*S-1-5-32-544:(F)"]
+def _is_own(name: str) -> bool:
+    return name in _OWN_NAMES or name.startswith(("sentinel.toml.", "camera.secret."))
 
 
-def write_secret(path: Path, username: str, password: str) -> list[str]:
-    """Write the credentials file readable only by this account. Returns warnings (empty = OK)."""
-    path.parent.mkdir(parents=True, exist_ok=True)
+def prepare_private_dir(path: Path) -> None:
+    """Create ``path`` private to this account (+ SYSTEM/Administrators on Windows, 0750 on Linux),
+    or make an existing one private. An existing folder is only re-protected when it is empty or
+    holds nothing but Sentinel's own files; otherwise setup stops (we never re-permission a
+    folder full of someone else's data). Any failure raises SetupError."""
+    path = Path(path)
+    try:
+        if sys.platform == "win32":
+            from ..platform import winacl
+
+            sid = winacl.current_user_sid()
+            if not path.exists():
+                winacl.create_private_dir(path, sid)
+            elif winacl.foreign_trustees(winacl.get_sddl(path), sid) or not winacl.get_sddl(path).startswith("D:P"):
+                _check_reprotectable(path)
+                winacl.protect_existing(path, sid)
+            sddl = winacl.get_sddl(path)
+            if winacl.foreign_trustees(sddl, sid) or not sddl.startswith("D:P"):
+                raise SetupError(f"Could not make {path} private (permissions now {sddl}).")
+        else:
+            if not path.exists():
+                path.mkdir(parents=True, mode=0o750)
+            st = path.stat()
+            if st.st_uid != os.geteuid():
+                raise SetupError(f"{path} belongs to another account; choose another folder.")
+            if st.st_mode & 0o027:
+                _check_reprotectable(path)
+            os.chmod(path, 0o750)
+    except OSError as exc:
+        raise SetupError(f"Could not create or protect the folder {path}: {exc}") from None
+
+
+def _check_reprotectable(path: Path) -> None:
+    foreign = [p.name for p in path.iterdir() if not _is_own(p.name)]
+    if foreign:
+        raise SetupError(f"The folder {path} already contains other files ({', '.join(sorted(foreign)[:5])}) "
+                         "and other accounts can access it. Choose an empty or new folder.")
+
+
+def secret_problems(path: Path) -> list[str]:
+    """Why the credentials file is not private (empty = only this account/SYSTEM/Administrators)."""
+    if sys.platform == "win32":
+        from ..platform import winacl
+
+        sddl = winacl.get_sddl(path)
+        problems = [f"also accessible to {t}" for t in winacl.foreign_trustees(sddl, winacl.current_user_sid())]
+        if not sddl.startswith("D:P"):
+            problems.append("inherits permissions from its folder")
+        return problems
+    mode = path.stat().st_mode & 0o777
+    return [] if mode == 0o600 else [f"mode {oct(mode)} instead of 0600"]
+
+
+def write_secret(path: Path, username: str, password: str) -> None:
+    """Write the credentials file so that it is private from the moment it exists.
+
+    Windows: created with CreateFileW and an explicit protected DACL (this account, SYSTEM,
+    Administrators) under a temporary name, verified, then renamed over the target (a rename
+    keeps the file's own DACL). Linux: O_CREAT|O_EXCL with mode 0600, verified, renamed.
+    Any failure is fatal and leaves no plaintext behind."""
     data = credentials_toml(username, password).encode("utf-8")
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0), 0o600)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{time.monotonic_ns()}.partial")
+    replaced = False
     try:
-        os.write(fd, data)
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-    if sys.platform != "win32":
-        os.chmod(path, 0o600)
-        return []
-    try:
-        res = subprocess.run(icacls_restrict_argv(path, current_user_sid()), capture_output=True, text=True,
-                             timeout=60, creationflags=0x08000000)
-    except (OSError, subprocess.SubprocessError) as exc:
-        return [f"could not restrict access to the credentials file: {exc}"]
-    if res.returncode != 0:
-        return [f"could not restrict access to the credentials file (icacls exit {res.returncode})"]
-    return []
+        if sys.platform == "win32":
+            from ..platform import winacl
+
+            winacl.write_private_file(tmp, data)
+        else:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                os.write(fd, data)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        problems = secret_problems(tmp)
+        if problems:
+            raise SetupError("The credentials file could not be made private: " + "; ".join(problems))
+        os.replace(tmp, path)
+        replaced = True
+        problems = secret_problems(path)
+        if problems:
+            raise SetupError("The credentials file could not be made private: " + "; ".join(problems))
+    except BaseException as exc:
+        for p in (tmp, path) if replaced else (tmp,):
+            try:
+                p.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                log.error("could not delete %s after a failed credentials write; delete it by hand", p)
+        if isinstance(exc, SetupError):
+            raise
+        if isinstance(exc, OSError):
+            raise SetupError(f"Could not write the credentials file: {exc}") from None
+        raise
 
 
 def write_setup(ans: SetupAnswers, layout: Layout, config_path: Path | None = None,
                 force: bool = False, clock: Callable[[], float] = time.time) -> tuple[Path, list[str]]:
-    """Validate and write configuration (+ credentials). Returns (config path, warnings)."""
+    """Validate and write configuration (+ credentials). Returns (config path, warnings).
+
+    Order: validate everything; make the configuration folder and the storage folders private;
+    write the credentials file (private from creation); only then back up any previous
+    configuration and write the new one (inheriting the private folder's permissions)."""
     config_path = Path(config_path or layout.config_file)
     d = build_config(ans, layout, config_path.parent / SECRET_NAME)
     try:
         load_config_dict(d, base_dir=config_path.parent)
     except ConfigError as exc:
         raise SetupError(f"The answers do not form a valid configuration: {exc}") from None
+    if config_path.exists() and not force:
+        raise SetupError("Sentinel is already set up on this computer (use setup --force to replace it).")
+    for folder in dict.fromkeys([config_path.parent, *(Path(d["storage"][k]) for k in
+                                                       ("spool_dir", "data_dir", "log_dir"))]):
+        prepare_private_dir(folder)
+    if ans.username:
+        write_secret(Path(d["camera"]["credentials_file"]), ans.username, ans.password)
     if config_path.exists():
-        if not force:
-            raise SetupError("Sentinel is already set up on this computer (use setup --force to replace it).")
         backup = config_path.with_name(f"{config_path.name}.{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime(clock()))}.bak")
         config_path.replace(backup)
         log.info("previous configuration kept as %s", backup)
-    warnings: list[str] = []
-    if ans.username:
-        warnings += write_secret(Path(d["camera"]["credentials_file"]), ans.username, ans.password)
-    config_path.parent.mkdir(parents=True, exist_ok=True)
     header = ("Sentinel configuration written by first-run setup.\n"
               "Settings not listed here use the tested defaults (docs/08_PACKAGING.md).\n"
               "Camera credentials are kept in the separate credentials file, never here.")
     tmp = config_path.with_name(config_path.name + ".partial")
     tmp.write_text(to_toml(d, header), encoding="utf-8")
     tmp.replace(config_path)
-    return config_path, warnings
-
+    return config_path, []
 
 # ------------------------------------------------------------------ interactive questions
 TECHNICIAN_INTRO = """\

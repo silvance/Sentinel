@@ -11,7 +11,11 @@ console on Windows, so the recorder listens on a *named event* instead:
   "armed" for the next start (``request_stop`` reports "not running" instead).
 
 On Linux the recorder already handles SIGTERM; ``request_stop`` sends SIGTERM to the PID that
-the POSIX instance lock writes into ``recorder.lock``.
+the POSIX instance lock writes into ``recorder.lock``, after checking that this PID is alive and
+is a recorder (``posix_recorder_pid``).
+
+``recorder_alive`` is the launcher's non-intrusive running check: it never takes the instance
+lock, so it cannot make a recorder that is starting at that moment exit as "already running".
 
 This is the interim mechanism for the launcher-managed background process. The Windows service
 (branch design/windows-service) replaces it with Service Control Manager stop requests.
@@ -30,6 +34,7 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 EVENT_MODIFY_STATE = 0x0002
+SYNCHRONIZE = 0x00100000
 WAIT_OBJECT_0 = 0x0
 ERROR_ALREADY_EXISTS = 183
 
@@ -117,27 +122,58 @@ def request_stop(data_dir: Path) -> bool:
             return bool(k32.SetEvent(handle))
         finally:
             k32.CloseHandle(handle)
-    # POSIX: PID written by PosixPlatform's lock. The PID is trusted only while the lock is
-    # actually held; a free lock means the file's PID is stale and may belong to anyone.
-    import fcntl
+    pid = posix_recorder_pid(Path(data_dir))
+    if pid is None:
+        return False
     import signal
 
-    lock = Path(data_dir) / "recorder.lock"
-    try:
-        with open(lock) as fh:
-            try:
-                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                pid = int(fh.read().strip() or "0")
-            else:
-                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
-                return False
-    except (OSError, ValueError):
-        return False
-    if pid <= 0:
-        return False
     try:
         os.kill(pid, signal.SIGTERM)
-    except ProcessLookupError:
+    except (ProcessLookupError, PermissionError):
         return False
     return True
+
+
+def recorder_alive(data_dir: Path) -> bool:
+    """Non-intrusive "is a recorder running for ``data_dir``?" (never touches the instance lock).
+
+    Windows: the recorder's stop event exists (it exists only while a recorder process holds
+    it). POSIX: the PID in ``recorder.lock`` is alive and is a recorder (see posix_recorder_pid)."""
+    if sys.platform == "win32":
+        k32 = _kernel32()
+        handle = k32.OpenEventW(SYNCHRONIZE, False, event_name(data_dir))
+        if not handle:
+            return False
+        k32.CloseHandle(handle)
+        return True
+    return posix_recorder_pid(Path(data_dir)) is not None
+
+
+def posix_recorder_pid(data_dir: Path) -> int | None:
+    """PID that PosixPlatform's lock wrote into ``recorder.lock`` if it still belongs to a recorder.
+
+    The file keeps the last recorder's PID after it exits, so the PID is checked: alive
+    (``kill(pid, 0)``) and, where ``/proc`` exists, its command line is a recorder run
+    (``... recorder run ...`` or ``... sentinel.service run ...``), which rules out PID reuse.
+    Without ``/proc`` (non-Linux POSIX) only the liveness check is possible."""
+    try:
+        pid = int((data_dir / "recorder.lock").read_text().strip() or "0")
+    except (OSError, ValueError):
+        return None
+    if pid <= 0 or pid == os.getpid():
+        return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return None
+    except PermissionError:
+        pass  # alive, owned by another account
+    cmdline = Path(f"/proc/{pid}/cmdline")
+    if Path("/proc/self").exists():
+        try:
+            args = cmdline.read_bytes().split(b"\0")
+        except OSError:
+            return None
+        if b"run" not in args or not (b"recorder" in args or b"sentinel.service" in args):
+            return None
+    return pid

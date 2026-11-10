@@ -28,7 +28,8 @@ import time
 from pathlib import Path
 
 from .. import __version__
-from ..config import ConfigError, load_config
+from ..config import ConfigError, check_tools, load_config
+from ..install_check import location_problems
 from ..hashing import sha256_file
 from ..logging_setup import FORMAT, RedactingFilter, RedactingFormatter
 from ..paths import (CONFIG_ENV, MANIFEST_NAME, TOOL_NAMES, app_dir, bundled_tool, config_candidates,
@@ -107,6 +108,19 @@ def cmd_launch(args: argparse.Namespace) -> int:
         setup_launcher_logging(layout.log_dir)
         log.error("configuration %s is invalid: %s", cfg_path, exc)
         print(alert_banner("C-001"))
+        _pause()
+        return EXIT_CONFIG
+    # Refuse before creating anything: configuration, credentials, tools and data folders must
+    # not be changeable by other accounts; bundled tools must be present (no PATH fallback).
+    problems = location_problems(cfg_path, cfg) + check_tools(cfg)
+    if problems:
+        if cfg.log_path.is_dir():
+            setup_launcher_logging(cfg.log_path)
+        for p in problems:
+            log.error("refusing to start the recorder: %s", p)
+        print(alert_banner("C-001"))
+        if _interactive():
+            print("\nTechnician: run 'Sentinel check-config' for details.")
         _pause()
         return EXIT_CONFIG
     setup_launcher_logging(cfg.log_path)

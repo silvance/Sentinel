@@ -29,22 +29,45 @@ def test_tool_filename_per_platform() -> None:
 
 
 @pytest.mark.parametrize("platform", ["win32", "linux"])
-def test_bundled_tool_found_next_to_app(tmp_path: Path, platform: str) -> None:
+def test_frozen_always_uses_bundled_location(tmp_path: Path, platform: str) -> None:
     _bundle(tmp_path, "ffmpeg", platform=platform)
     got = paths.default_tool("ffmpeg", app=tmp_path, platform=platform)
     assert Path(got) == tmp_path / "ffmpeg" / paths.tool_filename("ffmpeg", platform)
-    assert paths.default_tool("ffprobe", app=tmp_path, platform=platform) == "ffprobe"   # not bundled -> PATH
+    # Not bundled: still the bundled location (absolute), never a bare name / PATH fallback.
+    missing = paths.default_tool("ffprobe", app=tmp_path, platform=platform)
+    assert Path(missing) == tmp_path / "ffmpeg" / paths.tool_filename("ffprobe", platform)
 
 
-def test_directory_named_like_tool_is_not_a_tool(tmp_path: Path) -> None:
-    (tmp_path / "ffmpeg" / paths.tool_filename("ffmpeg")).mkdir(parents=True)
-    assert paths.default_tool("ffmpeg", app=tmp_path) == "ffmpeg"
+def _fake_path_dir(d: Path, name: str = "ffmpeg") -> Path:
+    d.mkdir(parents=True, exist_ok=True)
+    exe = d / paths.tool_filename(name)
+    exe.write_bytes(b"")
+    exe.chmod(0o755)
+    return exe
 
 
-def test_source_checkout_never_uses_bundled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_path_search_is_absolute_and_skips_cwd_and_relative_entries(tmp_path: Path,
+                                                                    monkeypatch: pytest.MonkeyPatch) -> None:
+    planted = _fake_path_dir(tmp_path / "cwd")
+    real = _fake_path_dir(tmp_path / "bin")
+    monkeypatch.chdir(tmp_path / "cwd")
+    sep = ";" if sys.platform == "win32" else ":"
+    assert paths.resolve_on_path("ffmpeg", path_env=f".{sep}cwd{sep}{tmp_path / 'bin'}") == str(real)
+    assert paths.resolve_on_path("ffmpeg", path_env=".") is None          # current folder never searched
+    assert str(planted) != str(real)
+
+
+def test_source_checkout_resolves_tools_to_absolute(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "frozen", False, raising=False)
+    exe = _fake_path_dir(tmp_path / "bin")
+    _fake_path_dir(tmp_path / "bin", "ffprobe")
+    monkeypatch.setenv("PATH", str(tmp_path / "bin"))
     assert paths.app_dir() is None
-    assert paths.default_tool("ffmpeg") == "ffmpeg"
+    assert paths.default_tool("ffmpeg") == str(exe)
+    cfg = load_config_dict(base_config_dict(tmp_path), base_dir=tmp_path)
+    assert Path(cfg.tools.ffmpeg).is_absolute() and Path(cfg.tools.ffprobe).is_absolute()
+    monkeypatch.setenv("PATH", "")
+    assert paths.default_tool("ffmpeg") == "ffmpeg"                   # unresolvable: start-up check reports it
 
 
 def test_config_uses_bundled_tools_when_not_configured(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -56,21 +79,37 @@ def test_config_uses_bundled_tools_when_not_configured(tmp_path: Path, monkeypat
     assert Path(cfg.tools.ffprobe) == (app / "ffmpeg" / paths.tool_filename("ffprobe")).resolve()
 
 
-def test_configured_tools_win_over_bundled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_configured_tools_win_and_relative_ones_become_absolute(tmp_path: Path,
+                                                               monkeypatch: pytest.MonkeyPatch) -> None:
     app = tmp_path / "app"
     _bundle(app, "ffmpeg", "ffprobe")
     _freeze(monkeypatch, app)
-    d = base_config_dict(tmp_path, tools={"ffmpeg": "C:/custom/ffmpeg.exe"})
-    cfg = load_config_dict(d, base_dir=tmp_path)
-    assert cfg.tools.ffmpeg == "C:/custom/ffmpeg.exe"
+    custom = str(tmp_path / "custom" / "ffmpeg.exe")
+    cfg = load_config_dict(base_config_dict(tmp_path, tools={"ffmpeg": custom}), base_dir=tmp_path)
+    assert cfg.tools.ffmpeg == custom
     assert Path(cfg.tools.ffprobe).parent == (app / "ffmpeg").resolve()   # the other one still bundled
+    rel = load_config_dict(base_config_dict(tmp_path, tools={"ffprobe": "tools/ffprobe.exe"}), base_dir=tmp_path)
+    assert Path(rel.tools.ffprobe) == (tmp_path / "tools" / "ffprobe.exe").resolve()
 
 
-def test_frozen_without_bundle_falls_back_to_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_frozen_with_missing_bundle_fails_the_tool_check(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from sentinel.config import check_tools
     _freeze(monkeypatch, tmp_path / "app")
     cfg = load_config_dict(base_config_dict(tmp_path), base_dir=tmp_path)
-    assert (cfg.tools.ffmpeg, cfg.tools.ffprobe) == ("ffmpeg", "ffprobe")
+    assert Path(cfg.tools.ffmpeg).parent == (tmp_path / "app" / "ffmpeg").resolve()
+    assert len(check_tools(cfg)) == 2                                  # refused, no PATH fallback
 
+
+def test_relative_credentials_file_resolved_against_config_folder(tmp_path: Path) -> None:
+    d = base_config_dict(tmp_path)
+    d["camera"]["credentials_file"] = "camera.secret"
+    cfg = load_config_dict(d, base_dir=tmp_path)
+    assert Path(cfg.camera.credentials_file or "") == (tmp_path / "camera.secret").resolve()
+
+
+def test_safe_cwd() -> None:
+    assert str(PureWindowsPath(paths.safe_cwd("win32", env={"SystemRoot": r"D:\Win"}))) == r"D:\Win\System32"
+    assert paths.safe_cwd("linux").as_posix() == "/"
 
 def test_unknown_tools_key_still_rejected(tmp_path: Path) -> None:
     from sentinel.config import ConfigError
@@ -136,10 +175,17 @@ def test_config_lookup_order(tmp_path: Path) -> None:
     machine.write_text("")
     assert paths.find_config(env=env, app=app, platform="win32") == machine
     app.mkdir()
-    (app / "sentinel.toml").write_text("")                                          # portable folder wins
-    assert paths.find_config(env=env, app=app, platform="win32") == app / "sentinel.toml"
+    (app / "sentinel.toml").write_text("")                                          # never outranks machine
     named = tmp_path / "named.toml"
+    named.write_text("")
+    assert paths.find_config(env={**env, paths.CONFIG_ENV: str(named)}, app=app, platform="win32") == machine
+    machine.unlink()
+    assert paths.find_config(env={**env, paths.CONFIG_ENV: str(named)}, app=app, platform="win32") == \
+        app / "sentinel.toml"
+    (app / "sentinel.toml").unlink()
     assert paths.find_config(env={**env, paths.CONFIG_ENV: str(named)}, app=app, platform="win32") == named
+    assert paths.find_config(env={paths.CONFIG_ENV: str(tmp_path / "gone.toml"), **env}, app=app,
+                             platform="win32") is None                       # a missing env file is skipped
     assert paths.find_config(explicit=tmp_path / "x.toml", env=env, app=app, platform="win32") == tmp_path / "x.toml"
 
 

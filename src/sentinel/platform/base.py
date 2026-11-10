@@ -59,6 +59,13 @@ class Platform(abc.ABC):
     def notify(self, state: str) -> None:
         """Service-manager notification (systemd READY=1 / WATCHDOG=1 / STATUS=...). No-op by default."""
 
+    def write_access_problems(self, path: Path) -> list[str]:
+        """Reasons accounts other than this one / administrators could change ``path`` (empty = OK).
+
+        Used to refuse configurations, credentials, tools and data folders that a standard
+        user could replace. Implementations fail closed (an unreadable ACL is a problem)."""
+        return []
+
     def clock_synchronized(self) -> bool | None:
         """True/False if the OS reports time synchronisation state; None if unknown."""
         return None

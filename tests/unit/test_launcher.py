@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -69,6 +70,15 @@ def test_bad_timezone_and_port_rejected(tmp_path: Path) -> None:
         setup.build_config(setup.SetupAnswers("192.0.2.1", "s", port=70000), _layout(tmp_path))
 
 
+def _private(path: Path) -> bool:
+    """Only this account, SYSTEM, Administrators (Windows, protected DACL) / no group-other write."""
+    if sys.platform == "win32":
+        from sentinel.platform import winacl
+        sddl = winacl.get_sddl(path)
+        return sddl.startswith("D:P") and not winacl.foreign_trustees(sddl, winacl.current_user_sid())
+    return path.stat().st_mode & 0o077 == 0 if path.is_file() else path.stat().st_mode & 0o027 == 0
+
+
 def test_write_setup_creates_config_and_private_secret(tmp_path: Path) -> None:
     lay = _layout(tmp_path)
     ans = setup.SetupAnswers("192.0.2.10", "live", username="viewer", password="Pa\"ss\\w0rd")
@@ -82,14 +92,98 @@ def test_write_setup_creates_config_and_private_secret(tmp_path: Path) -> None:
     creds = load_credentials(secret)
     assert (creds.username, creds.password) == ("viewer", "Pa\"ss\\w0rd")
     text = path.read_text("utf-8")
-    assert "ss\\\\w0rd" not in text and "w0rd" not in text and "viewer" not in text
-    if sys.platform == "win32":
-        acl = subprocess.run(["icacls", str(secret)], capture_output=True, text=True).stdout
-        assert "BUILTIN\\Users" not in acl and "Everyone" not in acl, acl
-        assert "(I)" not in acl, "inherited permissions must be removed"
-    else:
-        assert secret.stat().st_mode & 0o077 == 0
+    assert "w0rd" not in text and "viewer" not in text
+    assert _private(secret), "credentials file must be private"
+    for folder in (lay.config_file.parent, lay.spool_dir, lay.data_dir, lay.log_dir):
+        assert folder.is_dir() and _private(folder), folder
+    assert not list(secret.parent.glob("camera.secret.*.partial"))
+    from sentinel.install_check import location_problems
+    assert location_problems(path, cfg) == []
 
+
+def test_secret_never_left_behind_when_it_cannot_be_made_private(tmp_path: Path,
+                                                                 monkeypatch: pytest.MonkeyPatch) -> None:
+    lay = _layout(tmp_path)
+    monkeypatch.setattr(setup, "secret_problems", lambda _p: ["also accessible to BU"])
+    with pytest.raises(setup.SetupError, match="could not be made private"):
+        setup.write_setup(setup.SetupAnswers("192.0.2.10", "live", username="viewer", password="pw12345"), lay)
+    assert not list(lay.config_file.parent.glob("camera.secret*")), "plaintext left behind"
+    assert not lay.config_file.exists(), "no configuration may point at a missing secret"
+
+
+def test_secret_creation_is_private_from_the_start(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The file must already be private when the first byte is written (not fixed up afterwards)."""
+    seen: list[bool] = []
+    if sys.platform == "win32":
+        from sentinel.platform import winacl
+        real = winacl.write_private_file
+
+        def spy(path: Path, data: bytes, user_sid: str | None = None) -> None:
+            real(path, data, user_sid)
+            seen.append(_private(path))
+        monkeypatch.setattr(winacl, "write_private_file", spy)
+    else:
+        real_open = os.open
+
+        def spy_open(p: Any, flags: int, mode: int = 0o777, *a: Any, **k: Any) -> int:
+            if str(p).endswith(".partial"):
+                seen.append(mode == 0o600 and bool(flags & os.O_EXCL))
+            return real_open(p, flags, mode, *a, **k)
+        monkeypatch.setattr(os, "open", spy_open)
+    lay = _layout(tmp_path)
+    lay.config_file.parent.mkdir(parents=True)
+    setup.write_secret(lay.credentials_file, "viewer", "pw12345")
+    assert seen == [True]
+
+
+def test_setup_refuses_to_reprotect_a_foreign_shared_folder(tmp_path: Path) -> None:
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    (shared / "someone-elses.docx").write_text("x")
+    _make_broadly_writable(shared)
+    with pytest.raises(setup.SetupError, match="already contains other files"):
+        setup.prepare_private_dir(shared)
+    own = tmp_path / "old-install"
+    own.mkdir()
+    (own / "sentinel.toml").write_text("")
+    _make_broadly_writable(own)
+    setup.prepare_private_dir(own)                    # a previous Sentinel folder is re-protected
+    assert _private(own)
+
+
+def _make_broadly_writable(path: Path) -> None:
+    if sys.platform == "win32":
+        from sentinel.platform import winacl
+        winacl.set_dacl(path, f"D:P(A;OICI;FA;;;{winacl.current_user_sid()})(A;OICI;0x1301bf;;;BU)")
+    else:
+        os.chmod(path, 0o777)
+
+
+def test_install_check_flags_broadly_writable_locations(tmp_path: Path) -> None:
+    from sentinel.install_check import location_problems, nearest_existing
+    cfg_path = tmp_path / "conf" / "sentinel.toml"
+    cfg_path.parent.mkdir()
+    cfg_path.write_text("")
+    cfg = make_config(tmp_path / "store")
+    assert nearest_existing(tmp_path / "store" / "spool" / "x") == tmp_path
+    assert location_problems(cfg_path, cfg) == []
+    _make_broadly_writable(cfg_path.parent)
+    problems = location_problems(cfg_path, cfg)
+    assert any("configuration folder" in p for p in problems), problems
+    assert any(("Users" in p) or ("all users" in p) for p in problems), problems
+
+
+def test_launcher_refuses_insecure_configuration(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    from conftest import base_config_dict
+    conf = tmp_path / "conf"
+    conf.mkdir()
+    cfg_file = conf / "sentinel.toml"
+    cfg_file.write_text(setup.to_toml(base_config_dict(tmp_path / "store")), encoding="utf-8")
+    _make_broadly_writable(conf)
+    rc = cli.main(["launch", "--once", "--config", str(cfg_file)])
+    out = capsys.readouterr().out
+    assert rc == cli.EXIT_CONFIG and "Error C-001" in out
+    assert not (tmp_path / "store" / "data" / "launcher.lock").exists(), "nothing may be started"
 
 def test_write_setup_never_silently_overwrites(tmp_path: Path) -> None:
     lay = _layout(tmp_path)
@@ -144,14 +238,15 @@ def test_recorder_command_frozen_and_source() -> None:
 
 
 def test_detached_kwargs() -> None:
-    win = control.detached_popen_kwargs(Path("."), platform="win32")
+    win = control.detached_popen_kwargs(platform="win32")
+    assert win["cwd"].lower().endswith("system32")                # never a user-writable folder
     assert win["creationflags"] == control.CREATE_NO_WINDOW | control.CREATE_NEW_PROCESS_GROUP | \
         control.CREATE_BREAKAWAY_FROM_JOB
     assert win["stdin"] is subprocess.DEVNULL and "start_new_session" not in win
-    assert control.detached_popen_kwargs(Path("."), platform="win32", breakaway=False)["creationflags"] & \
+    assert control.detached_popen_kwargs(platform="win32", breakaway=False)["creationflags"] & \
         control.CREATE_BREAKAWAY_FROM_JOB == 0
-    posix = control.detached_popen_kwargs(Path("."), platform="linux")
-    assert posix["start_new_session"] is True and "creationflags" not in posix
+    posix = control.detached_popen_kwargs(platform="linux")
+    assert posix["start_new_session"] is True and "creationflags" not in posix and Path(posix["cwd"]).as_posix() == "/"
 
 
 class FakeClock:
@@ -228,17 +323,33 @@ def test_spawn_failure_and_breakaway_retry(tmp_path: Path, monkeypatch: pytest.M
     assert len(calls) == 2 and not calls[1] & control.CREATE_BREAKAWAY_FROM_JOB
 
 
-def test_is_running_follows_the_instance_lock(tmp_path: Path) -> None:
+def test_is_running_never_touches_the_instance_lock(tmp_path: Path) -> None:
     clock = FakeClock()
     ctl = _ctl(tmp_path, None, clock)
     assert ctl.is_running() is False
-    held = get_platform().acquire_instance_lock(ctl.lock_path)
+    held = get_platform().acquire_instance_lock(ctl.lock_path)   # a recorder that is just starting
     try:
-        assert ctl.is_running() is True
+        ctl.is_running()                                         # must not fail or steal the lock
+        with pytest.raises(Exception):
+            get_platform().acquire_instance_lock(ctl.lock_path).close()
     finally:
         held.close()
+    if sys.platform == "win32":
+        listener = stopsignal.StopListener(ctl.cfg.data_path, lambda: None).start()
+        try:
+            assert ctl.is_running() is True
+        finally:
+            listener.close()
+    else:
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)", "recorder", "run"])
+        try:
+            ctl.lock_path.write_text(str(proc.pid))
+            assert ctl.is_running() is True
+        finally:
+            proc.kill()
+            proc.wait()
+        assert ctl.is_running() is False                          # stale PID is not "running"
     assert ctl.is_running() is False
-
 
 def test_providers_take_precedence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     cfg = make_config(tmp_path)

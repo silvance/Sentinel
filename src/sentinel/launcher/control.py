@@ -4,11 +4,19 @@
 implementation, :class:`DetachedProcessControl`: the launcher starts the recorder as a
 background process of the same executable (``Sentinel.exe recorder run``) with no window.
 
-To plug in the Windows service (branch design/windows-service), add a provider to
-``CONTROL_PROVIDERS`` that returns a service-backed control when the service is installed
-(``is_running`` = service state RUNNING, ``start`` = StartService, ``stop`` = ControlService).
-The executable, the spec file and the build script do not change: the service host runs the
-same ``Sentinel.exe`` with a different sub-command.
+To plug in the Windows service (branch design/windows-service), insert a provider at the
+**front** of ``CONTROL_PROVIDERS`` that returns a service-backed control whenever the service is
+*installed* (whatever its state): ``is_running`` = SCM state RUNNING, ``start`` = StartService
+(access denied => C-003, never a fallback), ``stop`` = ControlService(STOP). While the service is
+installed the launcher must never start a detached recorder, otherwise two recorders would race
+for the lock and the one running in the user session would stop at logoff. The executable, the
+spec file and the build script do not change: the service host runs the same ``Sentinel.exe``
+with a different sub-command and calls ``service.run_recorder``.
+
+Interim detached mode (this module): the recorder is a child of the logged-on user's session.
+It stops when that user logs off or the PC restarts, depends on that user being logged on, and
+does not start by itself. It is therefore **not suitable for unattended deployment** (U8); the
+service branch is required for that.
 """
 
 from __future__ import annotations
@@ -23,8 +31,8 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from ..config import AppConfig
-from ..paths import is_frozen
-from ..platform import InstanceLockError, Platform, get_platform
+from ..paths import is_frozen, safe_cwd
+from ..platform import Platform, get_platform
 from ..status import read_status
 from . import stopsignal
 
@@ -65,9 +73,13 @@ def recorder_command(config_path: Path, frozen: bool | None = None, executable: 
     return [exe, "-m", "sentinel.launcher", "recorder", "run", "--config", str(config_path)]
 
 
-def detached_popen_kwargs(cwd: Path, platform: str | None = None, breakaway: bool = True) -> dict[str, Any]:
+def detached_popen_kwargs(cwd: Path | None = None, platform: str | None = None,
+                          breakaway: bool = True) -> dict[str, Any]:
+    """Popen kwargs for the background recorder. ``cwd`` defaults to :func:`safe_cwd` (a folder
+    standard users cannot write), never the data folder or the user's current directory."""
     kw: dict[str, Any] = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL,
-                          "stderr": subprocess.DEVNULL, "close_fds": True, "cwd": str(cwd)}
+                          "stderr": subprocess.DEVNULL, "close_fds": True,
+                          "cwd": str(cwd or safe_cwd(platform))}
     if (platform or sys.platform) == "win32":
         flags = CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
         if breakaway:
@@ -91,7 +103,7 @@ class DetachedProcessControl:
     def __init__(self, config_path: Path, cfg: AppConfig, platform: Platform | None = None,
                  popen: Callable[..., Any] = subprocess.Popen, clock: Callable[[], float] = time.time,
                  sleep: Callable[[float], None] = time.sleep, command: list[str] | None = None) -> None:
-        self.config_path = Path(config_path)
+        self.config_path = Path(config_path).resolve()
         self.cfg = cfg
         self.platform = platform or get_platform()
         self._popen = popen
@@ -102,24 +114,22 @@ class DetachedProcessControl:
         self.status_path = cfg.data_path / "status.json"
 
     def is_running(self) -> bool:
-        """True if a recorder holds the instance lock. Do not call while one may be starting:
-        the probe takes the lock for an instant and a starting recorder would then refuse to run."""
-        try:
-            handle = self.platform.acquire_instance_lock(self.lock_path)
-        except InstanceLockError:
-            return True
-        handle.close()
-        return False
+        """Non-intrusive check (``stopsignal.recorder_alive``); never touches the instance lock.
+
+        Limitation: a recorder started without the launcher host (``python -m sentinel.service
+        run``) has no stop event on Windows and is not seen; starting another one is still safe
+        because it exits on the instance lock (exit code 3, reported as already running)."""
+        return stopsignal.recorder_alive(self.cfg.data_path)
 
     def _spawn(self) -> Any:
         self.cfg.data_path.mkdir(parents=True, exist_ok=True)
         try:
-            return self._popen(self.command, **detached_popen_kwargs(self.cfg.data_path))
+            return self._popen(self.command, **detached_popen_kwargs())
         except OSError as exc:
             # A job that forbids breakaway rejects CREATE_BREAKAWAY_FROM_JOB with access denied.
             if sys.platform == "win32" and getattr(exc, "winerror", None) == ERROR_ACCESS_DENIED:
                 log.warning("job object forbids breakaway; starting recorder inside the launcher's job")
-                return self._popen(self.command, **detached_popen_kwargs(self.cfg.data_path, breakaway=False))
+                return self._popen(self.command, **detached_popen_kwargs(breakaway=False))
             raise
 
     def start(self, confirm_s: float = 20.0) -> StartResult:
@@ -131,8 +141,7 @@ class DetachedProcessControl:
             return StartResult(False, "C-003", f"spawn failed: {exc}")
         log.info("recorder started in the background (pid %s): %s", getattr(proc, "pid", "?"), self.command)
         # Confirmation = a status heartbeat written after we spawned it (the recorder writes one
-        # right after taking its lock, also when it then fails on configuration). The lock is
-        # deliberately not probed here (see is_running).
+        # right after taking its lock, also when it then fails on configuration).
         while self._clock() - started < confirm_s:
             rc = proc.poll()
             if rc is not None:

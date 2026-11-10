@@ -123,6 +123,20 @@ class PosixPlatform(Platform):
     def is_read_only(self, path: Path) -> bool:
         return not (os.stat(path).st_mode & (stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
 
+    def write_access_problems(self, path: Path) -> list[str]:
+        try:
+            st = os.stat(path)
+        except OSError as exc:
+            return [f"permissions could not be read ({exc})"]
+        problems = []
+        if st.st_mode & stat.S_IWOTH:
+            problems.append("can be changed by all users")
+        if st.st_mode & stat.S_IWGRP and st.st_gid != 0:
+            problems.append("can be changed by members of its group")
+        if st.st_uid not in (0, os.geteuid()):  # type: ignore[attr-defined]
+            problems.append("is owned by another account")
+        return problems
+
     def secret_file_problems(self, path: Path) -> list[str]:
         st = os.stat(path)
         problems = []

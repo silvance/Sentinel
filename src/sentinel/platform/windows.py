@@ -131,6 +131,15 @@ class WindowsPlatform(Platform):
     def is_read_only(self, path: Path) -> bool:
         return not (os.stat(path).st_mode & stat.S_IWRITE)
 
+    def write_access_problems(self, path: Path) -> list[str]:
+        from . import winacl
+
+        try:
+            sddl = winacl.get_sddl(path)
+        except OSError as exc:
+            return [f"permissions could not be read ({exc})"]
+        return [f"can be changed by {who}" for who in winacl.broad_write_aces(sddl)]
+
     def secret_file_problems(self, path: Path) -> list[str]:
         # NOT IMPLEMENTED: Windows ACL inspection needs pywin32 or icacls parsing; planned for the
         # Windows-service phase. Reported explicitly so nobody mistakes this for a passed check.
