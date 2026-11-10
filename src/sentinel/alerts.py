@@ -54,7 +54,22 @@ CATALOG: dict[str, AlertDef] = {d.code: d for d in [
     AlertDef("C-001", "The recorder cannot start because of a configuration or software problem", SUPPORT, True),
     AlertDef("D-001", "Recording database problem", SUPPORT, True),
     AlertDef("X-001", "The recorder is not responding", SUPPORT, False),
-    AlertDef("Z-001", "A test camera is configured. These recordings are not evidence",
+    # Review-drive export (separate process; never stops recording). docs/04 §6.
+    AlertDef("E-001", "The review drive is full",
+             "The export did not finish. Use a larger drive, or contact technical support.", False),
+    AlertDef("E-002", "The review drive was removed before the export finished",
+             "Recordings on this system are safe. Insert the same drive again and press "
+             "Prepare Review Drive to finish the export.", False),
+    AlertDef("E-003", "Files on the review drive could not be verified",
+             "Do not remove the drive and do not give it to a reviewer. " + SUPPORT, False),
+    AlertDef("E-004", "The review drive already holds different files with the same names",
+             "Nothing was overwritten. Do not give this drive to a reviewer. " + SUPPORT, False),
+    AlertDef("E-005", "The review drive cannot be used",
+             "Use a different drive, or contact technical support.", False),
+    AlertDef("E-006", "A recording on this system could not be read for export", SUPPORT, False),
+    AlertDef("E-007", "The export stopped because of a software problem",
+             "Do not remove the drive. " + SUPPORT, False),
+    AlertDef("Z-001","A test camera is configured. These recordings are not evidence",
              "Contact technical support before any operational use.", False),
 ]}
 
