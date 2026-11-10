@@ -61,6 +61,10 @@ class RecordingConfig:
     timeline_drift_persist_s: float = 5.0     # ...for at least this long (filters CPU hiccups)
     escalate_after_s: float = 180.0           # outage longer than this => "automatic recovery unsuccessful"
     clock_step_tolerance_s: float = 2.0
+    # Segment-time drift correction (docs/03 §4.2): the correction toward measured reception time
+    # may change at most this fast. Real camera/PC clocks drift < ~100 ppm; faster changes are
+    # not drift and are not followed (the segment is flagged instead).
+    max_clock_drift_ppm: float = 1000.0
     display_timezone: str = "UTC"
 
 
@@ -87,6 +91,7 @@ class ServiceConfig:
     audit_interval_s: float = 600.0           # rolling re-verification of sealed segments
     janitor_interval_s: float = 60.0          # retry stuck segments, checkpoint ledger, tidy run dirs
     diagnostics_keep: int = 20
+    clock_observation_interval_s: float = 900.0  # E1: OS time-sync + clock offset record (docs/03 §4.4)
 
 
 @dataclass(frozen=True)
@@ -173,7 +178,8 @@ def _validate(cfg: AppConfig) -> None:
         raise ConfigError("[recording] segment_seconds must be between 2 and 3600")
     for name in ("connect_timeout_s", "stall_timeout_s", "io_timeout_s", "stop_grace_s", "backoff_initial_s",
                  "backoff_max_s", "backoff_reset_after_s", "max_internal_gap_s", "clock_step_tolerance_s",
-                 "timeline_drift_tolerance_s", "timeline_drift_persist_s", "escalate_after_s"):
+                 "timeline_drift_tolerance_s", "timeline_drift_persist_s", "escalate_after_s",
+                 "max_clock_drift_ppm"):
         if getattr(rec, name) <= 0:
             raise ConfigError(f"[recording] {name} must be positive")
     if rec.backoff_max_s < rec.backoff_initial_s:
@@ -191,7 +197,8 @@ def _validate(cfg: AppConfig) -> None:
     if sto.critical_free_gb < 0 or sto.warning_free_gb < sto.critical_free_gb:
         raise ConfigError("[storage] require 0 <= critical_free_gb <= warning_free_gb")
     if any(v <= 0 for v in (cfg.service.poll_interval_s, cfg.service.status_interval_s,
-                            cfg.service.audit_interval_s, cfg.service.janitor_interval_s)):
+                            cfg.service.audit_interval_s, cfg.service.janitor_interval_s,
+                            cfg.service.clock_observation_interval_s)):
         raise ConfigError("[service] intervals must be positive")
     if cfg.service.log_level.upper() not in ("DEBUG", "INFO", "WARNING", "ERROR"):
         raise ConfigError("[service] log_level must be DEBUG, INFO, WARNING or ERROR")

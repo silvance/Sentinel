@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from .clock import iso_utc, parse_iso_utc
+from .ledger_timing import TIMING_WRITE_ONCE, apply_timing_schema
 from .models import ALLOWED_TRANSITIONS, TERMINAL_STATES, GapKind, SegmentState
 
 SCHEMA_VERSION = 1
@@ -138,7 +139,7 @@ CREATE TABLE IF NOT EXISTS events (
 WRITE_ONCE = frozenset({
     "sha256", "size_bytes", "rel_path", "start_utc", "end_utc", "duration_s",
     "content_sha256", "content_hash_method", "decoded_frame_count", "framehash_rel_path", "framehash_sha256",
-})
+}) | TIMING_WRITE_ONCE
 
 
 class IllegalTransition(RuntimeError):
@@ -215,6 +216,7 @@ class Ledger:
                                    (str(SCHEMA_VERSION),))
             elif int(row["value"]) > SCHEMA_VERSION:
                 raise RuntimeError(f"ledger schema {row['value']} is newer than this software ({SCHEMA_VERSION})")
+            apply_timing_schema(self._conn)  # time-accuracy additions (ledger_timing.py), append-only
 
     def query(self, sql: str, params: Iterable[Any] = ()) -> list[sqlite3.Row]:
         with self._lock:

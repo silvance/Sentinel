@@ -30,6 +30,7 @@ from ..media.probe import ProbeResult, probe_segment
 from ..models import TERMINAL_STATES, RunEndReason, SegmentState
 from ..platform.base import Platform
 from ..storage.monitor import StorageMonitor
+from .timebase import interpolate_correction
 
 log = logging.getLogger(__name__)
 
@@ -178,7 +179,7 @@ class Finalizer:
         self.platform.seal_read_only(path)
         self.platform.fsync_dir(path.parent)
 
-        start_utc, end_utc, time_source, gaps = self._timestamps(seg, run, res, interrupted, warnings)
+        start_utc, end_utc, time_source, gaps, time_cols = self._timestamps(seg, run, res, interrupted, warnings)
         if res.playable:
             new_state = SegmentState.INTERRUPTED if interrupted else SegmentState.FINALIZED
         else:
@@ -206,7 +207,7 @@ class Finalizer:
                  packet_count=res.packet_count, keyframe_count=res.keyframe_count, max_pts_gap_s=res.max_pts_gap_s,
                  start_utc=start_utc, end_utc=end_utc, time_source=time_source, interrupted=int(interrupted),
                  warnings=json.dumps(sorted(set(warnings))), validation_detail=json.dumps(res.detail()),
-                 sealed_utc=iso_utc(time.time()), last_finalize_error=None),
+                 sealed_utc=iso_utc(time.time()), last_finalize_error=None, **time_cols),
             gaps, start_utc, events)
         if closed is not None:
             log.warning("recording gap closed: %s -> %s (%.1f s, reason %s)", closed["start_utc"],
@@ -224,9 +225,32 @@ class Finalizer:
             self.on_sealed(segment_id)
         return new_state
 
-    def _timestamps(self, seg: Any, run: Any, res: ProbeResult, interrupted: bool,
-                    warnings: list[str]) -> tuple[str | None, str | None, str | None, list[InternalGap]]:
-        """Derive (start_utc, end_utc, time_source, internal gaps). See docs/03 §4."""
+    def _corrections(self, seg: Any, run: Any) -> tuple[float | None, float, float | None, float, bool]:
+        """Drift-correction knots for this segment: (k0 stream s, c0, k1 stream s, c1, held).
+
+        Runs recorded before reception tracking (``time_method`` NULL) get no correction (the
+        legacy single-anchor times). In a tracked run, a segment whose boundary was never
+        measured (closed during startup recovery after a crash, or after an internal error)
+        holds the last correction measured for that run; ``held`` flags this."""
+        k0, k1 = seg["stream_start_s"], seg["time_correction_stream_s"]
+        c0, c1 = seg["time_correction_start_s"], seg["time_correction_end_s"]
+        if run is None or run["time_method"] is None:
+            return k0, 0.0, k1, 0.0, False
+        held = False
+        if c0 is None:
+            held = True
+            prev = self.ledger.query(
+                "SELECT time_correction_end_s FROM segments WHERE run_id=? AND seq<? "
+                "AND time_correction_end_s IS NOT NULL ORDER BY seq DESC LIMIT 1", (seg["run_id"], seg["seq"]))
+            c0 = prev[0][0] if prev else (run["time_correction_s"] or 0.0)
+        if c1 is None:
+            held, c1, k1 = True, c0, None
+        return k0, float(c0), k1, float(c1), held
+
+    def _timestamps(self, seg: Any, run: Any, res: ProbeResult, interrupted: bool, warnings: list[str]
+                    ) -> tuple[str | None, str | None, str | None, list[InternalGap], dict[str, Any]]:
+        """Derive (start_utc, end_utc, time_source, internal gaps, time-correction columns).
+        See docs/03 §4."""
         rec = self.cfg.recording
         dur = res.duration_s or 0.0
         anchor = run["anchor_utc"] if run is not None else None
@@ -269,12 +293,23 @@ class Finalizer:
             # persisted recently). The file's last write time is the best remaining evidence.
             mtime = (self.cfg.spool_path / seg["rel_path"]).stat().st_mtime
             warnings.append("time_from_file_mtime")
-            return iso_utc(mtime - dur), iso_utc(mtime), "file_mtime", gaps
+            return iso_utc(mtime - dur), iso_utc(mtime), "file_mtime", gaps, {}
 
         from ..clock import add_seconds_iso
 
+        # Drift correction toward measured reception time, fixed at the segment's boundaries
+        # (docs/03 §4.2); the start boundary equals the previous segment's end boundary.
+        k0, c0, k1, c1, held = self._corrections(seg, run)
+        time_cols: dict[str, Any] = {}
+        if run is not None and run["time_method"] is not None:
+            time_cols = {"time_correction_start_s": c0, "time_correction_end_s": c1}
+            if held:
+                warnings.append("time_correction_held")
+        if seg["time_correction_limited"]:
+            warnings.append("time_correction_limited")
+
         def to_utc(stream_s: float) -> str:
-            return add_seconds_iso(anchor, stream_s)
+            return add_seconds_iso(anchor, stream_s + interpolate_correction(stream_s, k0, c0, k1, c1))
 
         # Real time the source lost but FFmpeg removed from the stream timeline (supervisor
         # measured it as stream time falling behind monotonic time): footage after the break
@@ -302,7 +337,7 @@ class Finalizer:
             gaps.append(InternalGap(add_seconds_iso(to_utc(boundary[0]), end_shift),
                                     add_seconds_iso(to_utc(boundary[1]), end_shift),
                                     boundary[1] - boundary[0], "timestamp_discontinuity_at_boundary"))
-        return start_utc, end_utc, source, gaps
+        return start_utc, end_utc, source, gaps, time_cols
 
     # ------------------------------------------------------------------ gaps
     def process_gap(self, job: GapJob) -> None:

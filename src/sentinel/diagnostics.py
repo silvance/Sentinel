@@ -6,7 +6,8 @@ One ZIP file, readable without Sentinel installed:
     status.json            the recorder's latest measured status, including alerts
     events.csv             recent ledger events
     runs.csv / gaps.csv    recent recording runs and recording gaps
-    segments.csv           recent segment metadata (states, times, hashes) - NO VIDEO
+    segments.csv           recent segment metadata (states, times, time corrections, hashes) - NO VIDEO
+    clock_observations.csv OS time-sync status, measured clock drift/offset records (E1, docs/03 §4.4)
     logs/recorder.log*     tails of the recorder log (credentials redacted again on export)
     config.toml            the configuration file (contains no credentials by design; redacted anyway)
     MANIFEST.sha256        SHA-256 of every file above
@@ -81,6 +82,7 @@ def build_report(cfg: AppConfig, reason: str = "requested", out_dir: Path | None
     counts: dict[str, int] = {}
     integrity = "ledger not found"
     open_gap = None
+    time_lines: list[str] = ["Time accuracy:      no clock observations recorded"]
     if db_path.exists():
         led = Ledger(db_path, readonly=True)
         try:
@@ -88,16 +90,26 @@ def build_report(cfg: AppConfig, reason: str = "requested", out_dir: Path | None
             counts = led.state_counts()
             files["events.csv"] = _rows_csv(led.query(
                 "SELECT * FROM events ORDER BY event_id DESC LIMIT 2000")).encode("utf-8")
+            run_cols = _present(led, "recording_runs", [
+                "run_id", "launched_utc", "anchor_utc", "ended_utc", "end_reason", "exit_code", "end_detail",
+                "timeline_break_stream_s", "timeline_shift_s", "clock_anomaly", "time_method", "time_correction_s",
+                "camera_drift_ppm", "host_clock_drift_ppm", "drift_measured_over_s", "time_correction_limited_count",
+                "ffmpeg_version", "app_version"])
             files["runs.csv"] = _rows_csv(led.query(
-                "SELECT run_id, launched_utc, anchor_utc, ended_utc, end_reason, exit_code, end_detail, "
-                "timeline_break_stream_s, timeline_shift_s, clock_anomaly, ffmpeg_version, app_version "
-                "FROM recording_runs ORDER BY rowid DESC LIMIT 500")).encode("utf-8")
+                f"SELECT {', '.join(run_cols)} FROM recording_runs ORDER BY rowid DESC LIMIT 500")).encode("utf-8")
             files["gaps.csv"] = _rows_csv(led.query(
                 "SELECT * FROM recording_gaps ORDER BY gap_id DESC LIMIT 1000")).encode("utf-8")
+            seg_cols = _present(led, "segments", [
+                "segment_id", "run_id", "seq", "rel_path", "state", "start_utc", "end_utc", "duration_s",
+                "observed_closed_utc", "time_correction_start_s", "time_correction_end_s", "time_correction_limited",
+                "clock_anomaly", "size_bytes", "sha256", "content_sha256", "warnings", "finalize_attempts",
+                "last_finalize_error", "audit_status"])
             files["segments.csv"] = _rows_csv(led.query(
-                "SELECT segment_id, run_id, seq, rel_path, state, start_utc, end_utc, duration_s, size_bytes, "
-                "sha256, content_sha256, warnings, finalize_attempts, last_finalize_error, audit_status "
-                "FROM segments ORDER BY rowid DESC LIMIT 1000")).encode("utf-8")
+                f"SELECT {', '.join(seg_cols)} FROM segments ORDER BY rowid DESC LIMIT 1000")).encode("utf-8")
+            if _present(led, "clock_observations", ["obs_id"]):
+                obs = led.query("SELECT * FROM clock_observations ORDER BY obs_id DESC LIMIT 2000")
+                files["clock_observations.csv"] = _rows_csv(obs).encode("utf-8")
+                time_lines = _time_summary(obs[0] if obs else None, led)
             g = led.open_gap(cfg.camera.id)
             open_gap = dict(g) if g else None
         finally:
@@ -135,6 +147,8 @@ def build_report(cfg: AppConfig, reason: str = "requested", out_dir: Path | None
         f"Segments by state:  {json.dumps(counts)}",
         f"Ledger integrity:   {integrity}",
         "",
+        *time_lines,
+        "",
         "All alerts:",
         *[f"  - {a.get('code')} [{a.get('severity_name')}] {a.get('message')}"
           for a in (status_doc or {}).get("alerts", [])],
@@ -153,6 +167,41 @@ def build_report(cfg: AppConfig, reason: str = "requested", out_dir: Path | None
     _prune(out_dir, cfg.service.diagnostics_keep)
     log.warning("diagnostic report written: %s (%s)", target, reason)
     return target
+
+
+def _present(led: Ledger, table: str, wanted: list[str]) -> list[str]:
+    """The wanted columns that exist (a ledger written by an older version may lack some)."""
+    have = {r[1] for r in led.query(f"PRAGMA table_info({table})")}
+    return [c for c in wanted if c in have]
+
+
+def _fmt(v: object, spec: str = "", unit: str = "") -> str:
+    if v is None:
+        return "not measured"
+    return f"{v:{spec}}{unit}" if isinstance(v, (int, float)) and not isinstance(v, bool) else f"{v}{unit}"
+
+
+def _time_summary(obs: object | None, led: Ledger) -> list[str]:
+    """Plain-language time-accuracy section (requirement E1, docs/03 §4.4)."""
+    lines = ["Time accuracy (latest clock observation):"]
+    if obs is None:
+        return ["Time accuracy:      no clock observations recorded"]
+    sync = {1: "yes", 0: "NO"}.get(obs["synchronized"], "unknown (not reported by the OS)")
+    lines += [
+        f"  Observed (UTC):         {obs['observed_utc']}  ({obs['reason']})",
+        f"  OS clock synchronised:  {sync}  via {obs['sync_tool'] or 'no query tool'}",
+        f"  Time source:            {obs['sync_source'] or 'unknown'}",
+        f"  Last synchronisation:   {obs['last_sync_utc'] or 'not reported'}",
+        f"  OS-measured offset:     {_fmt(obs['os_offset_s'], '+.6f', ' s')}",
+        f"  PC clock vs monotonic:  {_fmt(obs['host_clock_drift_ppm'], '+.1f', ' ppm')} "
+        f"(steps since start: {_fmt(obs['clock_steps_total_s'], '+.3f', ' s')})",
+        f"  Camera clock vs PC:     {_fmt(obs['camera_drift_ppm'], '+.1f', ' ppm')} "
+        f"(correction applied now: {_fmt(obs['time_correction_s'], '+.3f', ' s')})",
+    ]
+    if "time_correction_limited_count" in {r[1] for r in led.query("PRAGMA table_info(recording_runs)")}:
+        n = led.query("SELECT COALESCE(SUM(time_correction_limited_count), 0) FROM recording_runs")[0][0]
+        lines.append(f"  Rate-limited time corrections (all runs): {n}")
+    return lines
 
 
 def _prune(out_dir: Path, keep: int) -> None:

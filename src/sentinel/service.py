@@ -44,9 +44,12 @@ from .platform import InstanceLockError, Platform, get_platform
 from .recorder.finalizer import MAX_FINALIZE_ATTEMPTS, Finalizer, SegmentJob
 from .recorder.integrity import IntegrityWorker
 from .recorder.recovery import Recovery
+from .ledger_timing import insert_clock_observation
 from .recorder.supervisor import RecordingSupervisor
+from .recorder.timebase import ClockStepDetector
 from .status import Measurements, StatusDocument, apply_alerts, evaluate, write_status
 from .storage.monitor import DiskUsage, StorageMonitor
+from .timesync import query_os_time_sync
 
 log = logging.getLogger("sentinel.service")
 
@@ -79,6 +82,12 @@ class RecorderService:
         self._clock_anomaly_until: float = 0.0
         self._critical_codes: set[str] = set()
         self.last_report: str | None = None
+        # E1 clock observations (docs/03 §4.4): host wall-vs-monotonic drift since service start
+        # (steps excluded) and periodic OS time-sync records.
+        self._host_clock: ClockStepDetector | None = None
+        self._next_clock_obs = 0.0
+        self._clock_obs_thread: threading.Thread | None = None
+        self.last_clock_observation: dict | None = None
 
     # ------------------------------------------------------------------
     def run(self) -> int:
@@ -141,6 +150,9 @@ class RecorderService:
         log.info("startup recovery: %s", report)
         self.finalizer.start()
         self.integrity.start()
+        self._host_clock = ClockStepDetector(self.clock.wall(), self.clock.mono(), cfg.recording.clock_step_tolerance_s)
+        self._next_clock_obs = self.clock.mono() + cfg.service.clock_observation_interval_s
+        self._sample_clock("startup")
         self.supervisor = RecordingSupervisor(
             cfg, self.ledger, self.platform, self.storage, self.finalizer,
             url_with_credentials(cfg.camera.url, creds), self.stop_event, clock=self.clock,
@@ -168,6 +180,8 @@ class RecorderService:
             self._write_status(force=True, stopping=exit_code == EXIT_OK)
             if exit_code != EXIT_OK:
                 self._maybe_report()
+            if self._clock_obs_thread is not None:
+                self._clock_obs_thread.join(15)
             self.ledger.close()
         return exit_code
 
@@ -212,10 +226,59 @@ class RecorderService:
                 self.ledger.flag_open_gap_clock_anomaly(self.cfg.camera.id)
             except Exception:
                 log.exception("could not record clock step")
+            self._sample_clock("clock_step")
         self._clock_offset = offset
+        if self._host_clock is not None:
+            self._host_clock.update(offset + now, now)
         if now >= self._next_ntp:
             self._next_ntp = now + 300.0
             self._ntp = self.platform.clock_synchronized()
+        if now >= self._next_clock_obs:
+            self._next_clock_obs = now + self.cfg.service.clock_observation_interval_s
+            self._sample_clock("periodic")
+
+    # ------------------------------------------------------------------ clock observations (E1)
+    def _sample_clock(self, reason: str) -> None:
+        """Record a clock observation in the background (OS query commands can take seconds;
+        the recording loop must not wait for them). Skipped if one is still running."""
+        if self._clock_obs_thread is not None and self._clock_obs_thread.is_alive():
+            return
+        self._clock_obs_thread = threading.Thread(target=self._observe_clock, args=(reason,),
+                                                  name="clock-observation", daemon=True)
+        self._clock_obs_thread.start()
+
+    def _observe_clock(self, reason: str) -> None:
+        try:
+            wall, mono = self.clock.wall(), self.clock.mono()
+            osync = query_os_time_sync()
+            host = self._host_clock
+            cols: dict = {
+                "observed_utc": iso_utc(wall), "mono_s": mono, "reason": reason, "platform": self.platform.name,
+                "sync_tool": osync.tool,
+                "synchronized": None if osync.synchronized is None else int(osync.synchronized),
+                "sync_source": osync.source, "last_sync_utc": osync.last_sync_utc, "os_offset_s": osync.offset_s,
+                "os_detail": json.dumps(osync.detail, sort_keys=True, default=str),
+                "wall_minus_mono_s": wall - mono,
+                "host_clock_drift_s": round(host.drift_s, 6) if host else None,
+                "host_clock_drift_ppm": (round(host.drift_ppm, 3) if host and host.drift_ppm is not None else None),
+                "clock_steps_total_s": round(host.total_s, 6) if host else None,
+            }
+            sup = self.supervisor
+            if sup is not None:
+                with sup.live.lock:
+                    lv = sup.live
+                    if lv.ffmpeg_running:
+                        cols.update(run_id=lv.run_id, stream_time_s=lv.last_out_time_s,
+                                    camera_drift_ppm=lv.camera_drift_ppm, time_correction_s=lv.time_correction_s)
+            assert self.ledger is not None
+            insert_clock_observation(self.ledger, cols)
+            self.last_clock_observation = {k: cols.get(k) for k in (
+                "observed_utc", "reason", "sync_tool", "synchronized", "sync_source", "last_sync_utc", "os_offset_s",
+                "host_clock_drift_ppm")}
+            log.info("clock observation (%s): synchronized=%s source=%s offset=%s host drift=%s ppm",
+                     reason, osync.synchronized, osync.source, osync.offset_s, cols["host_clock_drift_ppm"])
+        except Exception:
+            log.exception("could not record clock observation")
 
     def _janitor(self, now: float) -> None:
         assert self.ledger is not None and self.finalizer is not None and self.integrity is not None
@@ -291,6 +354,9 @@ class RecorderService:
                           "stream_time_s": lv.last_out_time_s, "fps": lv.fps, "attempts": lv.attempts,
                           "last_end_reason": lv.last_end_reason, "clock_step_s": round(lv.clock_step_s, 3),
                           "stream_lag_s": round(lv.lag_s, 3), "internal_errors": lv.internal_errors,
+                          "camera_drift_ppm": lv.camera_drift_ppm, "host_clock_drift_ppm": lv.host_clock_drift_ppm,
+                          "time_correction_s": (round(lv.time_correction_s, 3)
+                                                if lv.time_correction_s is not None else None),
                           "retry_in_s": (round(lv.next_attempt_mono - now, 1) if lv.next_attempt_mono else None)}
 
         since_seal = None
@@ -377,7 +443,7 @@ class RecorderService:
             generated_utc=iso_utc(time.time()), heartbeat_epoch=time.time(),
             service={"version": __version__, "platform": self.platform.name,
                      "uptime_s": round(now - self._started_mono, 1), "simulated_camera": cfg.camera.development_source,
-                     "clock_synchronized": self._ntp},
+                     "clock_synchronized": self._ntp, "clock_observation": self.last_clock_observation},
             recording=live_d, storage=storage_d, integrity=integrity_d, last_segment=last_seg, open_gap=gap)
         apply_alerts(doc, d.alerts)
         return doc
