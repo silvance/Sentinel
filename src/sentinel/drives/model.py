@@ -119,6 +119,7 @@ class VolumeInfo:
     health: str | None = None
     os_device: str | None = None        # Linux maj:min, for matching protected paths
     dev_path: str | None = None         # Linux block device node (/dev/sdb1), diagnostics + mounting
+    fs_serial: str | None = None        # filesystem serial (Windows Win32_Volume.SerialNumber) / Linux fs UUID
 
     @property
     def used_bytes(self) -> int | None:
@@ -138,6 +139,7 @@ class PartitionInfo:
     is_boot: bool = False
     volume: VolumeInfo | None = None
     os_device: str | None = None        # Linux maj:min of the partition node
+    offset: int | None = None           # bytes from the start of the disk
 
 
 @dataclass(frozen=True)
@@ -152,11 +154,14 @@ class DriveIdentity:
     disk_guid: str | None               # GPT disk GUID / PTUUID; None when no partition table
     partition_guids: tuple[str, ...]    # sorted
     volume_ids: tuple[str, ...]         # sorted
+    mbr_signature: str | None = None    # MBR disk signature (GPT disks: None; the disk GUID is used)
+    partition_layout: tuple[str, ...] = ()   # "offset:size" per partition, sorted by offset
+    fs_serials: tuple[str, ...] = ()    # sorted filesystem serial numbers / UUIDs
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
-        d["partition_guids"] = list(self.partition_guids)
-        d["volume_ids"] = list(self.volume_ids)
+        for k in ("partition_guids", "volume_ids", "partition_layout", "fs_serials"):
+            d[k] = list(getattr(self, k))
         return d
 
     def fingerprint(self) -> str:
@@ -201,14 +206,35 @@ class DiskInfo:
     location: str | None = None
     partitions: tuple[PartitionInfo, ...] = field(default_factory=tuple)
     os_devices: tuple[str, ...] = ()    # Linux: maj:min of the disk and everything stacked on it (LVM, LUKS)
+    mbr_signature: str | None = None    # Windows Get-Disk Signature (MBR only); Linux PTUUID of a dos table
 
     @property
     def identity(self) -> DriveIdentity:
         pg = sorted(p.guid for p in self.partitions if p.guid)
         vids = sorted(p.volume.volume_id for p in self.partitions if p.volume is not None)
+        layout = tuple(f"{p.offset if p.offset is not None else '?'}:{p.size_bytes}"
+                       for p in sorted(self.partitions, key=lambda x: (x.offset or 0, x.number)))
+        serials = sorted(p.volume.fs_serial for p in self.partitions if p.volume is not None and p.volume.fs_serial)
         return DriveIdentity(serial=self.serial, unique_id=self.unique_id, model=self.model,
                              size_bytes=self.size_bytes, bus_type=self.bus_type, disk_guid=self.disk_guid,
-                             partition_guids=tuple(pg), volume_ids=tuple(vids))
+                             partition_guids=tuple(pg), volume_ids=tuple(vids), mbr_signature=self.mbr_signature,
+                             partition_layout=layout, fs_serials=tuple(serials))
+
+    def identity_gaps(self) -> list[str]:
+        """Content identifiers that should exist but were not reported. Preparation is refused when
+        any is missing, because the elevated helper could not tell this disk from a look-alike."""
+        gaps = []
+        if self.partition_style == "GPT" and not self.disk_guid:
+            gaps.append("disk_guid")
+        if self.partition_style == "MBR" and not self.mbr_signature:
+            gaps.append("mbr_signature")
+        for p in self.partitions:
+            if self.platform == "windows" and p.offset is None:
+                gaps.append(f"partition_{p.number}_offset")
+            v = p.volume
+            if v is not None and v.filesystem is not None and not v.fs_serial:
+                gaps.append(f"partition_{p.number}_fs_serial")
+        return gaps
 
     @property
     def volumes(self) -> list[VolumeInfo]:
@@ -226,6 +252,7 @@ class DriveClass(StrEnum):
     BLANK = "BLANK"
     WRONG_FORMAT = "WRONG_FORMAT"
     FOREIGN_DATA = "FOREIGN_DATA"
+    SENTINEL_EVIDENCE = "SENTINEL_EVIDENCE"   # holds (or held) Sentinel recordings: never erased by this tool
     UNSUITABLE = "UNSUITABLE"
 
 

@@ -24,6 +24,7 @@ class FakeEnv:
         self.protected = protected_for()
         self.windows = True
         self.cfg = SimpleNamespace(data_path=tmp / "data") if cfg else None
+        self.config_path = tmp / "sentinel.toml"
         self._disks = disks
         self._insp = inspector or FakeInspector()
 
@@ -32,6 +33,12 @@ class FakeEnv:
 
     def classify(self):
         return classify_all(self.enumerate(), self.policy, self.protected, inspector=self._insp)
+
+
+@pytest.fixture(autouse=True)
+def installed_ok(monkeypatch):
+    """Treat the fake configuration as the installed one (the real check is tested separately)."""
+    monkeypatch.setattr(cli._installed, "installed_config_problems", lambda path, cfg: [])
 
 
 @pytest.fixture()

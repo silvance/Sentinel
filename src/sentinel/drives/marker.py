@@ -41,6 +41,7 @@ class RootContents:
     marker: dict[str, Any] | None = None    # valid marker, if present
     marker_error: str | None = None         # marker present but invalid
     error: str | None = None
+    sentinel_signs: tuple[str, ...] = ()    # evidence that Sentinel wrote this volume (see sentinel_signs())
 
 
 def validate_marker(data: Any) -> str | None:
@@ -70,14 +71,45 @@ def inspect_root(root: str | Path) -> RootContents:
     entries = tuple(sorted(n for n in names if n.lower() not in IGNORABLE_ROOT_ENTRIES))
     marker = None
     marker_error = None
-    if any(n == MARKER_NAME for n in names):
+    real = next((n for n in names if n.lower() == MARKER_NAME.lower()), None)
+    if real is not None:
         try:
-            data = json.loads((root / MARKER_NAME).read_text(encoding="utf-8"))
+            data = json.loads((root / real).read_text(encoding="utf-8"))
             marker_error = validate_marker(data)
             marker = data if marker_error is None else None
         except (OSError, ValueError) as exc:
             marker_error = f"unreadable: {exc}"
-    return RootContents(readable=True, entries=entries, marker=marker, marker_error=marker_error)
+    return RootContents(readable=True, entries=entries, marker=marker, marker_error=marker_error,
+                        sentinel_signs=sentinel_signs(root, names))
+
+
+# Layouts written by Sentinel (docs/04 §2 archive drive, §6 review drive / export branch). Matching is
+# deliberately generous: a false positive only means "not erased by this tool, call support".
+REVIEW_DIRS = ("recordings", "originals", "manifests", "reports", "quarantine")
+
+
+def sentinel_signs(root: Path, names: list[str]) -> tuple[str, ...]:
+    low = {n.lower(): n for n in names}
+    signs = []
+    if MARKER_NAME.lower() in low:
+        signs.append("marker")
+    if (MARKER_NAME + ".partial").lower() in low:
+        signs.append("marker_partial")
+    if "sentinel" in low and (root / low["sentinel"]).is_dir():
+        signs.append("archive_layout")          # Sentinel/INDEX/, Sentinel/<camera>/<date>/...
+    if "manifests" in low:
+        m = root / low["manifests"]
+        try:
+            if m.is_dir() and any(e.name.lower() in ("export_manifest.json", "sha256sums.txt") for e in os.scandir(m)):
+                signs.append("export_manifest")
+        except OSError:
+            signs.append("export_manifest_unreadable")
+    review = [d for d in REVIEW_DIRS if d in low]
+    if "readme_first.txt" in low and review:
+        signs.append("review_layout")
+    elif len(review) >= 2:
+        signs.append("review_layout")
+    return tuple(signs)
 
 
 def inspect_volume(volume: Any) -> RootContents:

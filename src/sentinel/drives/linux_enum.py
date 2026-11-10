@@ -113,7 +113,7 @@ def _volume(node: dict[str, Any], stacked: list[dict[str, Any]]) -> VolumeInfo |
         free_bytes=avail if avail is not None else None,
         mount_paths=tuple(m for m in mounts if m != "[SWAP]"),
         page_file="[SWAP]" in mounts, health=None, os_device=norm_text(node.get("maj:min")),
-        dev_path=norm_text(node.get("path")))
+        dev_path=norm_text(node.get("path")), fs_serial=uuid)
 
 
 def parse_lsblk(data: dict[str, Any]) -> list[DiskInfo]:
@@ -147,7 +147,8 @@ def parse_lsblk(data: dict[str, Any]) -> list[DiskInfo]:
             is_read_only=_flag(d.get("ro")), health=None,
             removable=_flag(d.get("rm")) or _flag(d.get("hotplug")),
             device_path=norm_text(d.get("path")), partitions=tuple(partitions),
-            os_devices=tuple(x for x in devs if x)))
+            os_devices=tuple(x for x in devs if x),
+            mbr_signature=norm_guid(d.get("ptuuid")) if style == "MBR" else None))
     return out
 
 

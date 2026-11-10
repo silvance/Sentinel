@@ -73,30 +73,50 @@ class PreparePlan:
 def _assert_plannable(disk: DiskInfo, label: str, protected_ids: tuple[str, ...]) -> None:
     """Independent last-line guard (classification already refused these)."""
     if disk.is_system or disk.is_boot or any(p.is_system or p.is_boot for p in disk.partitions):
-        raise PrepareRefused("system_disk", "refusing to plan preparation of a system or boot disk")
+        raise PrepareRefused("system_disk", "refusing to plan erasing a system or boot disk")
     if any(v.page_file for v in disk.volumes):
-        raise PrepareRefused("page_file", "refusing to plan preparation of a disk holding a page file")
+        raise PrepareRefused("page_file", "refusing to plan erasing a disk holding a page file")
     vids = {v.volume_id.lower() for v in disk.volumes}
     devs = set(disk.os_devices)
     if any(p.lower() in vids or p in devs for p in protected_ids):
-        raise PrepareRefused("recording_storage", "refusing to plan preparation of a protected disk")
+        raise PrepareRefused("recording_storage", "refusing to plan erasing a protected disk")
     if not _LABEL_RE.fullmatch(label):
         raise PrepareRefused("bad_label", f"invalid volume label {label!r}")
     if not disk.identity.has_hardware_identity:
         raise PrepareRefused("no_identity", "disk has no serial number or unique id")
+    gaps = disk.identity_gaps()
+    if gaps:  # review finding 1.2: never rely on a weaker identity than the disk can provide
+        raise PrepareRefused("identity_incomplete", "This drive cannot be identified reliably enough to be erased. "
+                             "Nothing was erased.", {"missing": gaps})
 
 
+# Review finding 1.2: inside the elevated helper, the disk must match on hardware identity AND on every
+# content identifier captured at confirmation — disk GUID (GPT) or disk signature (MBR), partition GUIDs,
+# partition offsets+sizes, volume GUIDs and filesystem serial numbers. Lists are compared as sets
+# (ordinal, lower case) to avoid culture-dependent sorting. A disk that was RAW when confirmed must
+# still have no partitions. Progress (step + PID) is written to the result file at every step so that
+# a timed-out run can still be reported honestly (finding 1.6).
 WINDOWS_TEMPLATE = r"""
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $exp = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('__EXPECTED__')) | ConvertFrom-Json
 $step = 'start'
 function Out-Result([hashtable]$r) {
-    $r['step'] = $step
+    $r['step'] = $script:step
+    $r['pid'] = $PID
     ($r | ConvertTo-Json -Depth 4 -Compress) | Set-Content -LiteralPath $exp.result_path -Encoding UTF8
 }
+function Set-Step([string]$s) { $script:step = $s; Out-Result @{ ok = $false; running = $true } }
 function N([object]$v) { if ($null -eq $v) { return '' }; return ([string]$v).Trim() }
 function G([object]$v) { return (N $v).Trim('{', '}').ToLowerInvariant() }
+function Same-Set($actual, $expected) {
+    $a = @($actual | Where-Object { $_ -ne '' -and $null -ne $_ })
+    $e = @($expected | Where-Object { $_ -ne '' -and $null -ne $_ })
+    if ($a.Count -ne $e.Count) { return $false }
+    foreach ($x in $a) { if ($e -notcontains $x) { return $false } }
+    foreach ($x in $e) { if ($a -notcontains $x) { return $false } }
+    return $true
+}
 function Assert-Disk($d, [bool]$contents) {
     $model = N $d.Model
     if (-not $model) { $model = N $d.FriendlyName }
@@ -113,39 +133,50 @@ function Assert-Disk($d, [bool]$contents) {
             if ($ap -and ($exp.protected_volumes -contains ([string]$ap).ToLowerInvariant())) { throw 'PROTECTED volume' }
         }
     }
-    foreach ($w in @(Get-CimInstance -ClassName Win32_Volume | Where-Object { $_.PageFilePresent })) {
+    $w32 = @(Get-CimInstance -ClassName Win32_Volume)
+    foreach ($w in @($w32 | Where-Object { $_.PageFilePresent })) {
         foreach ($p in $parts) {
             if (@($p.AccessPaths) -contains $w.DeviceID) { throw 'PROTECTED page file' }
         }
     }
     if ($contents) {
+        if ((N $d.PartitionStyle) -ne $exp.partition_style) { throw 'IDENTITY_MISMATCH partition_style' }
         if ((G $d.Guid) -ne $exp.disk_guid) { throw 'IDENTITY_MISMATCH disk_guid' }
-        $pg = (@($parts | ForEach-Object { G $_.Guid } | Where-Object { $_ }) | Sort-Object) -join ','
-        if ($pg -ne $exp.partition_guids) { throw 'IDENTITY_MISMATCH partition_guids' }
+        if ($exp.partition_style -eq 'MBR' -and ((N $d.Signature) -ne $exp.mbr_signature)) { throw 'IDENTITY_MISMATCH mbr_signature' }
+        if (-not (Same-Set @($parts | ForEach-Object { G $_.Guid }) @($exp.partition_guids))) { throw 'IDENTITY_MISMATCH partition_guids' }
+        $layout = @($parts | ForEach-Object { '{0}:{1}' -f [uint64]$_.Offset, [uint64]$_.Size })
+        if (-not (Same-Set $layout @($exp.partition_layout))) { throw 'IDENTITY_MISMATCH partition_layout' }
+        $listed = @(Get-Volume | ForEach-Object { ([string]$_.Path).ToLowerInvariant() })
+        $vids = @($parts | ForEach-Object { @($_.AccessPaths) } | Where-Object { $_ } |
+                  ForEach-Object { ([string]$_).ToLowerInvariant() } | Where-Object { $_.StartsWith('\\?\volume{') -and ($listed -contains $_) })
+        if (-not (Same-Set $vids @($exp.volume_ids))) { throw 'IDENTITY_MISMATCH volume_ids' }
+        $serials = @($w32 | Where-Object { $vids -contains ([string]$_.DeviceID).ToLowerInvariant() } |
+                     Where-Object { $_.SerialNumber } | ForEach-Object { [string]([uint64]$_.SerialNumber) })
+        if (-not (Same-Set $serials @($exp.fs_serials))) { throw 'IDENTITY_MISMATCH fs_serials' }
     }
 }
 try {
-    $step = 'verify'
+    Set-Step 'verify'
     $d = Get-Disk -Number $exp.disk_number
     Assert-Disk $d $true
-    $step = 'clear'
+    Set-Step 'clear'
     if ((N $d.PartitionStyle) -ne 'RAW') {
         Clear-Disk -InputObject $d -RemoveData -RemoveOEM -Confirm:$false
     }
-    $step = 'initialize'
+    Set-Step 'initialize'
     $d = Get-Disk -Number $exp.disk_number
     Assert-Disk $d $false
     Initialize-Disk -InputObject $d -PartitionStyle GPT -Confirm:$false
-    $step = 'partition'
+    Set-Step 'partition'
     $d = Get-Disk -Number $exp.disk_number
     Assert-Disk $d $false
     $p = New-Partition -InputObject $d -UseMaximumSize
-    $step = 'format'
+    Set-Step 'format'
     $v = Format-Volume -Partition $p -FileSystem $exp.filesystem -NewFileSystemLabel $exp.label -Confirm:$false -Force
-    $step = 'letter'
+    Set-Step 'letter'
     $letter = 'assigned'
     try { Add-PartitionAccessPath -InputObject $p -AssignDriveLetter } catch { $letter = N $_.Exception.Message }
-    $step = 'done'
+    $script:step = 'done'
     $p = Get-Partition -DiskNumber $exp.disk_number -PartitionNumber $p.PartitionNumber
     Out-Result @{ ok = $true; partition_guid = (G $p.Guid); access_paths = @($p.AccessPaths);
                   filesystem = (N $v.FileSystem); label = (N $v.FileSystemLabel); drive_letter = $letter }
@@ -160,6 +191,21 @@ try {
 """
 
 
+def windows_expected(disk: DiskInfo, *, filesystem: str, label: str, protected_volume_ids: tuple[str, ...],
+                     result_path: str) -> dict[str, object]:
+    ident = disk.identity
+    return {
+        "disk_number": int(disk.disk_id),
+        "serial": ident.serial or "", "unique_id": ident.unique_id or "", "model": ident.model or "",
+        "size": str(ident.size_bytes), "partition_style": disk.partition_style or "RAW",
+        "disk_guid": ident.disk_guid or "", "mbr_signature": ident.mbr_signature or "",
+        "partition_guids": list(ident.partition_guids), "partition_layout": list(ident.partition_layout),
+        "volume_ids": sorted(v.lower() for v in ident.volume_ids), "fs_serials": list(ident.fs_serials),
+        "protected_volumes": sorted(v.lower() for v in protected_volume_ids),
+        "filesystem": WINDOWS_FS[filesystem], "label": label, "result_path": result_path,
+    }
+
+
 def build_windows_script(disk: DiskInfo, *, filesystem: str, label: str, protected_volume_ids: tuple[str, ...],
                          result_path: str) -> str:
     if disk.platform != "windows":
@@ -167,15 +213,8 @@ def build_windows_script(disk: DiskInfo, *, filesystem: str, label: str, protect
     if filesystem not in WINDOWS_FS:
         raise PrepareRefused("filesystem_unsupported", f"{filesystem} cannot be created on Windows")
     _assert_plannable(disk, label, protected_volume_ids)
-    ident = disk.identity
-    expected = {
-        "disk_number": int(disk.disk_id),
-        "serial": ident.serial or "", "unique_id": ident.unique_id or "", "model": ident.model or "",
-        "size": str(ident.size_bytes), "disk_guid": ident.disk_guid or "",
-        "partition_guids": ",".join(ident.partition_guids),
-        "protected_volumes": sorted(v.lower() for v in protected_volume_ids),
-        "filesystem": WINDOWS_FS[filesystem], "label": label, "result_path": result_path,
-    }
+    expected = windows_expected(disk, filesystem=filesystem, label=label, protected_volume_ids=protected_volume_ids,
+                                result_path=result_path)
     return WINDOWS_TEMPLATE.replace("__EXPECTED__", ps_b64_json(expected))
 
 
@@ -200,6 +239,8 @@ def build_linux_script(disk: DiskInfo, *, filesystem: str, label: str, protected
     parttype = "L" if filesystem == "ext4" else GPT_BASIC_DATA.upper()
     mkfs = " ".join(q(x) for x in LINUX_MKFS[filesystem])
     prot = " ".join(q(p) for p in sorted(protected_devices))
+    pg = "".join(f"{g} " for g in sorted(x.lower() for x in ident.partition_guids))
+    fsu = "".join(f"{u} " for u in sorted(x.lower() for x in ident.fs_serials))
     return f"""set -eu
 DEV={q(disk.device_path)}
 step=verify
@@ -215,6 +256,8 @@ check() {{
 }}
 check
 [ "$(lsblk -dno PTUUID "$DEV" | tr -d '[:space:]')" = {q(ident.disk_guid or '')} ] || fail 3 IDENTITY_MISMATCH_ptuuid
+[ "$(lsblk -nro PARTUUID "$DEV" | grep . | tr 'A-Z' 'a-z' | LC_ALL=C sort | tr '\\n' ' ')" = {q(pg)} ] || fail 3 IDENTITY_MISMATCH_partuuid
+[ "$(lsblk -nro UUID "$DEV" | grep . | tr 'A-Z' 'a-z' | LC_ALL=C sort | tr '\\n' ' ')" = {q(fsu)} ] || fail 3 IDENTITY_MISMATCH_fsuuid
 step=clear
 wipefs --all "$DEV" >/dev/null || fail 2 wipefs_failed
 step=partition

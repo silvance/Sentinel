@@ -52,9 +52,12 @@ def test_windows_script_uses_verified_cmdlets_in_order() -> None:
 def test_windows_script_embeds_identity_as_data() -> None:
     d = exfat_disk()
     exp = _expected(_script(d))
+    v = d.volumes[0]
     assert exp == {
         "disk_number": 9, "serial": d.serial, "unique_id": d.unique_id, "model": d.model, "size": str(d.size_bytes),
-        "disk_guid": d.disk_guid, "partition_guids": ",".join(d.identity.partition_guids),
+        "partition_style": "GPT", "disk_guid": d.disk_guid, "mbr_signature": "",
+        "partition_guids": list(d.identity.partition_guids), "partition_layout": [f"135266304:{v.size_bytes}"],
+        "volume_ids": [v.volume_id.lower()], "fs_serials": [v.fs_serial],
         "protected_volumes": [SYSTEM_VOL.lower()], "filesystem": "NTFS", "label": "SENTINEL_7",
         "result_path": "C:\\tmp\\r.json"}
 
@@ -69,7 +72,9 @@ def test_hostile_hardware_strings_are_not_code() -> None:
 def test_exfat_and_raw_disk() -> None:
     assert _expected(_script(filesystem="exfat", label="SENTINEL_9"))["filesystem"] == "exFAT"
     s = _script(blank_disk())
-    assert _expected(s)["disk_guid"] == "" and _expected(s)["partition_guids"] == ""
+    e = _expected(s)
+    assert e["disk_guid"] == "" and e["partition_guids"] == [] and e["partition_layout"] == []
+    assert e["partition_style"] == "RAW"
     assert "if ((N $d.PartitionStyle) -ne 'RAW')" in s  # Clear-Disk is skipped on an uninitialised disk
 
 
@@ -204,7 +209,7 @@ def test_parse_linux_result() -> None:
 
 def test_drive_alert_codes_present_and_plain() -> None:
     codes = [c for c in CATALOG if c.startswith("M-")]
-    assert codes == [f"M-00{i}" for i in range(1, 9)]
+    assert codes == [f"M-00{i}" for i in range(1, 10)]
     assert "D-001" in CATALOG and CATALOG["D-001"].headline == "Recording database problem"  # unchanged
     for c in codes:
         d = CATALOG[c]

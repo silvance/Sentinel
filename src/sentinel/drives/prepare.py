@@ -1,4 +1,5 @@
-""""Prepare This Drive": guarded, confirmed, audited preparation of an archive/review drive (S2, S3).
+""""Erase and Set Up Drive" (docs/04 "Prepare This Drive"; renamed for operators, review finding 1.4):
+guarded, confirmed, audited preparation of an archive/review drive (S2, S3).
 
 Never automatic. The only entry point that changes a disk is :func:`prepare_drive`, and it needs:
 
@@ -55,6 +56,7 @@ from .commands import (
     build_windows_plan,
 )
 from .errors import IdentityChanged, PrepareFailed, PrepareRefused
+from .known import load_known
 from .marker import MARKER_FORMAT, MARKER_VERSION, inspect_volume, write_marker, write_read_back_test
 from .model import KIND_MSR, DiskInfo, DriveClass, VolumeInfo, serial_tail
 from .policy import DrivePolicy
@@ -141,14 +143,16 @@ def check_guards(c: Classification, confirmation: Confirmation | None, auth: Aut
                  policy: DrivePolicy) -> None:
     """Raise PrepareRefused / IdentityChanged unless this exact drive may be prepared now."""
     if confirmation is None:
-        raise PrepareRefused("not_confirmed", "Preparation was not confirmed. Nothing was erased.")
+        raise PrepareRefused("not_confirmed", "Erasing was not confirmed. Nothing was erased.")
     if auth is None or not auth.who.strip():
-        raise PrepareRefused("no_operator", "The person preparing the drive was not identified. Nothing was erased.")
+        raise PrepareRefused("no_operator", "The person erasing the drive was not identified. Nothing was erased.")
+    if c.drive_class is DriveClass.SENTINEL_EVIDENCE:
+        raise PrepareRefused("sentinel_evidence", c.message, {"reasons": list(c.reasons)}, code="M-009")
     if c.drive_class is DriveClass.UNSUITABLE:
         raise PrepareRefused(c.refusal or "unsuitable", c.message, {"reasons": list(c.reasons)},
                              code="M-008" if c.alert_code == "M-008" else "M-004")
     if c.drive_class is DriveClass.READY:
-        raise PrepareRefused("already_prepared", "This drive is already a prepared archive drive. Nothing was erased.")
+        raise PrepareRefused("already_prepared", "This drive is already set up as an archive drive. Nothing was erased.")
     if confirmation.disk_id != c.disk.disk_id or confirmation.fingerprint != c.disk.identity.fingerprint():
         raise IdentityChanged("identity_changed", "The drive changed after it was confirmed. Nothing was erased.")
     if confirmation.drive_class is not c.drive_class:
@@ -156,7 +160,7 @@ def check_guards(c: Classification, confirmation: Confirmation | None, auth: Aut
                               "Nothing was erased.", {"confirmed": str(confirmation.drive_class),
                                                        "now": str(c.drive_class)})
     if not c.can_prepare:
-        raise PrepareRefused(c.refusal or "not_allowed", "Preparing drives that contain other files is not "
+        raise PrepareRefused(c.refusal or "not_allowed", "Erasing drives that contain other files is not "
                              "allowed on this system. Nothing was erased.")
     if c.needs_admin and not auth.administrator:
         raise PrepareRefused("admin_required", "An administrator must approve erasing this drive. Nothing was erased.")
@@ -166,6 +170,10 @@ def check_guards(c: Classification, confirmation: Confirmation | None, auth: Aut
         if want is None or typed != want:
             raise PrepareRefused("serial_mismatch", "The serial number characters typed do not match this drive. "
                                  "Nothing was erased.")
+    gaps = c.disk.identity_gaps()
+    if gaps:
+        raise PrepareRefused("identity_incomplete", "This drive cannot be identified reliably enough to be erased. "
+                             "Nothing was erased.", {"missing": gaps})
 
 
 def _find(disks: list[DiskInfo], disk_id: str) -> DiskInfo | None:
@@ -174,7 +182,8 @@ def _find(disks: list[DiskInfo], disk_id: str) -> DiskInfo | None:
 
 def current_classification(ctx: PrepareContext, disk_id: str) -> tuple[Classification, list[DiskInfo]]:
     disks = ctx.enumerate()
-    classes, _problems = classify_all(disks, ctx.policy, ctx.protected, inspector=ctx.inspector)
+    known = load_known(ctx.audit)  # re-read every time: evidence drives are never erased (finding 1.1)
+    classes, _problems = classify_all(disks, ctx.policy, ctx.protected, inspector=ctx.inspector, known=known)
     c = next((x for x in classes if x.disk.disk_id == disk_id), None)
     if c is None:
         raise IdentityChanged("disk_gone", "The drive is no longer connected. Nothing was erased.")
@@ -262,10 +271,17 @@ def prepare_drive(ctx: PrepareContext, disk_id: str, confirmation: Confirmation 
     res = hr.result or {}
     step = str(res.get("step") or "start")
     if hr.exit_code != EXIT_OK or not res.get("ok"):
-        erased = step not in NON_DESTRUCTIVE_STEPS
+        still_running = bool(res.get("still_running"))
+        # A helper that may still be running can go on to erase even if it was last seen verifying.
+        erased = still_running or step not in NON_DESTRUCTIVE_STEPS
         detail = {**base, "exit_code": hr.exit_code, "step": step, "error": res.get("error"),
-                  "stderr": hr.stderr[-1000:], "erase_started": erased}
-        _audit(ctx, "drive_prepare_failed", f"Drive preparation failed at step {step}", detail, severity="error")
+                  "stderr": hr.stderr[-1000:], "erase_started": erased,
+                  "helper_pid": res.get("helper_pid", res.get("pid")), "still_running": still_running,
+                  "terminate_error": res.get("terminate_error")}
+        _audit(ctx, "drive_prepare_failed", f"Drive setup failed at step {step}", detail, severity="error")
+        if still_running:
+            raise PrepareFailed("helper_still_running", "Drive setup is taking too long and may still be running. "
+                                "Do not unplug the drive. Contact technical support.", detail)
         if hr.exit_code == EXIT_ELEVATION_CANCELLED:
             raise PrepareRefused("elevation_cancelled", "Administrator approval was not given. Nothing was erased.")
         if not erased and hr.exit_code == EXIT_IDENTITY_MISMATCH:
@@ -274,9 +290,9 @@ def prepare_drive(ctx: PrepareContext, disk_id: str, confirmation: Confirmation 
         if not erased and hr.exit_code == EXIT_PROTECTED:
             raise PrepareRefused("protected", "This drive is used by the computer itself. Nothing was erased.", detail)
         if not erased:
-            raise PrepareFailed("helper_failed", "Drive preparation could not start. Nothing was erased.", detail)
-        raise PrepareFailed("prepare_incomplete", "Drive preparation did not finish. The drive may be partly erased "
-                            "and must not be used until it is prepared again.", detail)
+            raise PrepareFailed("helper_failed", "Drive setup could not start. Nothing was erased.", detail)
+        raise PrepareFailed("prepare_incomplete", "Drive setup did not finish. The drive may be partly erased "
+                            "and must not be used until it is set up again.", detail)
     return _finish(ctx, plan, c, auth, base, res, time.monotonic() - started)
 
 
@@ -298,7 +314,7 @@ def _finish(ctx: PrepareContext, plan: PreparePlan, before: Classification, auth
         if disk and len(vols) == 1 and (vols[0].mount_paths or ctx.mount_volume):
             break
         if time.monotonic() >= deadline:
-            raise fail("not_found_after_prepare", "The prepared drive could not be found again. "
+            raise fail("not_found_after_prepare", "The drive could not be found again after setup. "
                        "Do not use this drive. Contact technical support.")
         time.sleep(0.5)
     data_parts = [p for p in disk.partitions if p.kind != KIND_MSR]
@@ -328,11 +344,11 @@ def _finish(ctx: PrepareContext, plan: PreparePlan, before: Classification, auth
         }
         written = write_marker(root, marker)
     except (OSError, ValueError) as exc:
-        raise fail("marker_failed", "The drive was prepared but could not be written to. Do not use this drive. "
+        raise fail("marker_failed", "The drive was set up but could not be written to. Do not use this drive. "
                    "Contact technical support.", {"error": str(exc)}) from None
     after, disks = current_classification(ctx, disk.disk_id)
     if after.drive_class is not DriveClass.READY or (after.marker or {}).get("drive_uuid") != plan.drive_uuid:
-        raise fail("not_ready_after_prepare", "The drive was prepared but is not recognised. Contact technical support.",
+        raise fail("not_ready_after_prepare", "The drive was set up but is not recognised. Contact technical support.",
                    {"class": str(after.drive_class), "reasons": list(after.reasons)})
     _audit(ctx, "drive_prepared", f"Drive prepared as {plan.label} by {auth.who}: {disk.describe()}",
            {**base, "identity_after": disk.identity.to_dict(), "write_test": test, "helper_seconds": round(helper_s, 1),
@@ -359,6 +375,53 @@ def _os_user() -> str:
 
 
 # ---------------------------------------------------------------------------- runners
+
+EXIT_TIMEOUT = 5
+
+
+def terminate_process(pid: int, expected_image: str = "powershell.exe") -> tuple[bool, str | None]:
+    """Try to stop the timed-out elevated helper (finding 1.6).
+
+    Expected to FAIL from a non-elevated parent: Windows' mandatory integrity policy denies
+    PROCESS_TERMINATE on a High-integrity (elevated) process to a Medium-integrity caller, even of
+    the same user. The failure is reported, never hidden. To avoid killing an unrelated process that
+    reused the PID, the image name is checked first. NOT VERIFIED against a real elevated helper.
+    """
+    if sys.platform != "win32":
+        return False, "not supported on this platform"
+    import ctypes
+    from ctypes import wintypes
+
+    PROCESS_TERMINATE = 0x0001
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    k32.OpenProcess.restype = wintypes.HANDLE
+    k32.QueryFullProcessImageNameW.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
+                                               ctypes.POINTER(wintypes.DWORD)]
+    k32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    h = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not h:
+        return False, f"cannot open process {pid} (error {ctypes.get_last_error()}); it may have exited"
+    try:
+        buf = ctypes.create_unicode_buffer(1024)
+        n = wintypes.DWORD(len(buf))
+        if not k32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(n)) or \
+                not buf.value.lower().endswith(expected_image):
+            return False, f"process {pid} is not the helper ({buf.value or 'unknown image'}); not terminated"
+    finally:
+        k32.CloseHandle(h)
+    h = k32.OpenProcess(PROCESS_TERMINATE, False, pid)
+    if not h:
+        return False, f"access denied terminating elevated helper {pid} (error {ctypes.get_last_error()})"
+    try:
+        if not k32.TerminateProcess(h, 1):
+            return False, f"TerminateProcess failed (error {ctypes.get_last_error()})"
+    finally:
+        k32.CloseHandle(h)
+    return True, None
+
 
 class WindowsUacRunner:
     """Runs the plan's script in an elevated Windows PowerShell via UAC. NOT EXECUTED on any disk.
@@ -394,7 +457,13 @@ class WindowsUacRunner:
             proc = subprocess.run(self.launcher_argv(plan), capture_output=True, timeout=self.timeout_s,
                                   creationflags=CREATE_NO_WINDOW)
         except subprocess.TimeoutExpired:
-            return HelperResult(EXIT_FAILED_UNKNOWN, {"ok": False, "step": "unknown", "error": "timeout"}, "timeout")
+            # subprocess.run has killed the (non-elevated) launcher; the elevated helper is separate.
+            progress = _read_result(plan.result_path) or {}
+            pid = progress.get("pid")
+            killed, err = terminate_process(int(pid)) if isinstance(pid, int) else (False, "helper PID unknown")
+            return HelperResult(EXIT_TIMEOUT, {"ok": False, "step": progress.get("step", "unknown"), "error": "timeout",
+                                               "helper_pid": pid, "still_running": not killed,
+                                               "terminate_error": err}, "timeout")
         return HelperResult(proc.returncode, _read_result(plan.result_path),
                             proc.stderr.decode("utf-8", errors="replace"))
 
@@ -419,11 +488,19 @@ class LinuxPkexecRunner:
     def run(self, plan: PreparePlan) -> HelperResult:
         if plan.platform != "linux":
             raise PrepareRefused("wrong_platform", "Linux runner needs a Linux plan")
+        p = subprocess.Popen(["pkexec", "/bin/sh", "-c", plan.script], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         try:
-            proc = subprocess.run(["pkexec", "/bin/sh", "-c", plan.script], capture_output=True,
-                                  timeout=self.timeout_s, check=False)
+            out, err = p.communicate(timeout=self.timeout_s)
         except subprocess.TimeoutExpired:
-            return HelperResult(EXIT_FAILED_UNKNOWN, {"ok": False, "step": "unknown", "error": "timeout"}, "timeout")
+            try:  # pkexec runs the script as root: an unprivileged parent normally cannot kill it
+                p.kill()
+                p.wait(timeout=10)
+                killed, kerr = p.poll() is not None, None
+            except (PermissionError, subprocess.TimeoutExpired) as exc:
+                killed, kerr = False, str(exc)
+            return HelperResult(EXIT_TIMEOUT, {"ok": False, "step": "unknown", "error": "timeout", "helper_pid": p.pid,
+                                               "still_running": not killed, "terminate_error": kerr}, "timeout")
+        proc = subprocess.CompletedProcess(p.args, p.returncode, out, err)
         if proc.returncode in (126, 127):  # pkexec: not authorised / dismissed
             return HelperResult(EXIT_ELEVATION_CANCELLED, {"ok": False, "step": "start"}, proc.stderr.decode(errors="replace"))
         return HelperResult(proc.returncode, parse_linux_result(proc.stdout.decode(errors="replace")),

@@ -23,11 +23,15 @@ def load_fixture(name: str) -> dict[str, Any]:
 
 
 def vol(guid: str, fs: str | None = "ntfs", *, label: str | None = None, size: int = 4 * TB,
-        free: int | None = None, letter: str | None = "X", page_file: bool = False) -> VolumeInfo:
+        free: int | None = None, letter: str | None = "X", page_file: bool = False,
+        fs_serial: str | None = "auto") -> VolumeInfo:
     vid = f"\\\\?\\Volume{{{guid}}}\\"
     paths = ((f"{letter}:\\",) if letter else ()) + (vid,)
+    if fs_serial == "auto":
+        fs_serial = str(int(guid.replace("-", "")[-8:], 16)) if fs else None
     return VolumeInfo(volume_id=vid, filesystem=fs, label=label, size_bytes=size,
-                      free_bytes=size if free is None else free, mount_paths=paths, page_file=page_file)
+                      free_bytes=size if free is None else free, mount_paths=paths, page_file=page_file,
+                      fs_serial=fs_serial)
 
 
 def usb_disk(*, disk_id: str = "9", serial: str | None = "WD-WCC4E1234ABCD", unique_id: str | None = "5000CCA0DEADBEEF",
@@ -40,14 +44,15 @@ def usb_disk(*, disk_id: str = "9", serial: str | None = "WD-WCC4E1234ABCD", uni
                     partitions=partitions, **kw)
 
 
-def data_part(n: int, v: VolumeInfo | None, guid: str = "aaaaaaaa-0000-0000-0000-000000000001") -> PartitionInfo:
+def data_part(n: int, v: VolumeInfo | None, guid: str = "aaaaaaaa-0000-0000-0000-000000000001",
+              offset: int = 135266304) -> PartitionInfo:
     return PartitionInfo(number=n, guid=guid, type_id=GPT_BASIC_DATA, kind=KIND_DATA,
-                         size_bytes=v.size_bytes if v and v.size_bytes else 4 * TB, volume=v)
+                         size_bytes=v.size_bytes if v and v.size_bytes else 4 * TB, volume=v, offset=offset)
 
 
 def msr_part() -> PartitionInfo:
     return PartitionInfo(number=1, guid="bbbbbbbb-0000-0000-0000-000000000001", type_id=GPT_MSR, kind=KIND_MSR,
-                         size_bytes=16 * 2**20)
+                         size_bytes=16 * 2**20, offset=17408)
 
 
 def blank_disk(**kw: Any) -> DiskInfo:

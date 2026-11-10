@@ -47,12 +47,12 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $disks = @(Get-Disk | Select-Object Number, FriendlyName, Model, SerialNumber, UniqueId, BusType, Size,
-    PartitionStyle, Guid, IsSystem, IsBoot, IsOffline, IsReadOnly, HealthStatus, OperationalStatus, Path, Location)
+    PartitionStyle, Guid, Signature, IsSystem, IsBoot, IsOffline, IsReadOnly, HealthStatus, OperationalStatus, Path, Location)
 $parts = @(Get-Partition | Select-Object DiskNumber, PartitionNumber, DriveLetter, Guid, GptType, MbrType, Type,
     Size, Offset, IsSystem, IsBoot, IsHidden, AccessPaths)
 $vols = @(Get-Volume | Select-Object UniqueId, Path, DriveLetter, FileSystem, FileSystemLabel, Size, SizeRemaining,
     HealthStatus, DriveType, OperationalStatus)
-$w32 = @(Get-CimInstance -ClassName Win32_Volume | Select-Object DeviceID, PageFilePresent, BootVolume, SystemVolume)
+$w32 = @(Get-CimInstance -ClassName Win32_Volume | Select-Object DeviceID, SerialNumber, PageFilePresent, BootVolume, SystemVolume)
 $dd = @(Get-CimInstance -ClassName Win32_DiskDrive | Select-Object Index, PNPDeviceID, SerialNumber, InterfaceType)
 [pscustomobject]@{
     schema = 1
@@ -98,6 +98,12 @@ def _enum(v: Any, table: dict[int, str]) -> str | None:
     if isinstance(v, int) and not isinstance(v, bool):
         return table.get(v, str(v))
     return norm_text(v)
+
+
+def _serial_str(v: Any) -> str | None:
+    """Volume serial / MBR signature as a decimal string (the elevated helper uses the same form)."""
+    n = _int(v)
+    return str(n) if n is not None and n != 0 else None
 
 
 def _partition_kind(p: dict[str, Any]) -> str:
@@ -160,12 +166,14 @@ def parse_windows_snapshot(data: dict[str, Any]) -> list[DiskInfo]:
                     volume_id=vol_key, filesystem=norm_fs(vol_raw.get("FileSystem")),
                     label=norm_text(vol_raw.get("FileSystemLabel")), size_bytes=_int(vol_raw.get("Size")),
                     free_bytes=_int(vol_raw.get("SizeRemaining")), mount_paths=access,
-                    page_file=_bool(w.get("PageFilePresent")), health=_enum(vol_raw.get("HealthStatus"), HEALTH))
+                    page_file=_bool(w.get("PageFilePresent")), health=_enum(vol_raw.get("HealthStatus"), HEALTH),
+                    fs_serial=_serial_str(w.get("SerialNumber")))
             partitions.append(PartitionInfo(
                 number=_int(p.get("PartitionNumber")) or 0, guid=norm_guid(p.get("Guid")),
                 type_id=norm_guid(p.get("GptType")) or (str(p.get("MbrType")) if p.get("MbrType") is not None else None),
                 kind=_partition_kind(p), size_bytes=_int(p.get("Size")) or 0,
-                is_system=_bool(p.get("IsSystem")), is_boot=_bool(p.get("IsBoot")), volume=volume))
+                is_system=_bool(p.get("IsSystem")), is_boot=_bool(p.get("IsBoot")), volume=volume,
+                offset=_int(p.get("Offset"))))
         bus = _enum(d.get("BusType"), BUS_TYPES)
         bus = bus.upper() if bus else None
         style = _enum(d.get("PartitionStyle"), PART_STYLE)
@@ -181,7 +189,8 @@ def parse_windows_snapshot(data: dict[str, Any]) -> list[DiskInfo]:
             is_offline=_bool(d.get("IsOffline")), is_read_only=_bool(d.get("IsReadOnly")),
             health=_enum(d.get("HealthStatus"), HEALTH), removable=(bus in REMOVABLE_BUSES) if bus else None,
             device_path=norm_text(d.get("Path")), pnp_device_id=norm_text(dd.get("PNPDeviceID")),
-            location=norm_text(d.get("Location")), partitions=tuple(partitions)))
+            location=norm_text(d.get("Location")), partitions=tuple(partitions),
+            mbr_signature=_serial_str(d.get("Signature")) if style == "MBR" else None))
     out.sort(key=lambda x: int(x.disk_id))
     return out
 

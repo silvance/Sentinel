@@ -1,21 +1,31 @@
-"""Automatic drive classification (docs/04 §4): READY, BLANK, WRONG_FORMAT, FOREIGN_DATA, UNSUITABLE.
+"""Automatic drive classification (docs/04 §4): READY, BLANK, WRONG_FORMAT, FOREIGN_DATA,
+SENTINEL_EVIDENCE, UNSUITABLE.
 
-Rules (design choices are marked *):
-* UNSUITABLE wins over everything: system/boot disk, disk holding the OS, Sentinel software,
-  recording spool, ledger or logs (by volume identity), page file / active swap, offline,
-  read-only, health Warning/Unhealthy, smaller than ``min_size_gb``, bus not in
-  ``allowed_bus_types``*, no serial and no UniqueId* (cannot be re-identified safely), or the
-  protected disks could not be determined* (fail closed).
-* READY: exactly one data partition, approved filesystem, valid ``SENTINEL_DRIVE.json``.
-* BLANK: no partition table / no data partitions, or one empty data partition already in the
-  approved filesystem but without a marker.
-* WRONG_FORMAT: only empty data partitions, but not exactly one in the approved filesystem.
-* FOREIGN_DATA: any files at the root of any data volume; or anything that cannot be read and
-  therefore might hold data* (unrecognised filesystem, e.g. ext4/HFS+ seen from Windows; unmounted
-  volume on Linux; access denied); or EFI/recovery/unknown-type partitions* (the disk was used by
-  another computer); or a Sentinel marker on a non-approved filesystem. Uncertainty always moves a
-  drive towards the stricter confirmation, never towards "empty".
-* The Microsoft Reserved partition (created automatically by Initialize-Disk GPT) is ignored.
+Rules, in order of precedence (design choices are marked *):
+1. UNSUITABLE (hard): system/boot disk, disk holding the OS, Sentinel software, recording spool,
+   ledger or logs (by volume identity), page file / active swap.
+2. READY: exactly one data partition, approved filesystem, valid ``SENTINEL_DRIVE.json``, and no
+   other UNSUITABLE reason.
+3. SENTINEL_EVIDENCE* (review finding 1.1): anything suggesting the drive holds Sentinel recordings —
+   a marker in any state (corrupt, newer version, ``.partial``, on a non-approved filesystem, on a
+   second partition), an archive layout (``Sentinel/``), a review-drive layout (``Manifests/
+   Export_Manifest.json``, ``README_FIRST.txt`` with ``Recordings/``/``Originals/``…), or a
+   drive_uuid / volume GUID / filesystem serial / hardware identity known in the ledger. **Never
+   erasable by this tool under any policy.**
+4. UNSUITABLE (other): offline, read-only, health Warning/Unhealthy, smaller than ``min_size_gb``,
+   bus not in ``allowed_bus_types``*, no serial and no UniqueId*, protected disks could not be
+   determined*, ledger unreadable* (fail closed).
+5. BLANK: no partition table / no data partitions, or one empty data partition already in the
+   approved filesystem but without a marker.
+6. WRONG_FORMAT: only empty data partitions, but not exactly one in the approved filesystem.
+7. FOREIGN_DATA: files at the root of any data volume; or anything that cannot be read and therefore
+   might hold data* (unrecognised filesystem, unmounted volume on Linux, access denied); or
+   EFI/recovery/unknown-type partitions*. Uncertainty always moves a drive towards the stricter
+   path, never towards "empty".
+The Microsoft Reserved partition (created automatically by Initialize-Disk GPT) is ignored.
+
+Operator wording: the destructive action is called **Erase and Set Up Drive** (finding 1.4), so it
+cannot be confused with the export action **Prepare Review Drive** (U4).
 """
 
 from __future__ import annotations
@@ -24,6 +34,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
+from .known import KnownDrives
 from .marker import RootContents, inspect_volume
 from .model import (
     KIND_DATA,
@@ -41,6 +52,7 @@ from .policy import DrivePolicy
 from .protected import ROLE_OS, ROLE_SOFTWARE, ProtectedStorage
 
 Inspector = Callable[[VolumeInfo], RootContents]
+ACTION_NAME = "Erase and Set Up Drive"
 
 # UNSUITABLE reasons in the order their message is preferred.
 UNSUITABLE_MESSAGES: dict[str, str] = {
@@ -49,6 +61,8 @@ UNSUITABLE_MESSAGES: dict[str, str] = {
     "page_file": "This drive is used by the computer itself and can never be used as an archive drive.",
     "protected_unknown": "Drive checks are unavailable because the computer's own drives could not be identified. "
                          "Contact technical support.",
+    "ledger_unavailable": "Drive checks are unavailable because the recording records could not be read. "
+                          "Contact technical support.",
     "offline": "This drive is switched off in Windows and cannot be used. Contact technical support.",
     "read_only": "This drive is write-protected and cannot be used.",
     "health": "This drive is reporting a hardware problem and must not be used.",
@@ -57,9 +71,14 @@ UNSUITABLE_MESSAGES: dict[str, str] = {
     "no_identity": "This drive does not report a serial number, so it cannot be identified safely. "
                    "Use a different drive.",
 }
+HARD_UNSUITABLE = ("system_disk", "recording_storage", "page_file")
+CHECKS_UNAVAILABLE = ("protected_unknown", "ledger_unavailable")
+EVIDENCE_MESSAGE = "This drive holds Sentinel recordings and will not be erased. Contact technical support."
+BLANK_MESSAGE = f"This drive is empty and must be set up before use. Press {ACTION_NAME}."
 
 ALERT_FOR_CLASS = {DriveClass.BLANK: "M-001", DriveClass.WRONG_FORMAT: "M-002",
-                   DriveClass.FOREIGN_DATA: "M-003", DriveClass.UNSUITABLE: "M-004"}
+                   DriveClass.FOREIGN_DATA: "M-003", DriveClass.UNSUITABLE: "M-004",
+                   DriveClass.SENTINEL_EVIDENCE: "M-009"}
 
 
 @dataclass(frozen=True)
@@ -75,7 +94,7 @@ class Classification:
     can_prepare: bool = False
     needs_admin: bool = False
     needs_serial: bool = False
-    refusal: str | None = None           # why Prepare is not offered (machine token)
+    refusal: str | None = None           # why erasing is not offered (machine token)
     protected_roles: tuple[str, ...] = ()
     notes: tuple[str, ...] = field(default_factory=tuple)  # administrator detail
 
@@ -93,7 +112,7 @@ class Classification:
 
 
 def _unsuitable_reasons(disk: DiskInfo, policy: DrivePolicy, protected: ProtectedStorage,
-                        protection_ok: bool) -> tuple[list[str], list[str]]:
+                        protection_ok: bool, known: KnownDrives) -> tuple[list[str], list[str]]:
     reasons: list[str] = []
     roles = protected.roles_on(disk)
     if (disk.is_system or disk.is_boot or any(p.is_system or p.is_boot for p in disk.partitions)
@@ -105,6 +124,8 @@ def _unsuitable_reasons(disk: DiskInfo, policy: DrivePolicy, protected: Protecte
         reasons.append("page_file")
     if not protection_ok:
         reasons.append("protected_unknown")
+    if known.error:
+        reasons.append("ledger_unavailable")
     if disk.is_offline:
         reasons.append("offline")
     if disk.is_read_only:
@@ -120,93 +141,111 @@ def _unsuitable_reasons(disk: DiskInfo, policy: DrivePolicy, protected: Protecte
     return reasons, roles
 
 
-def _unsuitable_message(reasons: list[str], disk: DiskInfo, policy: DrivePolicy) -> str:
+def _unsuitable(disk: DiskInfo, policy: DrivePolicy, reasons: list[str], roles: list[str]) -> Classification:
     first = next(r for r in UNSUITABLE_MESSAGES if r in reasons)
-    return UNSUITABLE_MESSAGES[first].format(size=human_size(disk.size_bytes), min=human_size(policy.min_size_bytes))
+    msg = UNSUITABLE_MESSAGES[first].format(size=human_size(disk.size_bytes), min=human_size(policy.min_size_bytes))
+    code = "M-008" if all(r in CHECKS_UNAVAILABLE for r in reasons) else "M-004"
+    return Classification(disk, DriveClass.UNSUITABLE, tuple(reasons), msg, code, refusal=reasons[0],
+                          protected_roles=tuple(roles))
 
 
-def classify(disk: DiskInfo, policy: DrivePolicy, protected: ProtectedStorage, *,
-             inspector: Inspector = inspect_volume, protection_ok: bool = True) -> Classification:
-    reasons, roles = _unsuitable_reasons(disk, policy, protected, protection_ok)
-    if reasons:
-        code = "M-008" if reasons == ["protected_unknown"] else "M-004"
-        return Classification(disk, DriveClass.UNSUITABLE, tuple(reasons), _unsuitable_message(reasons, disk, policy),
-                              code, refusal=reasons[0], protected_roles=tuple(roles))
+@dataclass
+class _Scan:
+    parts: list[Any]
+    foreign: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+    data_fs: list[str | None] = field(default_factory=list)
+    used: int = 0
+    marker: dict[str, Any] | None = None          # valid marker on an approved-filesystem partition
+    marker_uuids: list[str] = field(default_factory=list)
+    signs: list[str] = field(default_factory=list)
 
-    approved = policy.approved_filesystem
-    parts = [p for p in disk.partitions if p.kind != KIND_MSR]
-    if not parts:
-        why = "no_partition_table" if disk.partition_style in (None, "RAW") else "no_data_partitions"
-        return _preparable(disk, policy, DriveClass.BLANK, (why,), "This drive is empty and needs to be prepared.")
 
-    foreign: list[str] = []
-    notes: list[str] = []
-    data_fs: list[str | None] = []
-    used = 0
-    marker = None
-    sentinel_marker_elsewhere = False
-    for p in parts:
+def _scan(disk: DiskInfo, policy: DrivePolicy, inspector: Inspector) -> _Scan:
+    s = _Scan(parts=[p for p in disk.partitions if p.kind != KIND_MSR])
+    for p in s.parts:
         if p.kind in (KIND_EFI, KIND_RECOVERY):
-            foreign.append("os_partition")
+            s.foreign.append("os_partition")
             continue
         if p.kind not in (KIND_DATA, KIND_WHOLE_DISK):
-            foreign.append("unknown_partition")
-            notes.append(f"partition {p.number}: type {p.type_id}")
+            s.foreign.append("unknown_partition")
+            s.notes.append(f"partition {p.number}: type {p.type_id}")
             continue
         v = p.volume
         if v is None or v.filesystem is None:
-            foreign.append("unreadable")
-            data_fs.append(None)
+            s.foreign.append("unreadable")
+            s.data_fs.append(None)
             continue
-        data_fs.append(v.filesystem)
-        used += v.used_bytes or 0
+        s.data_fs.append(v.filesystem)
+        s.used += v.used_bytes or 0
         rc = inspector(v)
         if not rc.readable:
-            foreign.append("unreadable")
-            notes.append(f"partition {p.number}: {rc.error}")
+            s.foreign.append("unreadable")
+            s.notes.append(f"partition {p.number}: {rc.error}")
             continue
+        s.signs.extend(rc.sentinel_signs)
         if rc.marker is not None:
-            if v.filesystem == approved:
-                marker = rc.marker
+            s.marker_uuids.append(str(rc.marker.get("drive_uuid")))
+            if v.filesystem == policy.approved_filesystem and s.marker is None:
+                s.marker = rc.marker
             else:
-                sentinel_marker_elsewhere = True
+                s.signs.append("marker_unapproved_or_extra")
         if rc.marker_error:
-            notes.append(f"partition {p.number}: invalid marker ({rc.marker_error})")
+            s.signs.append("marker_invalid")
+            s.notes.append(f"partition {p.number}: invalid marker ({rc.marker_error})")
         if rc.entries:
-            foreign.append("has_files")
-    first_fs = next((f for f in data_fs if f), None)
+            s.foreign.append("has_files")
+    return s
 
-    if marker is not None and len(parts) == 1:
-        # With a single readable partition the only possible "foreign" reason is has_files, and
-        # files on a READY drive are Sentinel's own archive. READY never offers erasing.
+
+def classify(disk: DiskInfo, policy: DrivePolicy, protected: ProtectedStorage, *,
+             inspector: Inspector = inspect_volume, protection_ok: bool = True,
+             known: KnownDrives | None = None) -> Classification:
+    known = known or KnownDrives()
+    reasons, roles = _unsuitable_reasons(disk, policy, protected, protection_ok, known)
+    if any(r in HARD_UNSUITABLE for r in reasons):
+        return _unsuitable(disk, policy, reasons, roles)
+
+    s = _scan(disk, policy, inspector)
+    first_fs = next((f for f in s.data_fs if f), None)
+    ready = s.marker is not None and len(s.parts) == 1 and "marker_invalid" not in s.signs
+    if ready and not reasons:
+        # Files on a READY drive are Sentinel's own archive. READY never offers erasing.
         return Classification(disk, DriveClass.READY, ("sentinel_drive",), "Archive drive ready.", None,
-                              filesystem=first_fs, used_bytes=used, marker=marker, refusal="already_prepared",
-                              notes=tuple(notes))
-    if sentinel_marker_elsewhere:
-        foreign.append("sentinel_drive_wrong_format")
-    if marker is not None:
-        foreign.append("sentinel_drive_extra_partitions")
+                              filesystem=first_fs, used_bytes=s.used, marker=s.marker, refusal="already_prepared",
+                              notes=tuple(s.notes))
+    evidence = list(dict.fromkeys(s.signs + known.matches(disk, tuple(s.marker_uuids))))
+    if evidence:
+        return Classification(disk, DriveClass.SENTINEL_EVIDENCE, tuple(evidence), EVIDENCE_MESSAGE,
+                              ALERT_FOR_CLASS[DriveClass.SENTINEL_EVIDENCE], filesystem=first_fs, used_bytes=s.used,
+                              marker=s.marker, refusal="sentinel_evidence", notes=tuple(s.notes))
+    if reasons:
+        return _unsuitable(disk, policy, reasons, roles)
 
-    if foreign:
-        uniq = tuple(dict.fromkeys(foreign))
-        if "has_files" in uniq or "sentinel_drive_wrong_format" in uniq or "sentinel_drive_extra_partitions" in uniq:
-            msg = f"This drive contains other files ({human_size(used)}). Preparing it will erase them."
+    approved = policy.approved_filesystem
+    if not s.parts:
+        why = "no_partition_table" if disk.partition_style in (None, "RAW") else "no_data_partitions"
+        return _preparable(disk, policy, DriveClass.BLANK, (why,), BLANK_MESSAGE)
+    if s.foreign:
+        uniq = tuple(dict.fromkeys(s.foreign))
+        if "has_files" in uniq:
+            msg = f"This drive contains other files ({human_size(s.used)}). Erasing it will delete them."
         elif "os_partition" in uniq:
-            msg = ("This drive appears to have been used to start a computer. "
-                   "Preparing it will erase everything on it.")
+            msg = "This drive appears to have been used to start a computer. Erasing it will delete everything on it."
         else:
-            msg = "This drive contains data this computer cannot read. Preparing it will erase everything on it."
-        return _preparable(disk, policy, DriveClass.FOREIGN_DATA, uniq, msg, filesystem=first_fs, used=used,
-                           notes=notes)
-
-    if len(parts) == 1 and first_fs == approved:
-        return _preparable(disk, policy, DriveClass.BLANK, ("empty_volume",),
-                           "This drive is empty and needs to be prepared.", filesystem=first_fs, used=used, notes=notes)
-    wrong = first_fs if first_fs != approved else next((f for f in data_fs if f != approved), first_fs)
+            msg = "This drive contains data this computer cannot read. Erasing it will delete everything on it."
+        return _preparable(disk, policy, DriveClass.FOREIGN_DATA, uniq, msg, filesystem=first_fs, used=s.used,
+                           notes=s.notes)
+    if len(s.parts) == 1 and first_fs == approved:
+        return _preparable(disk, policy, DriveClass.BLANK, ("empty_volume",), BLANK_MESSAGE, filesystem=first_fs,
+                           used=s.used, notes=s.notes)
+    wrong = first_fs if first_fs != approved else next((f for f in s.data_fs if f != approved), first_fs)
     why = "wrong_filesystem" if wrong != approved else "multiple_partitions"
-    msg = (f"This drive uses the wrong format ({fs_display(wrong)}). It must be prepared before use."
-           if why == "wrong_filesystem" else "This drive is not set up correctly. It must be prepared before use.")
-    return _preparable(disk, policy, DriveClass.WRONG_FORMAT, (why,), msg, filesystem=first_fs, used=used, notes=notes)
+    msg = (f"This drive uses the wrong format ({fs_display(wrong)}). It must be set up before use. "
+           f"Press {ACTION_NAME}." if why == "wrong_filesystem"
+           else f"This drive is not set up correctly. Press {ACTION_NAME}.")
+    return _preparable(disk, policy, DriveClass.WRONG_FORMAT, (why,), msg, filesystem=first_fs, used=s.used,
+                       notes=s.notes)
 
 
 def _preparable(disk: DiskInfo, policy: DrivePolicy, cls: DriveClass, reasons: tuple[str, ...], msg: str, *,
@@ -224,7 +263,11 @@ def _preparable(disk: DiskInfo, policy: DrivePolicy, cls: DriveClass, reasons: t
 
 
 def classify_all(disks: list[DiskInfo], policy: DrivePolicy, protected: ProtectedStorage, *,
-                 inspector: Inspector = inspect_volume) -> tuple[list[Classification], list[str]]:
+                 inspector: Inspector = inspect_volume,
+                 known: KnownDrives | None = None) -> tuple[list[Classification], list[str]]:
     """Classify every disk. Protection completeness is judged against the whole disk set."""
     ok, problems = protected.complete_for(disks)
-    return [classify(d, policy, protected, inspector=inspector, protection_ok=ok) for d in disks], problems
+    known = known or KnownDrives()
+    if known.error:
+        problems = [*problems, f"ledger: {known.error}"]
+    return [classify(d, policy, protected, inspector=inspector, protection_ok=ok, known=known) for d in disks], problems

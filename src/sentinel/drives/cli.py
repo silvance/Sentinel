@@ -10,7 +10,9 @@
 ``--disk`` is the Windows disk number or Linux kernel name shown by ``list``. It only *locates*
 the disk: the confirmation is bound to the disk's identity, which is re-checked before erasing.
 
-``prepare`` never runs without a confirmation. Interactively it asks the person to type ERASE
+``prepare`` is the administrator name of the operator action "Erase and Set Up Drive". It requires
+the installed recorder configuration (see ``installed.py``; otherwise refused with M-008) and never
+erases a drive classified SENTINEL_EVIDENCE. It never runs without a confirmation. Interactively it asks the person to type ERASE
 (BLANK / WRONG_FORMAT) or the last characters of the serial number (FOREIGN_DATA). When standard
 input is not a terminal it refuses unless both ``--yes`` and ``--serial-tail`` are given, and the
 serial tail is then checked for every drive class.
@@ -21,7 +23,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-import tomllib
 from collections.abc import Callable
 from dataclasses import asdict
 from pathlib import Path
@@ -30,8 +31,10 @@ from typing import Any
 from ..alerts import Severity, make_alert
 from .classify import Classification, classify_all
 from .errors import DriveError, PrepareFailed, PrepareRefused
+from . import installed as _installed
+from .known import KnownDrives, load_known
 from .model import DiskInfo, DriveClass, human_size, serial_tail
-from .policy import DrivePolicy, DrivePolicyError, load_policy
+from .policy import DrivePolicy
 from .protected import ProtectedStorage, default_paths, resolve
 
 EXIT_OK, EXIT_USAGE, EXIT_REFUSED, EXIT_FAILED = 0, 1, 2, 3
@@ -41,16 +44,16 @@ class _Env:
     def __init__(self, args: argparse.Namespace) -> None:
         self.policy = DrivePolicy()
         self.cfg = None
+        self.config_path: Path | None = None
         if args.config:
-            from ..config import ConfigError, load_config_dict
+            from ..config import ConfigError, load_config
 
-            path = Path(args.config)
+            self.config_path = Path(args.config)
             try:
-                raw = tomllib.loads(path.read_text(encoding="utf-8"))
-                self.policy = load_policy(raw.pop("drives", None))
-                self.cfg = load_config_dict(raw, base_dir=path.parent.resolve(), source=str(path))
-            except (OSError, tomllib.TOMLDecodeError, ConfigError, DrivePolicyError) as exc:
+                self.cfg = load_config(self.config_path)   # validates [drives] too (finding 1.5)
+            except (OSError, ConfigError) as exc:
                 raise SystemExit(f"configuration problem: {exc}") from None
+            self.policy = self.cfg.drives
         st = self.cfg.storage if self.cfg else None
         self.protected: ProtectedStorage = resolve(default_paths(st.spool_dir if st else None,
                                                                  st.data_dir if st else None,
@@ -66,8 +69,27 @@ class _Env:
 
         return enumerate_linux()
 
+    def known(self) -> KnownDrives:
+        """Drives the ledger knows (read-only). Without a config no ledger is known: listing still
+        works, and erasing is refused anyway (prepare needs the installed configuration)."""
+        if self.cfg is None:
+            return KnownDrives()
+        db = self.cfg.data_path / "sentinel.db"
+        if not db.is_file():
+            return KnownDrives()
+        from ..db import Ledger
+
+        try:
+            led = Ledger(db, readonly=True)
+        except Exception as exc:  # noqa: BLE001 - unreadable ledger => fail closed
+            return KnownDrives(error=str(exc))
+        try:
+            return load_known(led)
+        finally:
+            led.close()
+
     def classify(self) -> tuple[list[Classification], list[str]]:
-        return classify_all(self.enumerate(), self.policy, self.protected)
+        return classify_all(self.enumerate(), self.policy, self.protected, known=self.known())
 
 
 def _print_table(classes: list[Classification]) -> None:
@@ -92,7 +114,7 @@ def cmd_list(env: _Env, args: argparse.Namespace) -> int:
                           "policy": asdict(env.policy)}, indent=2))
     else:
         if problems:
-            print("WARNING: drive preparation is blocked (fail closed):")
+            print("WARNING: erasing and setting up drives is blocked (fail closed):")
             for p in problems:
                 print(f"  - {p}")
             print()
@@ -117,7 +139,7 @@ def cmd_classify(env: _Env, args: argparse.Namespace) -> int:
         from .prepare import requirements
 
         req = requirements(c)
-        print(f"      prepare allowed: {req['can_prepare']}  administrator needed: {req['needs_admin']}  "
+        print(f"      erase and set up allowed: {req['can_prepare']}  administrator needed: {req['needs_admin']}  "
               f"serial confirmation needed: {req['needs_serial']}")
         for p in problems:
             print(f"      blocked: {p}")
@@ -138,12 +160,19 @@ def cmd_prepare(env: _Env, args: argparse.Namespace, *, reader: Callable[[str], 
     if env.cfg is None:
         print("prepare needs --config (to know where recordings are kept and where to write the audit record).")
         return EXIT_USAGE
+    not_installed = _installed.installed_config_problems(env.config_path, env.cfg)
+    if not_installed and not args.dry_run:
+        print(_alert_line("M-008"))
+        print("Erasing drives is refused because the recording storage cannot be confirmed (fail closed):")
+        for p in not_installed:
+            print(f"  - {p}")
+        return EXIT_REFUSED
     interactive = sys.stdin.isatty() if interactive is None else interactive
     classes, problems = env.classify()
     c = _find(classes, args.disk)
     _print_table([c])
     if not c.can_prepare:
-        print(f"\nThis drive cannot be prepared ({c.refusal}). Nothing was erased.")
+        print(f"\nThis drive cannot be erased and set up ({c.refusal}). Nothing was erased.")
         for p in problems:
             print(f"  blocked: {p}")
         return EXIT_REFUSED
@@ -188,7 +217,7 @@ def cmd_prepare(env: _Env, args: argparse.Namespace, *, reader: Callable[[str], 
         want = serial_tail(c.disk.serial, env.policy.serial_confirm_chars)
         if not interactive or args.yes:
             if not (args.yes and args.serial_tail):
-                print("Refusing to prepare without a person confirming: give both --yes and --serial-tail. "
+                print("Refusing to erase without a person confirming: give both --yes and --serial-tail. "
                       "Nothing was erased.")
                 return EXIT_REFUSED
             typed = args.serial_tail.strip().upper()
@@ -199,7 +228,7 @@ def cmd_prepare(env: _Env, args: argparse.Namespace, *, reader: Callable[[str], 
             typed = _ask(f"Type the last {env.policy.serial_confirm_chars} characters of the serial number "
                          "shown above to erase it: ", reader).upper()
         else:
-            if _ask("Type ERASE to erase this drive and prepare it: ", reader) != "ERASE":
+            if _ask("Type ERASE to erase this drive and set it up: ", reader) != "ERASE":
                 print("Not confirmed. Nothing was erased.")
                 return EXIT_REFUSED
             typed = None
@@ -218,7 +247,7 @@ def cmd_prepare(env: _Env, args: argparse.Namespace, *, reader: Callable[[str], 
         except PrepareFailed as exc:
             print(f"\n{_alert_line(exc.code)}\n{exc}")
             return EXIT_FAILED
-        print(f"\nDrive prepared: {res.label} ({res.filesystem}). Write test passed "
+        print(f"\nDrive erased and set up: {res.label} ({res.filesystem}). Write test passed "
               f"({'cache bypassed' if res.write_test.get('uncached') else 'cache NOT bypassed'}).")
         return EXIT_OK
     finally:
@@ -272,7 +301,7 @@ def build_parser() -> argparse.ArgumentParser:
         if name in ("classify", "prepare", "eject"):
             p.add_argument("--disk", required=True, help="disk identifier from 'list'")
         if name == "prepare":
-            p.add_argument("--who", help="name/ID of the person preparing the drive (recorded in the audit trail)")
+            p.add_argument("--who", help="name/ID of the person erasing the drive (recorded in the audit trail)")
             p.add_argument("--admin", action="store_true", help="act as administrator (verified against the OS)")
             p.add_argument("--yes", action="store_true", help="non-interactive confirmation (needs --serial-tail)")
             p.add_argument("--serial-tail", help="last characters of the drive's serial number")

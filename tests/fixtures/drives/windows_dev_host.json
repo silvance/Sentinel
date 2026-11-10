@@ -1,5 +1,5 @@
 {
- "_capture_note": "REAL read-only output of sentinel.drives.windows_enum.ENUM_SCRIPT on the development host (Windows 11 Home 10.0.26200, non-elevated), captured 2026-11-09. Do not edit.",
+ "_capture_note": "REAL read-only output of sentinel.drives.windows_enum.ENUM_SCRIPT on the development host (Windows 11 Home 10.0.26200, non-elevated), re-captured 2026-11-09 after adding Signature and volume SerialNumber. Do not edit.",
  "disk_drives": [
   {
    "Index": 5,
@@ -61,6 +61,7 @@
    "PartitionStyle": "GPT",
    "Path": "\\\\?\\scsi#disk&ven_&prod_st3000dm008-2dm1#4&11742ca2&0&060000#{53f56307-b6bf-11d0-94f2-00a0c91efb8b}",
    "SerialNumber": "            Z505GDE8",
+   "Signature": null,
    "Size": 3000592982016,
    "UniqueId": "5000C500B4074486"
   },
@@ -80,6 +81,7 @@
    "PartitionStyle": "GPT",
    "Path": "\\\\?\\scsi#disk&ven_msft&prod_virtual_disk#2&1f4adffe&0&000001#{53f56307-b6bf-11d0-94f2-00a0c91efb8b}",
    "SerialNumber": null,
+   "Signature": null,
    "Size": 33554432,
    "UniqueId": "600224803426183AAFEC9E61EC7A093A"
   },
@@ -99,6 +101,7 @@
    "PartitionStyle": "GPT",
    "Path": "\\\\?\\scsi#disk&ven_nvme&prod_ct4000p3ssd8#5&3eaf689&0&000000#{53f56307-b6bf-11d0-94f2-00a0c91efb8b}",
    "SerialNumber": "6479_A777_3000_0009.",
+   "Signature": null,
    "Size": 4000787030016,
    "UniqueId": "eui.6479A77730000009"
   },
@@ -118,6 +121,7 @@
    "PartitionStyle": "GPT",
    "Path": "\\\\?\\scsi#disk&ven_nvme&prod_jajp600m4tb#5&339562ae&0&000000#{53f56307-b6bf-11d0-94f2-00a0c91efb8b}",
    "SerialNumber": "0000_0000_0000_0000_00E0_4C70_B6D7_55E0.",
+   "Signature": null,
    "Size": 4096805658624,
    "UniqueId": "eui.000000000000000000E04C70B6D755E0"
   },
@@ -137,6 +141,7 @@
    "PartitionStyle": "GPT",
    "Path": "\\\\?\\scsi#disk&ven_nvme&prod_shpp41-2000gm#5&1f89821&0&000000#{53f56307-b6bf-11d0-94f2-00a0c91efb8b}",
    "SerialNumber": "ACE4_2E00_352E_167B_2EE4_AC00_0000_0001.",
+   "Signature": null,
    "Size": 2000398934016,
    "UniqueId": "eui.ACE42E00352E167B2EE4AC0000000001"
   },
@@ -156,6 +161,7 @@
    "PartitionStyle": "GPT",
    "Path": "\\\\?\\scsi#disk&ven_nvme&prod_wd_black_sn770_2#5&42e9322&0&000000#{53f56307-b6bf-11d0-94f2-00a0c91efb8b}",
    "SerialNumber": "E823_8FA6_BF53_0001_001B_448B_4EF1_2823.",
+   "Signature": null,
    "Size": 2000398934016,
    "UniqueId": "eui.E8238FA6BF530001001B448B4EF12823"
   },
@@ -175,6 +181,7 @@
    "PartitionStyle": "GPT",
    "Path": "\\\\?\\scsi#disk&ven_samsung&prod_ssd_870_evo_2tb#4&11742ca2&0&040000#{53f56307-b6bf-11d0-94f2-00a0c91efb8b}",
    "SerialNumber": "S6PNNM0TB00861W",
+   "Signature": null,
    "Size": 2000398934016,
    "UniqueId": "500253F8C2B00399"
   }
@@ -367,7 +374,7 @@
    "OperationalStatus": "OK",
    "Path": "\\\\?\\Volume{17af65b4-223e-4c82-9361-18f8b22cfaa6}\\",
    "Size": 1999239114752,
-   "SizeRemaining": 807712489472,
+   "SizeRemaining": 804072300544,
    "UniqueId": "\\\\?\\Volume{17af65b4-223e-4c82-9361-18f8b22cfaa6}\\"
   },
   {
@@ -472,60 +479,70 @@
    "BootVolume": false,
    "DeviceID": "\\\\?\\Volume{eca2b351-2ac6-4c03-8589-3caf83ab9192}\\",
    "PageFilePresent": false,
+   "SerialNumber": 3591353759,
    "SystemVolume": false
   },
   {
    "BootVolume": false,
    "DeviceID": "\\\\?\\Volume{1c9e2003-1f3f-417c-b622-a0b6c0512615}\\",
    "PageFilePresent": false,
+   "SerialNumber": 3896364451,
    "SystemVolume": false
   },
   {
    "BootVolume": true,
    "DeviceID": "\\\\?\\Volume{17af65b4-223e-4c82-9361-18f8b22cfaa6}\\",
    "PageFilePresent": true,
+   "SerialNumber": 818484969,
    "SystemVolume": false
   },
   {
    "BootVolume": false,
    "DeviceID": "\\\\?\\Volume{ccb89549-3050-46e0-bfe0-b21ca441d247}\\",
    "PageFilePresent": false,
+   "SerialNumber": 280027296,
    "SystemVolume": false
   },
   {
    "BootVolume": false,
    "DeviceID": "\\\\?\\Volume{19e4335c-c68c-433c-95ac-3ea673f7f235}\\",
    "PageFilePresent": false,
+   "SerialNumber": 1151273733,
    "SystemVolume": false
   },
   {
    "BootVolume": false,
    "DeviceID": "\\\\?\\Volume{5901b7ae-881f-4ce2-9931-60cf5a407dab}\\",
    "PageFilePresent": false,
+   "SerialNumber": 3528371946,
    "SystemVolume": false
   },
   {
    "BootVolume": false,
    "DeviceID": "\\\\?\\Volume{7029cacc-4dba-4fe1-b220-697b51caa9db}\\",
    "PageFilePresent": false,
+   "SerialNumber": 4236041428,
    "SystemVolume": false
   },
   {
    "BootVolume": false,
    "DeviceID": "\\\\?\\Volume{ba5fbc33-b5dd-4468-b9fb-349269ef43b8}\\",
    "PageFilePresent": false,
+   "SerialNumber": 3131111768,
    "SystemVolume": false
   },
   {
    "BootVolume": false,
    "DeviceID": "\\\\?\\Volume{dccf3bdc-5eda-4cff-b32f-749e5495b003}\\",
    "PageFilePresent": false,
+   "SerialNumber": 1154003084,
    "SystemVolume": true
   },
   {
    "BootVolume": false,
    "DeviceID": "\\\\?\\Volume{2c3be760-9ed9-11f1-88f7-bc091b0fc6c9}\\",
    "PageFilePresent": false,
+   "SerialNumber": 1409414134,
    "SystemVolume": false
   }
  ]

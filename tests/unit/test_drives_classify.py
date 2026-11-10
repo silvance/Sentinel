@@ -19,7 +19,7 @@ from drive_fakes import (
     vol,
 )
 
-from sentinel.drives.classify import classify, classify_all
+from sentinel.drives.classify import BLANK_MESSAGE, EVIDENCE_MESSAGE, classify, classify_all
 from sentinel.drives.linux_enum import parse_lsblk
 from sentinel.drives.marker import MARKER_FORMAT, RootContents
 from sentinel.drives.model import (
@@ -122,7 +122,8 @@ def test_blank_raw_disk() -> None:
     c = classify(blank_disk(), POL, protected_for(), inspector=FakeInspector())
     assert c.drive_class is DriveClass.BLANK and c.reasons == ("no_partition_table",)
     assert c.can_prepare and not c.needs_admin and not c.needs_serial
-    assert c.message == "This drive is empty and needs to be prepared." and c.alert_code == "M-001"
+    assert c.message == BLANK_MESSAGE and c.alert_code == "M-001"
+    assert c.message == "This drive is empty and must be set up before use. Press Erase and Set Up Drive."
 
 
 def test_blank_gpt_with_only_msr() -> None:
@@ -142,7 +143,8 @@ def test_wrong_format_empty(fs: str, shown: str) -> None:
     d = usb_disk(partitions=(data_part(1, vol("00000000-0000-0000-0000-0000000000e2", fs)),))
     c = classify(d, POL, protected_for(), inspector=FakeInspector())
     assert c.drive_class is DriveClass.WRONG_FORMAT
-    assert c.message == f"This drive uses the wrong format ({shown}). It must be prepared before use."
+    assert c.message == (f"This drive uses the wrong format ({shown}). It must be set up before use. "
+                         "Press Erase and Set Up Drive.")
     assert c.can_prepare and not c.needs_admin and c.alert_code == "M-002"
 
 
@@ -159,7 +161,7 @@ def test_files_make_it_foreign() -> None:
     insp = FakeInspector({d.volumes[0].volume_id: RootContents(readable=True, entries=("DCIM", "notes.txt"))})
     c = classify(d, POL, protected_for(), inspector=insp)
     assert c.drive_class is DriveClass.FOREIGN_DATA
-    assert c.message == "This drive contains other files (1 TB). Preparing it will erase them."
+    assert c.message == "This drive contains other files (1 TB). Erasing it will delete them."
     assert c.needs_admin and c.needs_serial and c.can_prepare and c.alert_code == "M-003"
 
 
@@ -205,12 +207,13 @@ def test_ready_drive() -> None:
     assert c.to_dict()["drive_uuid"] == MARKER["drive_uuid"] and c.alert_code is None
 
 
-def test_sentinel_marker_on_unapproved_filesystem_is_foreign() -> None:
+def test_sentinel_marker_on_unapproved_filesystem_is_evidence() -> None:
     d = exfat_disk()
     insp = FakeInspector({d.volumes[0].volume_id: RootContents(readable=True, entries=("SENTINEL_DRIVE.json",),
-                                                                marker=MARKER)})
+                                                                marker=MARKER, sentinel_signs=("marker",))})
     c = classify(d, POL, protected_for(), inspector=insp)
-    assert c.drive_class is DriveClass.FOREIGN_DATA and "sentinel_drive_wrong_format" in c.reasons
+    assert c.drive_class is DriveClass.SENTINEL_EVIDENCE and "marker_unapproved_or_extra" in c.reasons
+    assert c.message == EVIDENCE_MESSAGE and not c.can_prepare and c.alert_code == "M-009"
 
 
 @pytest.mark.parametrize("kw,reason", [
