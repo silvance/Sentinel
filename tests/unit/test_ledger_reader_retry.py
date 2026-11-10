@@ -66,6 +66,67 @@ def test_readonly_gives_up_after_deadline(tmp_path: Path, monkeypatch: pytest.Mo
         Ledger(path, readonly=True).query("SELECT 1")
 
 
+def test_query_reopens_after_transient_failure_mid_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Failure AFTER a successful open: query() must reopen the connection and retry."""
+    path = _make(tmp_path)
+    failures = {"left": 0}
+    real_connect = sqlite3.connect
+    opened = {"n": 0}
+
+    def connect(*a, **kw):  # noqa: ANN002, ANN003
+        opened["n"] += 1
+        return _Flaky(real_connect(*a, **kw), failures)
+
+    monkeypatch.setattr(db_mod.sqlite3, "connect", connect)
+    monkeypatch.setattr(db_mod.time, "sleep", lambda s: None)
+    ro = Ledger(path, readonly=True)
+    try:
+        assert opened["n"] == 1
+        failures["left"] = 2                       # the recorder dies now
+        assert ro.query("SELECT code FROM events")[0]["code"] == "x"
+        assert opened["n"] >= 2, "a fresh connection should have been opened"
+    finally:
+        ro.close()
+
+
+def test_retry_does_not_hold_lock_while_sleeping(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = _make(tmp_path)
+    failures = {"left": 0}
+    real_connect = sqlite3.connect
+    monkeypatch.setattr(db_mod.sqlite3, "connect", lambda *a, **kw: _Flaky(real_connect(*a, **kw), failures))
+    ro = Ledger(path, readonly=True)
+    held_while_sleeping = []
+
+    def sleep(_s: float) -> None:
+        acquired = ro._lock.acquire(blocking=False)   # another thread could use the ledger now
+        held_while_sleeping.append(not acquired)
+        if acquired:
+            ro._lock.release()
+
+    monkeypatch.setattr(db_mod.time, "sleep", sleep)
+    try:
+        failures["left"] = 2
+        ro.query("SELECT 1")
+    finally:
+        ro.close()
+    assert held_while_sleeping and not any(held_while_sleeping)
+
+
+def test_zero_retry_budget_fails_fast_and_closed_ledger_raises(tmp_path: Path,
+                                                               monkeypatch: pytest.MonkeyPatch) -> None:
+    path = _make(tmp_path)
+    failures = {"left": 0}
+    real_connect = sqlite3.connect
+    monkeypatch.setattr(db_mod.sqlite3, "connect", lambda *a, **kw: _Flaky(real_connect(*a, **kw), failures))
+    ro = Ledger(path, readonly=True, retry_seconds=0)
+    failures["left"] = 1
+    with pytest.raises(sqlite3.OperationalError):
+        ro.query("SELECT 1")
+    ro.close()
+    with pytest.raises(sqlite3.ProgrammingError):
+        ro.query("SELECT 1")
+
+
 def test_non_transient_errors_are_not_retried(tmp_path: Path) -> None:
     ro = Ledger(_make(tmp_path), readonly=True)
     try:

@@ -36,5 +36,17 @@ Root cause inside Windows is inferred, not proven. Not tested on Linux.
 A reader may now block up to 5 s in the worst case; the GUI already treats a failed read as
 "history temporarily unavailable".
 
+## Review findings (independent QA) and resolution
+* R1 (retry slept while holding the ledger lock; a GUI thread could freeze ~5-10 s): FIXED. The
+  lock is held only for one attempt and released while sleeping; `Ledger(..., retry_seconds=0)`
+  lets a UI thread fail fast and show "temporarily unavailable". Tests:
+  `test_retry_does_not_hold_lock_while_sleeping`, `test_zero_retry_budget_fails_fast_...`.
+* R2: query() after close() silently reopened: FIXED (raises). The reopen-inside-query path was
+  untested: FIXED (`test_query_reopens_after_transient_failure_mid_session`). Remaining, accepted:
+  "unable to open database file" / "disk I/O error" also cover permanent faults; they now surface
+  after the retry budget instead of immediately. The chain branch's own read-only connection
+  (`ledgerchain._ro_connect`) does not use this retry — integrate when both merge.
+* Unit tests after fixes: 56 passed.
+
 ## 7. Recommendation
 **Merge.** Small, contained, and it fixes a real intermittent failure in the baseline.

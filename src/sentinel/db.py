@@ -185,9 +185,13 @@ def _is_transient(exc: sqlite3.OperationalError) -> bool:
 
 
 class Ledger:
-    def __init__(self, path: Path, readonly: bool = False) -> None:
+    def __init__(self, path: Path, readonly: bool = False, retry_seconds: float | None = None) -> None:
+        """``retry_seconds`` (readers only): how long to retry transient errors. A UI thread
+        that must never block can pass 0 and treat a failure as "temporarily unavailable"."""
         self.path = Path(path)
         self.readonly = readonly
+        self.retry_seconds = READ_RETRY_SECONDS if retry_seconds is None else retry_seconds
+        self._closed = False
         self._lock = threading.RLock()
         if readonly:
             self._conn = self._retry_read(self._open_readonly)
@@ -219,7 +223,9 @@ class Ledger:
         return conn
 
     def _retry_read(self, fn):  # noqa: ANN001, ANN202 - small internal helper
-        deadline = time.monotonic() + READ_RETRY_SECONDS
+        """Call ``fn`` (which takes the lock itself if it needs it); retry transient errors.
+        Never sleeps while holding ``self._lock``."""
+        deadline = time.monotonic() + self.retry_seconds
         delay = 0.1
         while True:
             try:
@@ -232,6 +238,7 @@ class Ledger:
 
     def close(self) -> None:
         with self._lock:
+            self._closed = True
             if self._conn is not None:
                 self._conn.close()
                 self._conn = None
@@ -259,11 +266,14 @@ class Ledger:
                 raise RuntimeError(f"ledger schema {row['value']} is newer than this software ({SCHEMA_VERSION})")
 
     def query(self, sql: str, params: Iterable[Any] = ()) -> list[sqlite3.Row]:
-        with self._lock:
-            if not self.readonly:
+        if not self.readonly:
+            with self._lock:
                 return self._conn.execute(sql, tuple(params)).fetchall()
 
-            def attempt() -> list[sqlite3.Row]:
+        def attempt() -> list[sqlite3.Row]:
+            with self._lock:  # held only for one attempt; released while _retry_read sleeps
+                if self._closed:
+                    raise sqlite3.ProgrammingError("Cannot operate on a closed ledger")
                 if self._conn is None:
                     self._conn = self._open_readonly()
                 try:
@@ -276,7 +286,7 @@ class Ledger:
                             pass
                         self._conn = None
                     raise
-            return self._retry_read(attempt)
+        return self._retry_read(attempt)
 
     def integrity_check(self) -> str:
         return self.query("PRAGMA integrity_check")[0][0]
