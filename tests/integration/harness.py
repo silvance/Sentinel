@@ -33,6 +33,19 @@ class ShiftableClock(SystemClock):
         return super().wall() + self.offset
 
 
+class DriftingClock(SystemClock):
+    """Wall clock that runs ``ppm`` faster than the monotonic clock, with no steps — what
+    Windows looks like over days (QueryPerformanceCounter is not disciplined by time sync, the
+    wall clock is). Exaggerated rates make hours of drift visible in a short test."""
+
+    def __init__(self, ppm: float) -> None:
+        self.rate = ppm * 1e-6
+        self._m0, self._w0 = time.monotonic(), time.time()
+
+    def wall(self) -> float:
+        return self._w0 + (time.monotonic() - self._m0) * (1.0 + self.rate)
+
+
 class FakeDisk:
     def __init__(self, free_gb: float = 500.0) -> None:
         self.free_gb = free_gb

@@ -31,6 +31,7 @@ from typing import Any
 
 from . import ledgerchain as chain
 from .clock import iso_utc, parse_iso_utc
+from .ledger_timing import TIMING_WRITE_ONCE, apply_timing_schema
 from .models import ALLOWED_TRANSITIONS, TERMINAL_STATES, GapKind, SegmentState
 
 log = logging.getLogger(__name__)
@@ -253,7 +254,7 @@ WAL_SIZE_LIMIT = 64 * 1024 * 1024
 WRITE_ONCE = frozenset({
     "sha256", "size_bytes", "rel_path", "start_utc", "end_utc", "duration_s",
     "content_sha256", "content_hash_method", "decoded_frame_count", "framehash_rel_path", "framehash_sha256",
-})
+}) | TIMING_WRITE_ONCE
 
 
 class IllegalTransition(RuntimeError):
@@ -394,6 +395,7 @@ class Ledger:
                                    (str(SCHEMA_VERSION),))
             elif int(row["value"]) > SCHEMA_VERSION:
                 raise RuntimeError(f"ledger schema {row['value']} is newer than this software ({SCHEMA_VERSION})")
+            apply_timing_schema(self._conn)  # time-accuracy additions (ledger_timing.py), append-only
             # New ledger, or one created before tamper evidence existed: start the chain with a
             # genesis entry and adopt the rows already present (docs/07).
             chain.ensure_genesis(self._conn, self.path.parent / chain.ANCHOR_LOG_NAME)

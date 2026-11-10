@@ -5,9 +5,9 @@ from __future__ import annotations
 import ctypes
 import logging
 import os
-import re
 import stat
 import subprocess
+import time
 from ctypes import wintypes
 from dataclasses import dataclass
 from pathlib import Path
@@ -184,7 +184,6 @@ SENTINEL_SERVICE_NAME = "SentinelRecorder"
 # ---------------------------------------------------------------------- Windows Time (w32tm)
 HRESULT_SERVICE_NOT_STARTED = 0x80070426
 HRESULT_ACCESS_DENIED = 0x80070005
-_NOT_SYNCED_SOURCES = ("local cmos clock", "free-running system clock")
 
 
 @dataclass(frozen=True)
@@ -197,22 +196,34 @@ class W32TimeStatus:
     last_sync: str | None = None
 
 
-def _lead_int(value: str) -> int | None:
-    m = re.match(r"\s*(-?\d+)", value)
-    return int(m.group(1)) if m else None
+_REASON_WORDS = {
+    "ok": "synchronised with {source} (stratum {stratum})",
+    "not_synchronized": "Windows reports the clock as not synchronised, or is using its own clock ({source})",
+    "no_valid_time_source": "Windows reports no valid time source (stratum {stratum})",
+    "never_synchronized": "Windows has never synchronised with a time server",
+    "last_sync_error": "the last Windows Time synchronisation failed",
+    "last_sync_too_old": "the last successful Windows Time synchronisation is too old",
+    "sync_age_not_reported": "Windows did not report when it last synchronised (cannot judge freshness)",
+    "sync_age_limit_unknown": "the synchronisation age limit is unknown (no poll interval reported)",
+    "status_not_recognised": "w32tm output not recognised (non-English Windows?)",
+}
 
 
-def parse_w32tm_status(returncode: int, output: str) -> W32TimeStatus:
-    """Interpret ``w32tm /query /status``.
+def parse_w32tm_status(returncode: int, output: str, now_epoch: float | None = None,
+                       max_sync_age_s: float | None = None) -> W32TimeStatus:
+    """Interpret ``w32tm /query /status [/verbose]``.
 
-    * Error HRESULTs are matched by number (language-neutral). Service not running means
-      Windows is not disciplining the clock now: reported as *not synchronised* (T-002), because
-      on a multi-day evidence recorder an undisciplined PC clock drifts seconds per day.
-    * Field labels are English. On a non-English Windows the labels are translated, nothing is
-      recognised, and the result is ``None`` (unknown) rather than a guess.
-    * "Synchronised" means: leap indicator not 3, stratum 1-15, and a source that is not the
-      local clock. It does **not** measure the current offset (see docs/07 E1 note).
+    Integration (docs/INTEGRATION.md): ONE parser. The field parsing and the "synchronised"
+    decision are ``sentinel.timesync.parse_w32tm_status`` (time-accuracy branch), whose rule is
+    stricter: True only with leap indicator 0-2, stratum 1-15, Last Sync Error 0 and a last good
+    sync no older than ``max_sync_age_s`` (default 2 x the reported poll interval) -- which needs
+    the ``/verbose`` output. This adapter keeps the windows-service branch's language-neutral
+    handling of error HRESULTs: service not running -> *not synchronised* (T-002); access denied
+    or another failure -> unknown. Labels are English; on a non-English Windows nothing is
+    recognised and the result is ``None`` (unknown) rather than a guess.
     """
+    from ..timesync import parse_w32tm_status as _parse
+
     rc = returncode & 0xFFFFFFFF
     text = output or ""
     if rc == HRESULT_SERVICE_NOT_STARTED or "0x80070426" in text.lower():
@@ -221,34 +232,32 @@ def parse_w32tm_status(returncode: int, output: str) -> W32TimeStatus:
         return W32TimeStatus(None, "access denied when querying the Windows Time service")
     if rc != 0:
         return W32TimeStatus(None, f"w32tm failed (exit 0x{rc:08x})")
-    fields: dict[str, str] = {}
-    for line in text.splitlines():
-        key, sep, value = line.partition(":")
-        if sep:
-            fields[key.strip().lower()] = value.strip()
-    leap = _lead_int(fields["leap indicator"]) if "leap indicator" in fields else None
-    stratum = _lead_int(fields["stratum"]) if "stratum" in fields else None
-    source = fields.get("source")
-    last = fields.get("last successful sync time")
+    p = _parse(text, time.time() if now_epoch is None else now_epoch, max_sync_age_s)
+    leap, stratum, source = p.get("leap_indicator"), p.get("stratum"), p.get("source")
+    common = {"leap_indicator": leap, "stratum": stratum, "source": source,
+              "last_sync": p.get("last_successful_sync_time_local_text")}
     if leap is None and stratum is None:
-        return W32TimeStatus(None, "w32tm output not recognised (non-English Windows?)", source=source)
-    common = {"leap_indicator": leap, "stratum": stratum, "source": source, "last_sync": last}
-    if leap == 3:
-        return W32TimeStatus(False, "Windows reports the clock as not synchronised (leap indicator 3)", **common)
-    if stratum is not None and not 1 <= stratum <= 15:
-        return W32TimeStatus(False, f"Windows reports no valid time source (stratum {stratum})", **common)
-    if source and source.strip().lower() in _NOT_SYNCED_SOURCES:
-        return W32TimeStatus(False, f"Windows is using its own clock ({source}), not a time server", **common)
-    if last and last.strip().lower() == "unspecified":
-        return W32TimeStatus(False, "Windows has never synchronised with a time server", **common)
-    return W32TimeStatus(True, f"synchronised with {source or 'a time source'} (stratum {stratum})", **common)
+        return W32TimeStatus(None, _REASON_WORDS["status_not_recognised"], source=source)
+    code = str(p.get("sync_reason"))
+    reason = _REASON_WORDS.get(code, code).format(source=source or "a time source", stratum=stratum)
+    return W32TimeStatus(p.get("synchronized"), reason, **common)
 
 
-def query_w32time(timeout_s: float = 10.0) -> W32TimeStatus:
-    try:
-        cp = subprocess.run(["w32tm", "/query", "/status"], capture_output=True, timeout=timeout_s,
-                            check=False, creationflags=CREATE_NO_WINDOW)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return W32TimeStatus(None, f"w32tm could not be run ({exc.__class__.__name__})")
-    out = (cp.stdout or b"").decode("utf-8", "replace") + (cp.stderr or b"").decode("utf-8", "replace")
-    return parse_w32tm_status(cp.returncode, out)
+def query_w32time(timeout_s: float = 10.0, max_sync_age_s: float | None = None) -> W32TimeStatus:
+    """``w32tm /query /status /verbose`` (the verbose form reports the sync age the freshness rule
+    needs); falls back to the plain form if the verbose one fails for another reason."""
+    def run(argv: list[str]) -> tuple[int, str] | None:
+        try:
+            cp = subprocess.run(argv, capture_output=True, timeout=timeout_s, check=False,
+                                creationflags=CREATE_NO_WINDOW)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        return cp.returncode, (cp.stdout or b"").decode("utf-8", "replace") + (cp.stderr or b"").decode("utf-8", "replace")
+
+    got = run(["w32tm", "/query", "/status", "/verbose"])
+    if got is None or (got[0] != 0 and (got[0] & 0xFFFFFFFF) not in (HRESULT_SERVICE_NOT_STARTED, HRESULT_ACCESS_DENIED)):
+        plain = run(["w32tm", "/query", "/status"])
+        got = plain if plain is not None else got
+    if got is None:
+        return W32TimeStatus(None, "w32tm could not be run")
+    return parse_w32tm_status(got[0], got[1], max_sync_age_s=max_sync_age_s)

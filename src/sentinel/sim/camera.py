@@ -18,6 +18,7 @@ Faults:
     go_online()
     restart_encoder()  new encoder process: stream timestamps restart (camera reboot)
     corrupt(n)      overwrite the next n TS packets' payloads with random bytes
+    clock_rate=     (constructor) camera clock runs fast/slow: stream time = rate x real time
 
 CLI: ``python -m sentinel.sim.camera --port 8554`` then type a fault name and Enter.
 """
@@ -40,9 +41,18 @@ CHUNK_PACKETS = 7  # 1316 bytes, the conventional UDP/TS payload size
 
 class SimulatedCamera:
     def __init__(self, port: int = 0, host: str = "127.0.0.1", size: str = "640x480", fps: int = 15,
-                 bitrate: str = "800k", gop: int | None = None, ffmpeg: str = "ffmpeg") -> None:
+                 bitrate: str = "800k", gop: int | None = None, ffmpeg: str = "ffmpeg",
+                 clock_rate: float = 1.0) -> None:
+        """``clock_rate``: camera clock speed relative to real time (1.01 = camera clock 1 % fast:
+        each real second carries 1.01 s of stream time). Frames are still produced and sent in
+        real time (``-re``); only their timestamps are scaled (``setpts``). Measured with FFmpeg
+        9.0.1: rate 1.01 gave 1.011 s of stream time per monotonic second at the receiver
+        (1.0007 without scaling), whereas ``-readrate`` pacing was less exact."""
+        if not 0.5 <= clock_rate <= 2.0:
+            raise ValueError("clock_rate must be between 0.5 and 2.0")
         self.host, self.port = host, port
         self.size, self.fps, self.bitrate = size, fps, bitrate
+        self.clock_rate = clock_rate
         self.gop = gop or fps          # one keyframe per second by default
         self.ffmpeg = ffmpeg
         self._clients: list[socket.socket] = []
@@ -125,8 +135,12 @@ class SimulatedCamera:
     # ------------------------------------------------------------------ internals
     def _start_encoder(self) -> None:
         argv = [self.ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-re",
-                "-f", "lavfi", "-i", f"testsrc2=size={self.size}:rate={self.fps}",
-                "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
+                "-f", "lavfi", "-i", f"testsrc2=size={self.size}:rate={self.fps}"]
+        if self.clock_rate != 1.0:
+            # Camera clock drift: fine timebase so scaled timestamps are not rounded to frame
+            # ticks; passthrough so FFmpeg does not drop/duplicate frames to restore the rate.
+            argv += ["-vf", f"settb=1/90000,setpts=PTS*{self.clock_rate:.6f}", "-fps_mode", "passthrough"]
+        argv += ["-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
                 "-g", str(self.gop), "-keyint_min", str(self.gop), "-bf", "0", "-pix_fmt", "yuv420p",
                 # SPS/PPS before every keyframe, as IP cameras do, so late joiners can decode.
                 "-x264-params", "repeat-headers=1",
@@ -238,8 +252,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--size", default="640x480")
     ap.add_argument("--fps", type=int, default=15)
     ap.add_argument("--bitrate", default="800k")
+    ap.add_argument("--clock-rate", type=float, default=1.0,
+                    help="camera clock speed vs real time, e.g. 1.0001 = 100 ppm fast (drift testing)")
     args = ap.parse_args(argv)
-    cam = SimulatedCamera(port=args.port, size=args.size, fps=args.fps, bitrate=args.bitrate).start()
+    cam = SimulatedCamera(port=args.port, size=args.size, fps=args.fps, bitrate=args.bitrate,
+                          clock_rate=args.clock_rate).start()
     print(f"simulated camera at {cam.url} (input_format = \"mpegts\")")
     print("commands: freeze resume drop offline online restart corrupt quit")
     actions = {"freeze": cam.freeze, "resume": cam.resume, "drop": cam.drop_clients, "offline": cam.go_offline,

@@ -21,6 +21,7 @@ silently replace the earlier entry instead of failing).
 | 6+ | cross-branch items (a)(b)(c) | 493 passed | — |
 | 7 | design/tamper-evident-ledger | 575 passed (573 after the merge, +2 integration tests) | db.py, service.py, tests/integration/harness.py, docs/07 |
 | 8 | req/operator-gui (322ed90) | 793 passed (4 failed before the test adaptation below; +3 integration tests) | none textually (auto-merged) |
+| 9 | design/time-accuracy (782a8c9) | 834 passed | config.py, db.py, service.py, diagnostics.py, example config, docs/05 |
 
 ## 1. fix/ledger-reader-retry
 Clean merge. Note carried forward: `ledgerchain._ro_connect` (tamper-evident-ledger branch) does
@@ -244,3 +245,58 @@ Auto-merged (only `pyproject.toml` shared). Integration changes:
   account gets a partial report (the status part only). A service-side report request is needed.
   The GUI is not registered in `launcher.view.VIEW_PROVIDERS` yet (Sentinel.exe still shows the
   console view); packaging PySide6 into the frozen build is not done (not built here).
+
+## 9. design/time-accuracy (782a8c9; requested by the coordinator as merge 9)
+Conflicts: `config.py`, `db.py`, `service.py`, `diagnostics.py`, example config, docs/05.
+* **config.py / example config:** `[service]` keeps the chain intervals, `watchdog_timeout_s`
+  and the time branch's `clock_observation_interval_s`, `time_reference_server` (no default; the
+  owner must name the approved local NTP server, otherwise E1's "measured offset" is not met) and
+  `max_sync_age_s`; validation combines all of them. `[export]`/`[drives]` unchanged.
+* **db.py `_migrate`:** `apply_timing_schema` (columns + `clock_observations`) runs **before**
+  `chain.ensure_genesis`, so a pre-existing ledger is adopted with its full schema.
+  `WRITE_ONCE` includes `TIMING_WRITE_ONCE`.
+* **service.py:** imports and `__init__` state of both (watchdog, terminal status, snapshot;
+  clock observations); the status document carries `clock_observation` and `terminal`.
+* **diagnostics.py:** the report keeps both `ledger_chain.json` and `clock_observations.csv`, the
+  time-accuracy summary lines and the chain lines.
+* **docs/05:** row 30 is the time branch's (it supersedes the service branch's row 30, which said
+  drift was not handled); rows 31–34 from the service branch kept.
+* **Ledger chain covers the new timing data** (`ledgerchain.py`), added to chain format 1
+  **before its first release** (no ledger with a released format-1 chain exists; ledgers written
+  by pre-integration branch builds are not supported by this change):
+  * runs: `time_method` (write-once), `time_correction_s`, `camera_drift_ppm`,
+    `host_clock_drift_ppm`, `drift_measured_over_s`, `time_correction_limited_count` (may change
+    while the run is open, final once it ended);
+  * segments: `time_correction_start_s/end_s/stream_s` (write-once, = `db.WRITE_ONCE`),
+    `time_correction_limited`, `time_correction_detail` (covered once sealed, like the rest);
+  * `clock_observations`: new covered table, insert-only like events (kind `clock_observation`);
+    `ledger_timing.insert_clock_observation` now writes its chain entry in the same transaction.
+  * **Supervisor order fixed:** at run end the final drift figures were written *after* the run
+    was marked ended; under the chain rule "an ended run never changes" that would be reported as
+    an alteration. `_persist_drift` now runs before the ended update (same values, same
+    transaction boundaries otherwise).
+  * Verifier tolerates a ledger without a `clock_observations` table (note, not a finding).
+  Tests adapted, with reason: `test_ledgerchain.py::test_existing_ledger_gets_genesis_and_adopts_rows`
+  (genesis now also counts `clock_observations`), `test_time_accuracy_units.py::test_old_ledger_gains_timing_columns_append_only`
+  (its hand-made "old" schema lacked baseline columns that chain adoption reads; it now starts from
+  the real baseline DDL with the same row and the same assertions).
+* **One w32tm parser** (coordinator instruction; `platform/windows.py` + `timesync.py`):
+  `platform.windows.parse_w32tm_status` is now an adapter over `timesync.parse_w32tm_status`
+  (the time branch's stricter rule: True only with Last Sync Error 0 and a last good sync no older
+  than `max_sync_age_s`, default 2 × poll interval). The adapter keeps the service branch's
+  language-neutral HRESULT handling (service not running → not synchronised/T-002; access denied
+  → unknown). `query_w32time` now asks `w32tm /query /status /verbose` (needed for the sync age).
+  Two rules of the service parser were added to the shared parser so nothing got weaker: stratum
+  0 or ≥ 16 → not synchronised, "Last Successful Sync Time: unspecified" → not synchronised.
+  Behaviour change: plain (non-verbose) output without a sync age is now *unknown* instead of
+  *synchronised*. Test adapted: `test_w32tm.py::test_documented_synchronised_layout` (plain → None;
+  verbose fresh → True, stale → False, failing → False). `Platform.clock_synchronized()` does not
+  receive `[service] max_sync_age_s` (it has no config); it uses the default rule.
+* **Read paths:** the time branch's recovery/finaliser use the read-write ledger (no retry needed);
+  diagnostics and chain verification use the read-only paths with the reader retry; the GUI uses
+  the snapshot. No conflict found.
+* **Tests after merge 9:** `tests/unit` **834 passed**. `tests/integration/test_time_accuracy.py`
+  + `test_ledger_chain.py` together: **6 passed, 1 failed** (`test_absorbed_freeze_is_still_a_gap_under_drift`;
+  the log shows a rate-limited correction and an extra short timeline gap while other agents
+  loaded the machine); that test re-run alone: **1 passed**. Every harness-based run also
+  verified the ledger chain after stopping (no false "altered").

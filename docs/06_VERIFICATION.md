@@ -25,7 +25,7 @@ but not demonstrated.
 | 3 | Resume after restart | `test_hard_kill_restart_recovery_and_graceful_stop` | see report |
 | 3 | Detect stalled recording while FFmpeg runs | `test_stream_freeze_detected_as_stall`, `test_status_recording_requires_measured_progress` | see report |
 | 3 | Storage exhaustion / write failure | `test_storage_warning_then_full_then_recovery`, `test_storage_full_message`, `test_storage_read_failure_is_critical_error` | see report |
-| 3 | Accurate, documented timestamps | `test_first_segment_time_matches_wall_clock`, `test_timebase_*`, docs/03 §4 | see report |
+| 3 | Accurate, documented timestamps | `test_first_segment_time_matches_wall_clock`, `test_timebase_*`, `tests/integration/test_time_accuracy.py` (1 % camera drift + 0.5 % PC monotonic drift), `tests/unit/test_time_accuracy_units.py`, docs/03 §4 | see report |
 | 3 | Interruption-tolerant container | `test_probe_truncated_segment_is_playable_but_shorter`, `test_ffmpeg_crash_…` | see report |
 | 3 | Distinguish finalized / active / interrupted / corrupt / missing | `test_legal_transitions`, `test_illegal_transitions_rejected`, crash/corrupt/gap tests | see report |
 | 3 | Never present interrupted as continuous | gap tests incl. `test_freeze_absorbed_by_ffmpeg_is_recorded_as_gap`, `test_short_freeze_is_recorded_as_internal_gap` | see report |

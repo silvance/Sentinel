@@ -424,7 +424,9 @@ def test_existing_ledger_gets_genesis_and_adopts_rows(tmp_path: Path) -> None:
     led = Ledger(path)                                      # upgrade
     rows = led.query("SELECT kind, ref_key, record FROM ledger_chain ORDER BY seq")
     genesis = json.loads(rows[0]["record"])["data"]
-    assert genesis["pre_existing_rows"] == {"recording_runs": 1, "segments": 2, "recording_gaps": 0, "events": 1}
+    # Integration: clock_observations (time accuracy) is a covered table too.
+    assert genesis["pre_existing_rows"] == {"recording_runs": 1, "segments": 2, "recording_gaps": 0, "events": 1,
+                                            "clock_observations": 0}
     assert genesis["adopted_rows"] == 3 and not genesis["previous_chain_missing"]
     assert [r["kind"] for r in rows[1:]] == ["adopted"] * 3          # the ACTIVE segment is not yet covered
     led.transition("S-ACT", SegmentState.INTERRUPTED, sha256="bb" * 32)   # sealed after the upgrade: covered
@@ -698,7 +700,7 @@ def test_rule_compliant_appends_are_the_documented_limit(tmp_path: Path) -> None
 
 def test_semantic_rules_match_the_ledger_write_once_columns() -> None:
     from sentinel.db import WRITE_ONCE
-    assert lc.SEGMENT_WRITE_ONCE == WRITE_ONCE
+    assert lc.SEGMENT_WRITE_ONCE == WRITE_ONCE          # incl. the time-accuracy columns (integration)
     seg = {"sha256": "a", "end_utc": "x", "content_sha256": None, "clock_anomaly": 0, "audit_status": None}
     assert lc.illegal_changes("segments", seg, dict(seg, content_sha256="b", clock_anomaly=1, audit_status="ok")) == []
     assert lc.illegal_changes("segments", seg, dict(seg, clock_anomaly=1, sha256="b"))

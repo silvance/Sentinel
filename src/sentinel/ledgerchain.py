@@ -100,7 +100,11 @@ STRUCTURAL_KINDS = frozenset({"genesis", "discrepancy", "protection_gap"})   # d
 RUN_FIELDS = ("run_id", "camera_id", "directory", "launched_utc", "launch_mono", "anchor_utc", "anchor_method",
               "timeline_break_stream_s", "timeline_shift_s", "display_timezone", "ended_utc", "end_reason",
               "exit_code", "end_detail", "clock_anomaly", "app_version", "ffmpeg_version", "host",
-              "command_redacted")
+              "command_redacted",
+              # Integration with design/time-accuracy (ledger_timing.RUN_COLUMNS), added to format 1
+              # before its first release: how the run's segment times were derived and measured drift.
+              "time_method", "time_correction_s", "camera_drift_ppm", "host_clock_drift_ppm",
+              "drift_measured_over_s", "time_correction_limited_count")
 RUN_END_FIELDS = ("last_stream_time_s",)      # persisted every ~10 s while running; covered once ended
 SEGMENT_FIELDS = ("segment_id", "camera_id", "run_id", "seq", "rel_path", "state", "stream_start_s",
                   "stream_end_s", "start_utc", "end_utc", "time_source", "observed_first_utc",
@@ -108,11 +112,23 @@ SEGMENT_FIELDS = ("segment_id", "camera_id", "run_id", "seq", "rel_path", "state
                   "content_hash_method", "decoded_frame_count", "framehash_rel_path", "framehash_sha256",
                   "pix_fmt", "video_codec", "width", "height", "packet_count", "keyframe_count",
                   "max_pts_gap_s", "interrupted", "clock_anomaly", "warnings", "validation_detail",
-                  "sealed_utc", "audit_status", "created_utc")
+                  "sealed_utc", "audit_status", "created_utc",
+                  # Integration with design/time-accuracy (ledger_timing.SEGMENT_COLUMNS): the
+                  # correction that went into start_utc/end_utc, so the derivation is protected too.
+                  "time_correction_start_s", "time_correction_end_s", "time_correction_stream_s",
+                  "time_correction_limited", "time_correction_detail")
 GAP_FIELDS = ("gap_id", "camera_id", "kind", "start_utc", "end_utc", "duration_s", "reason", "prev_segment_id",
               "next_segment_id", "ended_run_id", "start_basis", "attempts", "clock_anomaly", "detail",
               "opened_utc", "closed_utc")
 EVENT_FIELDS = ("event_id", "ts_utc", "severity", "category", "code", "message", "detail")
+# Integration with design/time-accuracy: clock observations are E1 evidence (how accurate the
+# PC clock was); insert-only, like events.
+CLOCK_OBSERVATION_FIELDS = ("obs_id", "observed_utc", "mono_s", "reason", "platform", "sync_tool", "synchronized",
+                            "sync_source", "last_sync_utc", "os_offset_s", "os_detail", "wall_minus_mono_s",
+                            "host_clock_drift_s", "host_clock_drift_ppm", "clock_steps_total_s", "run_id",
+                            "stream_time_s", "camera_drift_ppm", "time_correction_s", "ref_server", "ref_offset_s",
+                            "ref_delay_s", "ref_detail")
+INSERT_ONLY = frozenset({"events", "clock_observations"})   # rows never change once written
 
 # table -> (primary key column, covered columns). Segments are covered once sealed (terminal state).
 COVERED: dict[str, tuple[str, tuple[str, ...]]] = {
@@ -120,9 +136,10 @@ COVERED: dict[str, tuple[str, tuple[str, ...]]] = {
     "segments": ("segment_id", SEGMENT_FIELDS),
     "recording_gaps": ("gap_id", GAP_FIELDS),
     "events": ("event_id", EVENT_FIELDS),
+    "clock_observations": ("obs_id", CLOCK_OBSERVATION_FIELDS),
 }
 _NOUN = {"recording_runs": "recording run", "segments": "recording segment", "recording_gaps": "recording gap",
-         "events": "log event"}
+         "events": "log event", "clock_observations": "clock observation"}
 
 
 class ChainError(RuntimeError):
@@ -259,6 +276,8 @@ def _derive_kind(table: str, prev: dict[str, Any] | None, post: dict[str, Any] |
         return "row_uncovered"
     if table == "events":
         return "event"
+    if table == "clock_observations":
+        return "clock_observation"
     if table == "recording_runs":
         if prev is None:
             return "run_started"
@@ -539,15 +558,21 @@ def parse_expected_head(text: str, source: str = "given on the command line") ->
 SEGMENT_WRITE_ONCE = frozenset({          # must equal db.WRITE_ONCE (unit-tested)
     "sha256", "size_bytes", "rel_path", "start_utc", "end_utc", "duration_s",
     "content_sha256", "content_hash_method", "decoded_frame_count", "framehash_rel_path", "framehash_sha256",
+    # integration: ledger_timing.TIMING_WRITE_ONCE (db.WRITE_ONCE includes it)
+    "time_correction_start_s", "time_correction_end_s", "time_correction_stream_s",
 })
 _SEG_FREE = frozenset({"audit_status"})                  # rolling audit result: may change any time
 _RAISE_ONLY = frozenset({"clock_anomaly"})               # 0 -> 1 only
-_RUN_END = frozenset({"ended_utc", "end_reason", "exit_code", "end_detail", "last_stream_time_s"})
-_RUN_WRITE_ONCE = frozenset({"anchor_utc", "anchor_method", "timeline_break_stream_s", "timeline_shift_s"})
+_RUN_END = frozenset({"ended_utc", "end_reason", "exit_code", "end_detail", "last_stream_time_s",
+                      # integration (time-accuracy): updated at every segment boundary while running
+                      "time_correction_s", "camera_drift_ppm", "host_clock_drift_ppm", "drift_measured_over_s",
+                      "time_correction_limited_count"})
+_RUN_WRITE_ONCE = frozenset({"anchor_utc", "anchor_method", "timeline_break_stream_s", "timeline_shift_s",
+                             "time_method"})
 _GAP_WHILE_OPEN = frozenset({"ended_run_id", "end_utc", "duration_s", "next_segment_id", "closed_utc"})
 VALID_KINDS = frozenset({"genesis", "adopted", "run_started", "run_updated", "run_ended", "segment_sealed",
                          "segment_updated", "gap_opened", "gap_recorded", "gap_updated", "gap_closed", "event",
-                         "discrepancy", "protection_gap", "chain_repair"})
+                         "clock_observation", "discrepancy", "protection_gap", "chain_repair"})
 
 
 def _same(a: Any, b: Any) -> bool:
@@ -561,9 +586,9 @@ def _raised(a: Any, b: Any) -> bool:
 def illegal_changes(table: str, prev: dict[str, Any], cur: dict[str, Any]) -> list[str]:
     """Why the change ``prev -> cur`` between two entries of one row is NOT something the recorder
     does (empty list = a legitimate change)."""
-    if table == "events":
+    if table in INSERT_ONLY:
         changed = _diff(prev, cur) if not _same(prev, cur) else "entered twice"
-        return [f"log events are never changed once written ({changed})"]
+        return [f"{_NOUN[table]}s are never changed once written ({changed})"]
     out: list[str] = []
     for f in sorted(set(prev) | set(cur)):
         a, b = prev.get(f), cur.get(f)
@@ -1024,6 +1049,10 @@ class _Verifier:
                     rows = c.execute(f"SELECT rowid AS _rowid_, * FROM {table} WHERE rowid > ? ORDER BY rowid LIMIT ?",
                                      (last_rowid, self.chunk)).fetchall()
                 except sqlite3.OperationalError as exc:
+                    if table == "clock_observations" and "no such table" in str(exc):
+                        # A ledger last opened by software before time accuracy was integrated.
+                        self.rep.notes.append("This recording log has no clock observations table.")
+                        return
                     self.find(None, "table_missing", f"The {noun} table cannot be read ({exc}).")
                     return
                 if not rows:

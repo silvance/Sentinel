@@ -29,6 +29,7 @@ timeline_drift_tolerance_s = 3.0   # stream time behind real time by more than t
 timeline_drift_persist_s = 5.0
 escalate_after_s = 180             # outage longer than this => "Automatic recovery unsuccessful"
 clock_step_tolerance_s = 2.0
+max_clock_drift_ppm = 1000        # segment-time drift correction never follows faster changes (flags them)
 display_timezone = "America/New_York"   # IANA name; all stored times remain UTC
 
 [storage]
@@ -46,6 +47,9 @@ ffprobe = "/usr/bin/ffprobe"
 
 [service]
 log_level = "INFO"
+clock_observation_interval_s = 900 # OS time-sync / clock-offset record for the evidence ledger (E1)
+time_reference_server = ""          # approved local NTP server, e.g. "192.0.2.1"; measures the PC clock offset (E1)
+max_sync_age_s = 0                  # Windows: older last sync = not synchronised (0 = 2 x poll interval)
 
 [export]
 # Every exported file is always read back from the review drive and its SHA-256 checked.

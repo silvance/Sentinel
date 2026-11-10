@@ -9,7 +9,10 @@ One FFmpeg child per *run*. The supervisor measures, never assumes:
   that FFmpeg removed from its timeline (e.g. MPEG-TS discontinuity correction absorbs forward
   jumps > 10 s). The lost interval is recorded as a gap and the run is restarted on a fresh
   time anchor;
-* every run end is followed by a gap record (via the finaliser queue).
+* every run end is followed by a gap record (via the finaliser queue);
+* segment times follow measured reception time: at each segment boundary the run anchor gets a
+  rate-limited correction for camera-clock and PC-monotonic drift (``DriftTracker``, docs/03
+  §4.2); wall-clock steps and sudden timing jumps are flagged, never followed.
 
 It retries forever: a camera that is unplugged for a week is retried every ``backoff_max_s``
 for a week. Unexpected internal errors are retried too; only repeated internal failures end
@@ -18,6 +21,7 @@ the process, so the service manager (systemd ``Restart=always``) starts it fresh
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import secrets
@@ -41,11 +45,17 @@ from .ffmpeg_cmd import SEGMENT_LIST_NAME, build_record_argv, redacted_command
 from .finalizer import Finalizer, GapJob, SegmentJob
 from .progress import ProgressParser
 from .segment_list import SegmentEntry, SegmentListReader
-from .timebase import ClockStepDetector, RunTimebase
+from .timebase import TIME_METHOD, ClockStepDetector, DriftTracker, RunTimebase, TimeKnot, read_clock_pair
 
 log = logging.getLogger(__name__)
 _SEG_RE = re.compile(r"^seg_(\d{6,})\.ts$")
 MAX_CONSECUTIVE_INTERNAL_ERRORS = 5
+
+
+def segment_ready(entry: SegmentEntry, newest_out_time_s: float | None) -> bool:
+    """A listed segment may be timed once a progress report beyond its end has been seen (and
+    passed through the lost-time check); see the supervisor loop."""
+    return newest_out_time_s is not None and newest_out_time_s > entry.end_s
 
 
 class Backoff:
@@ -88,6 +98,11 @@ class LiveState:
     drift_lag_at_start: float = 0.0
     last_ok_out_time_s: float | None = None
     internal_errors: int = 0
+    # time accuracy (docs/03 §4.2): measured drift of the current run and the correction applied
+    camera_drift_ppm: float | None = None
+    host_clock_drift_ppm: float | None = None
+    time_correction_s: float | None = None
+    clock_slew_run: bool = False               # current run saw a faster-than-drift clock change
 
 
 @dataclass
@@ -173,8 +188,8 @@ class RecordingSupervisor:
     # ------------------------------------------------------------------ one FFmpeg lifetime
     def run_once(self) -> RunOutcome:
         rec = self.cfg.recording
-        wall0, mono0 = self.clock.wall(), self.clock.mono()
-        run_id = f"{compact_utc(wall0)}-{secrets.token_hex(4)}"
+        wall0, mono0, _ = read_clock_pair(self.clock)       # tight pair: reference for host drift
+        run_id =f"{compact_utc(wall0)}-{secrets.token_hex(4)}"
         run_dir = self.cam_dir / run_id
         argv = build_record_argv(self.cfg, self._input_url, run_dir)
         run_dir.mkdir(parents=True, exist_ok=False)
@@ -184,19 +199,23 @@ class RecordingSupervisor:
                 run_id=run_id, camera_id=self.cfg.camera.id, directory=rel_dir, launched_utc=iso_utc(wall0),
                 launch_mono=mono0, display_timezone=rec.display_timezone, app_version=__version__,
                 ffmpeg_version=self.ffmpeg_version, host=socket.gethostname(),
-                command_redacted=redacted_command(argv))
+                command_redacted=redacted_command(argv), time_method=TIME_METHOD)
         except Exception:
             self._remove_empty_run_dir(run_dir)
             raise
         self._open_run = run_id
         self._open_run_dir = run_dir
         timebase = RunTimebase(wall0, mono0)
+        drift = DriftTracker(rec.max_clock_drift_ppm)
+        steps = ClockStepDetector(wall0, mono0, rec.clock_step_tolerance_s)
         with self.live.lock:
             lv = self.live
             lv.run_id, lv.run_launched_utc = run_id, iso_utc(wall0)
             lv.media_seen, lv.last_out_time_s, lv.last_advance_mono = False, None, None
             lv.lag_s, lv.drift_since_mono, lv.drift_break_stream_s, lv.last_ok_out_time_s = 0.0, None, None, None
             lv.lag_baseline_s = None
+            lv.camera_drift_ppm, lv.host_clock_drift_ppm, lv.time_correction_s = None, None, None
+            lv.clock_slew_run = False
             lv.attempts += 1
         log.info("run %s: launching FFmpeg: %s", run_id, redacted_command(argv))
 
@@ -205,14 +224,15 @@ class RecordingSupervisor:
                                     **self.platform.child_popen_kwargs())
         except OSError as exc:
             log.error("run %s: cannot launch FFmpeg: %s", run_id, exc)
-            return self._end_run(run_id, run_dir, timebase, RunEndReason.LAUNCH_FAILED, None, [str(exc)], 0.0)
+            return self._end_run(run_id, run_dir, timebase, RunEndReason.LAUNCH_FAILED, None, [str(exc)], 0.0,
+                                 drift, steps)
         self.platform.bind_child(proc)
         self.current_proc = proc  # exposed for diagnostics and fault-injection tests
         with self.live.lock:
             self.live.ffmpeg_running = True
 
         stderr_tail: deque[str] = deque(maxlen=40)
-        t_out = threading.Thread(target=self._read_progress, args=(proc, timebase), daemon=True,
+        t_out = threading.Thread(target=self._read_progress, args=(proc, timebase, drift), daemon=True,
                                  name=f"progress-{run_id}")
         t_err = threading.Thread(target=self._read_stderr, args=(proc, stderr_tail, run_id), daemon=True,
                                  name=f"stderr-{run_id}")
@@ -221,10 +241,9 @@ class RecordingSupervisor:
 
         seglist = SegmentListReader(run_dir / SEGMENT_LIST_NAME)
         known: dict[str, str] = {}               # filename -> segment_id
-        pending: list[SegmentEntry] = []
+        pending: list[tuple[SegmentEntry, str]] = []   # (entry, wall time the close was seen)
         reason: RunEndReason | None = None
         clock_flagged = False
-        clock = ClockStepDetector(wall0, mono0, rec.clock_step_tolerance_s)
         last_persist = mono0
         try:
             while True:
@@ -235,16 +254,21 @@ class RecordingSupervisor:
                 # Closed segments wait until the run's time anchor has been measured: after a
                 # (re)connect FFmpeg may flush buffered media and close a segment before its
                 # first progress report.
-                pending.extend(seglist.read_new())
+                seen = iso_utc(self.clock.wall())
+                pending.extend((e, seen) for e in seglist.read_new())
                 with self.live.lock:
                     anchored = timebase.has_anchor
                     drift_suspected = self.live.drift_since_mono is not None
+                    newest_t = self.live.last_out_time_s
                 # While stream time is suspected of having lost real time, hold closed segments:
-                # if confirmed, the break must be recorded before they are sealed.
+                # if confirmed, the break must be recorded before they are sealed. A segment is
+                # also held until a progress report *newer than its end* has been checked for
+                # lost time: FFmpeg can list a segment (closed by the first packet after a freeze)
+                # before reporting the stream time that reveals the freeze.
                 if anchored and not drift_suspected:
-                    for entry in pending:
-                        self._on_closed(run_id, run_dir, entry, known, timebase)
-                    pending.clear()
+                    while pending and segment_ready(pending[0][0], newest_t):
+                        entry, seen_at = pending.pop(0)
+                        self._on_closed(run_id, run_dir, entry, known, timebase, drift, steps, seen_at)
 
                 with self.live.lock:
                     lv = self.live
@@ -267,10 +291,18 @@ class RecordingSupervisor:
                     # Stream time is persistently behind real time and is not catching up: real
                     # time passed that is not in the recording. Record where and how much.
                     reason = RunEndReason.TIMELINE_DISCONTINUITY
-                    shift = round(lag - baseline, 3)
+                    with self.live.lock:
+                        # Measured from reception offsets either side of the break (unbiased by
+                        # clock drift); the lag-vs-baseline figure is the fallback.
+                        jump = drift.measure_jump(brk)
+                    shift = round(jump if jump is not None and jump > 0 else lag - baseline, 3)
                     log.error("run %s: %.1f s of real time missing from the stream after stream time %.2f s",
                               run_id, shift, brk)
                     self.ledger.update_run(run_id, timeline_break_stream_s=brk, timeline_shift_s=shift)
+                    with self.live.lock:
+                        # Held segments after the break are measured on the shifted timeline; the
+                        # shift itself becomes an explicit gap (finaliser), never a drift correction.
+                        drift.set_break(brk, shift)
                     self.ledger.add_event("warning", "recorder", "timeline_discontinuity",
                                           f"Camera stream lost about {shift:.1f} s of footage",
                                           {"run_id": run_id, "stream_time_s": brk, "missing_s": shift})
@@ -287,8 +319,11 @@ class RecordingSupervisor:
                     self._stop_ffmpeg(proc, graceful=True)
                     break
 
-                clock.update(self.clock.wall(), now)
-                step = clock.total_s
+                # Wall and monotonic read back to back (``now`` is ~a whole loop iteration old):
+                # loop latency must not masquerade as clock drift.
+                w_pair, m_pair, spread = read_clock_pair(self.clock)
+                steps.update(w_pair, m_pair, spread)
+                step = steps.total_s
                 with self.live.lock:
                     self.live.clock_step_s = step
                 if not clock_flagged and step != 0.0:
@@ -319,9 +354,10 @@ class RecordingSupervisor:
 
         # Final segment list entries (a graceful 'q' lists the last segment) and late files.
         self._register_new_files(run_id, run_dir, known)
-        pending.extend(seglist.read_new())
-        for entry in pending:  # without an anchor, the finaliser falls back to file times (flagged)
-            self._on_closed(run_id, run_dir, entry, known, timebase)
+        seen = iso_utc(self.clock.wall())
+        pending.extend((e, seen) for e in seglist.read_new())
+        for entry, seen_at in pending:  # without an anchor, the finaliser falls back to file times (flagged)
+            self._on_closed(run_id, run_dir, entry, known, timebase, drift, steps, seen_at)
         if seglist.bad_lines:
             log.error("run %s: unparseable segment list lines: %r", run_id, seglist.bad_lines[:5])
 
@@ -338,15 +374,26 @@ class RecordingSupervisor:
                 reason = RunEndReason.FFMPEG_ERROR
         with self.live.lock:
             media_s = self.live.last_out_time_s or 0.0
-        return self._end_run(run_id, run_dir, timebase, reason, exit_code, tail, media_s)
+        return self._end_run(run_id, run_dir, timebase, reason, exit_code, tail, media_s, drift, steps)
 
     def _end_run(self, run_id: str, run_dir: Path, timebase: RunTimebase, reason: RunEndReason,
-                 exit_code: int | None, tail: list[str], media_s: float) -> RunOutcome:
+                 exit_code: int | None, tail: list[str], media_s: float,
+                 drift: DriftTracker | None = None, steps: ClockStepDetector | None = None) -> RunOutcome:
         ended = iso_utc(self.clock.wall())
         last_line = tail[-1] if tail else ""
+        final: TimeKnot | None = None
         with self.live.lock:
             timebase.freeze()
             anchor = timebase.iso_for(0.0)
+            if drift is not None and steps is not None and timebase.anchor_mono is not None and media_s > 0:
+                # Correction at the run's last reported stream time: where an interrupted
+                # (never listed) final segment ends.
+                final = drift.knot(media_s, timebase.anchor_mono, steps.drift_s)
+        # Integration with the tamper-evident ledger: the run's final drift figures are persisted
+        # BEFORE the run is marked ended, because an ended run never changes afterwards (chain rule;
+        # a later update would be reported as an alteration).
+        if final is not None and drift is not None and steps is not None:
+            self._persist_drift(run_id, final, drift, steps)
         self.ledger.update_run(run_id, ended_utc=ended, end_reason=str(reason), exit_code=exit_code,
                                end_detail="\n".join(tail[-10:]) or None, last_stream_time_s=media_s or None,
                                anchor_utc=anchor, anchor_method="progress_min" if anchor else None)
@@ -356,7 +403,15 @@ class RecordingSupervisor:
         prev_end: float | None = 0.0
         for s in segs:
             if s["state"] == str(SegmentState.ACTIVE):
-                self.ledger.update_segment(s["segment_id"], stream_start_s=prev_end)
+                cols: dict[str, object] = {"stream_start_s": prev_end}
+                if final is not None and drift is not None:
+                    with self.live.lock:
+                        c0 = drift.correction_at(prev_end) if prev_end is not None else final.correction_s
+                    cols.update(time_correction_start_s=c0, time_correction_end_s=final.correction_s,
+                                time_correction_stream_s=final.stream_s,
+                                time_correction_limited=int(final.limited),
+                                time_correction_detail=json.dumps(final.detail(), sort_keys=True))
+                self.ledger.update_segment(s["segment_id"], **cols)
                 self.finalizer.submit(SegmentJob(s["segment_id"], "interrupted"))
                 prev_end = None  # nothing after an interrupted segment is contiguous
             else:
@@ -448,7 +503,8 @@ class RecordingSupervisor:
                 observed_first_utc=iso_utc(self.clock.wall()))
 
     def _on_closed(self, run_id: str, run_dir: Path, entry: SegmentEntry, known: dict[str, str],
-                   timebase: RunTimebase) -> None:
+                   timebase: RunTimebase, drift: DriftTracker, steps: ClockStepDetector,
+                   observed: str | None = None) -> None:
         if entry.filename not in known:
             self._register_new_files(run_id, run_dir, known)
         seg_id = known.get(entry.filename)
@@ -457,24 +513,76 @@ class RecordingSupervisor:
             self.ledger.add_event("error", "recorder", "segment_list_unknown_file",
                                   "FFmpeg listed a file that does not exist", {"file": entry.filename})
             return
+        observed = observed or iso_utc(self.clock.wall())   # when the close was seen, not processed
         with self.live.lock:
             first = not timebase.frozen and timebase.has_anchor
             if first:
                 timebase.freeze()
-            start_iso, end_iso = timebase.iso_for(entry.start_s), timebase.iso_for(entry.end_s)
             anchor = timebase.iso_for(0.0)
         if first and anchor:
             self.ledger.update_run(run_id, anchor_utc=anchor, anchor_method="progress_min")
         seg = self.ledger.get_segment(seg_id)
         if seg is None or seg["state"] != str(SegmentState.ACTIVE):
             return
+        knot: TimeKnot | None = None
+        c0 = 0.0
+        with self.live.lock:
+            if timebase.anchor_mono is not None:
+                # Fix this boundary's correction toward measured reception time (docs/03 §4.2).
+                # The start boundary is the previous segment's end knot, so segments stay contiguous.
+                c0 = drift.correction_at(entry.start_s)
+                knot = drift.knot(entry.end_s, timebase.anchor_mono, steps.drift_s)
+            c1 = knot.correction_s if knot is not None else c0
+            start_iso, end_iso = timebase.iso_for(entry.start_s, c0), timebase.iso_for(entry.end_s, c1)
+        cols: dict[str, object] = {}
+        if knot is not None:
+            cols = dict(time_correction_start_s=c0, time_correction_end_s=c1, time_correction_stream_s=entry.end_s,
+                        time_correction_limited=int(knot.limited),
+                        time_correction_detail=json.dumps(knot.detail(), sort_keys=True))
         self.ledger.transition(
             seg_id, SegmentState.CLOSED, stream_start_s=entry.start_s, stream_end_s=entry.end_s,
             start_utc=start_iso, end_utc=end_iso, time_source="run_anchor" if start_iso else None,
-            observed_closed_utc=iso_utc(self.clock.wall()))
+            observed_closed_utc=observed, **cols)
+        if knot is not None:
+            self._persist_drift(run_id, knot, drift, steps)
         self.finalizer.submit(SegmentJob(seg_id, "closed"))
 
-    def _read_progress(self, proc: subprocess.Popen[bytes], timebase: RunTimebase) -> None:
+    def _persist_drift(self, run_id: str, knot: TimeKnot, drift: DriftTracker, steps: ClockStepDetector) -> None:
+        """Record the run's measured drift and current correction (ledger + live status)."""
+        with self.live.lock:
+            cam_ppm, span = drift.camera_drift_ppm()
+            host_ppm = steps.drift_ppm
+            limited = drift.limited_count
+            self.live.camera_drift_ppm, self.live.host_clock_drift_ppm = cam_ppm, host_ppm
+            self.live.time_correction_s = knot.correction_s
+        self.ledger.update_run(run_id, time_correction_s=round(knot.correction_s, 6),
+                               camera_drift_ppm=None if cam_ppm is None else round(cam_ppm, 3),
+                               host_clock_drift_ppm=None if host_ppm is None else round(host_ppm, 3),
+                               drift_measured_over_s=None if span is None else round(span, 3),
+                               time_correction_limited_count=limited)
+        if knot.limited and limited == 1:
+            log.warning("run %s: measured reception time moved faster than %.0f ppm at stream time %.1f s "
+                        "(measured %s s, applied %.3f s); not followed", run_id, self.cfg.recording.max_clock_drift_ppm,
+                        knot.stream_s, knot.measured_s, knot.correction_s)
+            self.ledger.add_event("warning", "clock", "time_correction_limited",
+                                  "Recording time correction was rate-limited: measured timing changed faster "
+                                  "than clock drift can explain", {"run_id": run_id, **knot.detail()})
+        with self.live.lock:
+            host_limited = drift.host_limited_count
+        if knot.host_limited and host_limited == 1:
+            # The PC wall clock moved against the monotonic clock faster than drift (fast time-service
+            # slew or a step below clock_step_tolerance_s): not followed beyond the drift limit and
+            # treated like a clock step — the run's segments are flagged clock_anomaly (T-001).
+            log.error("run %s: system clock slewed faster than %.0f ppm (host drift %.3f s, applied %.3f s)",
+                      run_id, self.cfg.recording.max_clock_drift_ppm, knot.host_s, knot.host_applied_s)
+            self.ledger.mark_run_clock_anomaly(run_id)
+            self.ledger.add_event("warning", "clock", "clock_slew",
+                                  "System clock changed faster than normal drift during recording",
+                                  {"run_id": run_id, **knot.detail()})
+            with self.live.lock:
+                self.live.clock_slew_run = True                               # surfaces T-001 in status
+
+    def _read_progress(self, proc: subprocess.Popen[bytes], timebase: RunTimebase, drift: DriftTracker) -> None:
         parser = ProgressParser()
         tol = self.cfg.recording.timeline_drift_tolerance_s
         assert proc.stdout is not None
@@ -493,6 +601,7 @@ class RecordingSupervisor:
                         lv.media_seen = True
                         lv.last_media_mono_any = mono
                         timebase.observe(snap.out_time_s, mono)
+                        drift.observe(snap.out_time_s, mono)
                     if timebase.anchor_mono is not None:
                         # How far stream time is behind elapsed real time since the anchor,
                         # relative to a baseline that follows slow clock drift (camera vs host,

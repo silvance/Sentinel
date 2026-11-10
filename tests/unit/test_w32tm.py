@@ -52,9 +52,20 @@ def test_access_denied_is_unknown() -> None:
 
 
 def test_documented_synchronised_layout() -> None:
+    # Integration (one parser, sentinel.timesync's stricter freshness rule): the plain
+    # `/status` output does not say how long ago the last good sync was, so it cannot prove the
+    # clock is synchronised NOW -> unknown (no T-002, no false "synchronised"). The `/verbose`
+    # output (what query_w32time now runs) gives the age: fresh -> True, older than twice the
+    # poll interval -> False.
     st = parse_w32tm_status(0, DOC_SYNCED)
-    assert st.synchronized is True and st.stratum == 4 and st.leap_indicator == 0
+    assert st.synchronized is None and st.stratum == 4 and st.leap_indicator == 0
     assert st.source == "ntp.example.internal,0x9"
+    fresh = DOC_SYNCED + "Last Sync Error: 0 (The command completed successfully.)\nTime since Last Good Sync Time: 300.0s\n"
+    assert parse_w32tm_status(0, fresh).synchronized is True
+    stale = fresh.replace("300.0s", "4000.0s")                     # > 2 x 1024 s poll interval
+    assert parse_w32tm_status(0, stale).synchronized is False
+    failing = fresh.replace("Last Sync Error: 0 (", "Last Sync Error: 1 (")
+    assert parse_w32tm_status(0, failing).synchronized is False
 
 
 def test_documented_never_synchronised_layout() -> None:
