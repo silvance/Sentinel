@@ -7,8 +7,11 @@
       <camera>/<YYYY-MM-DD>/<HHMMSS>Z_<HHMMSS>Z_<seg8>.ts   sealed originals, unchanged (FINALIZED / INTERRUPTED)
       <camera>/<YYYY-MM-DD>/<HHMMSS>Z_<HHMMSS>Z_<seg8>.framehash.txt   per-frame SHA-256 sidecar
       <camera>/Quarantine/<YYYY-MM-DD>/...                 CORRUPT originals (kept for examination)
-      INDEX/archive_index.json | archive_index.csv | gaps.csv | SHA256SUMS.txt   rolling index
-      INDEX/verified_journal.csv                           append-only, one line per verified file
+      <camera>/INDEX/archive_index.json | archive_index.csv | gaps.csv | SHA256SUMS.txt   rolling index
+      <camera>/INDEX/verified_journal.csv                  append-only, one line per verified file
+
+The index is **per camera** so drives that receive footage from several appliances / cameras keep
+one index per camera; a reinstalled ledger carries entries it does not know forward (index.py).
 
 Design choices (docs/branches/design-archive-drive.md):
 
@@ -29,13 +32,18 @@ from datetime import UTC, datetime
 from typing import Any
 
 ROOT = "Sentinel"
-INDEX_DIR = f"{ROOT}/INDEX"
 README = f"{ROOT}/README_ARCHIVE.txt"
-INDEX_JSON = f"{INDEX_DIR}/archive_index.json"
-INDEX_CSV = f"{INDEX_DIR}/archive_index.csv"
-GAPS_CSV = f"{INDEX_DIR}/gaps.csv"
-SUMS = f"{INDEX_DIR}/SHA256SUMS.txt"
-JOURNAL = f"{INDEX_DIR}/verified_journal.csv"
+SET_ASIDE_MARK = ".unverified-"          # suffix of a file that failed read-back and was moved aside
+
+
+def index_dir(camera_id: str) -> str:
+    return f"{ROOT}/{safe(camera_id)}/INDEX"
+
+
+def index_files(camera_id: str) -> dict[str, str]:
+    d = index_dir(camera_id)
+    return {"json": f"{d}/archive_index.json", "csv": f"{d}/archive_index.csv", "gaps": f"{d}/gaps.csv",
+            "sums": f"{d}/SHA256SUMS.txt", "journal": f"{d}/verified_journal.csv"}
 QUARANTINE = "Quarantine"
 FRAMEHASH_SUFFIX = ".framehash.txt"
 

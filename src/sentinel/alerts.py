@@ -73,7 +73,8 @@ CATALOG: dict[str, AlertDef] = {d.code: d for d in [
     AlertDef("A-001", "No archive drive is connected",
              "Recording continues on this system. Insert the archive drive.", False),
     AlertDef("A-002", "The archive drive is full",
-             "Recording continues on this system. Replace it with an empty archive drive.", False),
+             "Recording continues on this system. Do not unplug the archive drive yet: press Swap Archive "
+             "Drive, wait for SAFE TO REMOVE, then insert an empty archive drive.", False),
     AlertDef("A-003", "The archive drive was removed without preparing it",
              "No recordings were lost. Copying will continue when an archive drive is inserted.", False),
     AlertDef("A-004", "Recordings are waiting too long to be copied to the archive drive",

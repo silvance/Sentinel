@@ -6,23 +6,26 @@ Mechanism (design choice, see docs/branches/design-archive-drive.md):
   segment (FINALIZED / INTERRUPTED; CORRUPT into ``Quarantine/``) and its per-frame sidecar,
   **oldest first**, to whichever archive drive is attached. If the drive is slow, absent or full,
   the footage simply waits on internal storage ("Not yet archived: N h").
+* Archive drives are found by their marker (``SENTINEL_DRIVE.json`` with ``"role": "archive"``) on
+  any mounted volume, never by drive letter (:mod:`sentinel.archive.locator`).
 * Each file: 8 MiB chunks read from the spool through a byte-rate :class:`Throttle`, written to
-  ``<name>.partial`` with an fsync every 64 MiB, fsync, no-replace rename; then read back from
-  the drive bypassing the OS cache and compared with the SHA-256 recorded at sealing. Only then
-  is it recorded in ``archive_copies``, appended to ``Sentinel/INDEX/verified_journal.csv``, and
-  counted as archived. Nothing on the local spool is ever modified or deleted.
-* ``Sentinel/INDEX/`` is rewritten atomically on attach, after each ``index_every_s`` of copied
+  ``<name>.partial`` with an fsync every 64 MiB, fsync, no-replace rename, directory flush (Windows:
+  FlushFileBuffers on the directory; if refused, the final name is confirmed by a fresh listing);
+  then read back from the drive bypassing the OS cache and compared with the SHA-256 recorded at
+  sealing. Only then: journal line appended and flushed, ledger row VERIFIED. A buffered (cache)
+  read-back is never accepted. Nothing on the local spool is ever modified or deleted.
+* On attach the drive is reconciled FIRST: recorded copies that are missing are restored from their
+  ``.partial`` if that still matches the sealed hash (a rename rolled back by an unclean unplug),
+  otherwise marked LOST (row kept, segment queued again, persistent alert A-006); only then are
+  stray ``.partial`` files deleted.
+* ``Sentinel/<camera>/INDEX/`` is rewritten on attach, after each ``index_every_s`` of copied
   footage (default one hour; also after an hour of wall time with new copies) and on swap.
 * Swap: :meth:`ArchiveWorker.request_swap` (or ``python -m sentinel.archive swap``) → the file in
   flight is finished and verified if that takes at most ``swap_max_wait_s``, otherwise abandoned
   (its ``.partial`` is discarded, never claimed) → index written and read back → flush → eject via
   the :class:`~sentinel.export.target.SafeRemover` (fallback: operator uses the OS "safely remove")
   → SAFE_TO_REMOVE / REMOVE_MANUALLY. The swapped drive is not written again until it has been
-  removed (or the operator resumes).
-* Unexpected removal: the copy in flight fails, nothing is recorded, the ``.partial`` stays on
-  the drive and is discarded when the drive returns; copying resumes with the oldest segment not
-  yet verified on the inserted drive (``resume_policy = this_drive``) or on any archive drive
-  (``any_drive``).
+  removed (or the operator resumes); another archive drive inserted meanwhile is used.
 
 Runs as its own process in production (``python -m sentinel.archive run``) — see
 :mod:`sentinel.archive.__main__` for why — and as a thread in tests (:meth:`start`).
@@ -46,7 +49,7 @@ from ..alerts import Alert
 from ..clock import compact_utc, iso_utc, parse_iso_utc
 from ..config import AppConfig
 from ..db import Ledger
-from ..export.fileio import PARTIAL, SourceMismatch, is_disk_full
+from ..export.fileio import M_BUFFERED, PARTIAL, SourceMismatch, is_disk_full, partial_path
 from ..export.ledger import ExportLedger
 from ..export.target import (ExportTarget, ManualRemovalFallback, SafeRemover, TargetError,
                              protected_volume_conflicts, system_paths)
@@ -55,9 +58,9 @@ from ..platform.base import InstanceLockError
 from . import index as idx
 from . import layout
 from .io import MIB, Aborted, ArchiveIO, Throttle
-from .ledger import ArchiveLedger
-from .locator import ConfiguredPathLocator, DriveLocator, DriveUnusable
-from .priority import lower_priority
+from .ledger import ArchiveLedger, UnverifiableCopy, ledger_instance
+from .locator import DriveLocator, DriveScan, VolumeScanLocator
+from .priority import lower_priority, normal_priority
 from .status import (ST_ABSENT, ST_ATTENTION, ST_COPYING, ST_FULL, ST_REMOVE_MANUALLY, ST_SAFE, ST_STARTING,
                      ST_STOPPED, ST_SWAP_PENDING, ST_UNUSABLE, ST_UP_TO_DATE, STATUS_FILE, ArchiveStatusWriter,
                      Condition, backlog_text, evaluate_alerts)
@@ -69,6 +72,12 @@ SWAP_REQUEST = "swap.request"
 RESUME_REQUEST = "resume.request"
 PROBE = ".sentinel_archive_probe" + PARTIAL
 SOURCE_RETRY_S = 3600.0          # retry a local recording that could not be read after this long
+REVIEW_LAYOUT = ("README_FIRST.txt", "Recordings", "Manifests", "Originals")
+
+MSG_FULL = ("Do not unplug the archive drive yet. It is full: press Swap Archive Drive and wait for SAFE TO "
+            "REMOVE, then insert an empty archive drive. Recording continues.")
+MSG_REMOVED = ("The archive drive was removed without preparing it. No recordings were lost; copying will "
+               "continue when a drive is inserted. Recording continues.")
 
 
 class LocalReadError(OSError):
@@ -113,8 +122,9 @@ class ArchiveWorker:
         self.acfg = cfg.archive
         self._own_ledger = ledger is None
         self.ledger = ledger
-        self.locator: DriveLocator = locator or ConfiguredPathLocator(self.acfg.drive_path,
-                                                                      self.acfg.require_drive_marker)
+        self.locator: DriveLocator = locator or VolumeScanLocator(
+            [self.acfg.drive_path] if self.acfg.drive_path else [], require_role=self.acfg.require_drive_marker,
+            roots=None if self.acfg.scan_volumes else (lambda: []))
         self.io = io or ArchiveIO(read_chunk=self.acfg.chunk_mib * MIB)
         self.remover: SafeRemover = remover or ManualRemovalFallback()
         self.status = ArchiveStatusWriter(status_path or (cfg.data_path / STATUS_FILE))
@@ -123,6 +133,7 @@ class ArchiveWorker:
         self.lower_own_priority = lower_own_priority
         self.tz = ZoneInfo(cfg.recording.display_timezone)
         self.camera_id = cfg.camera.id
+        self.index_names = layout.index_files(self.camera_id)
         self.control_dir = cfg.data_path / CONTROL_DIR
         self.chunk = self.acfg.chunk_mib * MIB
         self.fsync_bytes = self.acfg.fsync_every_mib * MIB
@@ -141,9 +152,7 @@ class ArchiveWorker:
         self.after_swap = False
         self.full = False
         self.unusable_reason: str | None = None
-        self.verify_failed: dict[str, str] = {}     # "seg|drive|kind" -> detail (alert A-006)
         self.source_failed: dict[str, float] = {}   # segment_id -> mono time of failure (alert A-008)
-        self.missing_on_drive: list[str] = []
         self.errors = 0                             # consecutive unexpected errors (alert A-007 at >= 3)
         self._verify_attempts: dict[str, int] = {}
         self._skip: set[str] = set()                # segment ids skipped on the current drive
@@ -153,9 +162,11 @@ class ArchiveWorker:
         self._swap = threading.Event()
         self._swap_deadline: float | None = None
         self._swapped_drive: str | None = None
+        self._swapped_absent_polls = 0
         self._swap_result: tuple[bool, str] | None = None
         self._thread: threading.Thread | None = None
         self._last_publish = 0.0
+        self._instance: str | None = None
 
     # ================================================================== public control
     def request_swap(self) -> None:
@@ -201,18 +212,18 @@ class ArchiveWorker:
             self.status.write(state=ST_ATTENTION, message="Another archive copy is already running.", alerts=[])
             return
         try:
-            self._open()
-            self._publish(force=True)
             while not self._stop.is_set():
                 try:
+                    if self.al is None:
+                        self._open()
+                        self._publish(force=True)
                     outcome = self.step()
                     self.errors = 0
-                except Exception as exc:  # never die silently: report and retry
+                except Exception as exc:  # never die: report (itself guarded) and retry
                     self.errors += 1
-                    log.exception("archive step failed (%d consecutive)", self.errors)
-                    self._event("error", "archive_error", "Archive copy error", {"error": f"{type(exc).__name__}: {exc}"})
-                    self._set(ST_ATTENTION, "Archive copying had a problem and will retry automatically.")
                     outcome = "error"
+                    log.exception("archive step failed (%d consecutive)", self.errors)
+                    self._report_error(exc)
                 if outcome != "copied":
                     self._wake.wait(self.acfg.poll_interval_s if outcome != "error" else
                                     min(60.0, self.acfg.poll_interval_s * (2 ** min(self.errors, 4))))
@@ -224,54 +235,104 @@ class ArchiveWorker:
             except Exception:
                 log.exception("could not write final archive status")
             if self._own_ledger and self.ledger is not None:
-                self.ledger.close()
+                try:
+                    self.ledger.close()
+                except Exception:
+                    log.exception("could not close the ledger")
                 self.ledger = None
+                self.al = None
             lock.close()
+
+    def _report_error(self, exc: BaseException) -> None:
+        """Error path of the loop. Every part is guarded: a failure here (ledger locked, status file
+        unwritable, ...) must never end the worker thread/process."""
+        try:
+            self._event("error", "archive_error", "Archive copy error", {"error": f"{type(exc).__name__}: {exc}"})
+        except Exception:
+            log.exception("could not record the archive error")
+        try:
+            self._set(ST_ATTENTION, "Archive copying had a problem and will retry automatically.")
+        except Exception:
+            log.exception("could not publish the archive error")
+            try:
+                self.state = ST_ATTENTION
+                self.status.write(state=ST_ATTENTION, message="Archive copying had a problem and will retry "
+                                  "automatically.", alerts=[], errors=self.errors)
+            except Exception:
+                log.exception("could not write a minimal archive status")
 
     def _open(self) -> None:
         if self.ledger is None:
             self.ledger = Ledger(self.cfg.data_path / "sentinel.db")
         if self.al is None:
             self.al = ArchiveLedger(self.ledger, self.camera_id, self.acfg.resume_policy)
+            self._instance = ledger_instance(self.ledger)
+
+    # ------------------------------------------------------------------ drive selection
+    def _select(self, scan: DriveScan) -> tuple[ExportTarget | None, bool]:
+        """(drive to use, is the swapped drive still inserted). Sticky: the attached drive stays in use
+        while present; the drive that was made safe to remove is never chosen."""
+        by_key: dict[str, ExportTarget] = {}
+        for t in scan.candidates:
+            try:
+                by_key[t.drive_key] = t
+            except TargetError:
+                continue
+        swapped_present = False
+        if self._swapped_drive is not None:
+            if self._swapped_drive in by_key:
+                swapped_present = True
+                self._swapped_absent_polls = 0
+            elif scan.unusable:
+                swapped_present = True     # a drive is present but unreadable: it may be the swapped one
+            else:
+                self._swapped_absent_polls += 1
+                if self._swapped_absent_polls >= 2:     # gone for two scans in a row: really removed
+                    self._swapped_drive = None
+                else:
+                    swapped_present = True
+        usable = {k: t for k, t in by_key.items() if k != self._swapped_drive}
+        if self.att is not None and self.att.drive_id in usable:
+            return usable[self.att.drive_id], swapped_present
+        if not usable:
+            return None, swapped_present
+        if len(usable) > 1:
+            log.warning("%d archive drives attached; using %s", len(usable), sorted(usable)[0])
+        return usable[sorted(usable)[0]], swapped_present
 
     def step(self) -> str:
-        """One unit of work: look at the drive, then copy+verify at most one segment. Returns
+        """One unit of work: look at the drive(s), then copy+verify at most one segment. Returns
         'absent' | 'unusable' | 'waiting_for_removal' | 'swapped' | 'full' | 'idle' | 'copied'."""
         self._open()
         self._poll_control()
-        try:
-            target = self.locator.locate()
-            self.unusable_reason = None
-        except DriveUnusable as exc:
-            target = None
-            self.unusable_reason = str(exc)
-        if target is not None:
-            try:
-                key = target.drive_key
-            except TargetError as exc:
-                target, self.unusable_reason = None, str(exc)
+        scan = self.locator.scan()
+        target, swapped_present = self._select(scan)
         if target is None:
-            return self._no_drive()
-        if self._swapped_drive == key:
-            self._waiting_for_removal()
-            return "waiting_for_removal"
+            if self.att is not None:
+                self._detached(unexpected=True)
+            if swapped_present:
+                self._waiting_for_removal()
+                return "waiting_for_removal"
+            return self._no_drive(scan)
+        key = target.drive_key
         if self.att is None or self.att.drive_id != key:
             if self.att is not None:
                 self._detached(unexpected=True)
             if not self._attach(target):
                 return "unusable"
-        assert self.att is not None
+        assert self.att is not None and self.al is not None
         if self._swap.is_set():
             return self._do_swap()
         if self.att.stale_index and self.mono() >= self.att.next_index_retry:
             self._write_index("retry")
+            if self.att is None:
+                return "absent"
         if self.full and not self._space_available():
-            self._set(ST_FULL, "The archive drive is full. Replace it with an empty archive drive. "
-                               "Recording continues.")
+            self._set(ST_FULL, MSG_FULL)
             return "full"
         self.full = False
         self._expire_source_failures()
-        pending = self.al.pending_segments(self.att.drive_id, limit=1,  # type: ignore[union-attr]
+        pending = self.al.pending_segments(self.att.drive_id, limit=1,
                                            exclude=frozenset(self._skip | set(self.source_failed)))
         if not pending:
             if self.att.copies_since_index and self.mono() - self.att.last_index_mono >= self.acfg.index_every_s:
@@ -282,7 +343,7 @@ class ArchiveWorker:
             else:
                 self._set(ST_UP_TO_DATE, "Archive drive connected. All recordings are copied. Recording continues.")
             return "idle"
-        self._set(ST_COPYING, "Copying recordings to the archive drive. Recording continues.")
+        self._set(ST_COPYING, "Copying recordings to the archive drive. Do not unplug it. Recording continues.")
         self._archive_segment(pending[0])
         if self.att is not None and (self.att.footage_since_index >= self.acfg.index_every_s
                                      or (self.att.copies_since_index
@@ -291,20 +352,18 @@ class ArchiveWorker:
         return "copied"
 
     # ================================================================== drive presence
-    def _no_drive(self) -> str:
-        if self.att is not None:
-            self._detached(unexpected=True)
-        self._swapped_drive = None            # the swapped drive has been taken out
+    def _no_drive(self, scan: DriveScan) -> str:
         if self._swap.is_set():               # nothing left to prepare
             self._clear_swap()
-        if self.unusable_reason:
-            self._set(ST_UNUSABLE, "This drive cannot be used as an archive drive. Recording continues.")
+        if scan.unusable:
+            self.unusable_reason = "; ".join(r for _root, r in scan.unusable)[:500]
+            self._set(ST_UNUSABLE, "The inserted drive cannot be used as an archive drive. Recording continues.")
             return "unusable"
+        self.unusable_reason = None
         if self.after_swap:
             self._set(ST_ABSENT, "Insert the next archive drive. Recording continues.")
         elif self.removed_unexpectedly:
-            self._set(ST_ABSENT, "The archive drive was removed without preparing it. No recordings were lost; "
-                                 "copying will continue when a drive is inserted. Recording continues.")
+            self._set(ST_ABSENT, MSG_REMOVED)
         else:
             self._set(ST_ABSENT, "No archive drive is connected. Recording continues.")
         return "absent"
@@ -314,8 +373,6 @@ class ArchiveWorker:
         self.att = None
         self.full = False
         self._skip.clear()
-        self.verify_failed.clear()
-        self.missing_on_drive = []
         if att is None:
             return
         if unexpected:
@@ -324,7 +381,15 @@ class ArchiveWorker:
                         {"drive_id": att.drive_id, "copies_this_attach": att.copies_this_attach})
             log.warning("archive drive %s removed without preparing", att.drive_id)
 
+    def _refuse(self, target: ExportTarget, reason: str) -> bool:
+        self.unusable_reason = reason
+        self._event("warning", "archive_drive_unusable", "Archive drive refused",
+                    {"reason": reason, "identity": target.identity})
+        self._set(ST_UNUSABLE, "The inserted drive cannot be used as an archive drive. Recording continues.")
+        return False
+
     def _attach(self, target: ExportTarget) -> bool:
+        assert self.al is not None
         root = Path(target.root)
         if not self.io.root_present(root):
             return False
@@ -338,14 +403,15 @@ class ArchiveWorker:
             except TargetError as exc:
                 clash = [f"(cannot confirm it is a separate drive: {exc})"]
             if clash:
-                self.unusable_reason = "the archive location is on the same volume as the " + ", ".join(clash)
-                self._event("warning", "archive_drive_unusable", "Archive location refused",
-                            {"reason": self.unusable_reason, "identity": target.identity})
-                self._set(ST_UNUSABLE, "This drive cannot be used as an archive drive. Recording continues.")
-                return False
+                return self._refuse(target, "the archive location is on the same volume as the " + ", ".join(clash))
+        review = [n for n in REVIEW_LAYOUT if (root / n).exists()]
+        if review:
+            return self._refuse(target, f"the drive holds a review-drive layout ({', '.join(review)})")
+        if self.al.review_batches_on(target.drive_key):
+            return self._refuse(target, "review exports to this drive are recorded in the ledger")
         full = False
         try:
-            self.io.makedirs(root / layout.INDEX_DIR)
+            self.io.makedirs(root / layout.index_dir(self.camera_id))
             probe = root / layout.ROOT / PROBE
             with open(probe, "wb") as fh:
                 fh.write(b"\0" * 4096)
@@ -356,38 +422,28 @@ class ArchiveWorker:
             if is_disk_full(exc):
                 full = True
             else:
-                self.unusable_reason = f"write test failed: {type(exc).__name__}: {exc}"
-                self._event("warning", "archive_drive_unusable", "Archive drive cannot be written",
-                            {"error": self.unusable_reason, "identity": target.identity})
-                self._set(ST_UNUSABLE, "This drive cannot be used as an archive drive. Recording continues.")
-                return False
-        drive_id = ExportLedger(self.ledger).upsert_drive(target)  # type: ignore[arg-type]
+                return self._refuse(target, f"write test failed: {type(exc).__name__}: {exc}")
+        with normal_priority():
+            drive_id = ExportLedger(self.ledger).upsert_drive(target)  # type: ignore[arg-type]
         self.att = Attached(target=target, drive_id=drive_id, last_index_mono=self.mono())
         self.removed_unexpectedly = self.after_swap = False
         self.unusable_reason = None
         self.full = full
         self._skip.clear()
-        self.verify_failed.clear()
         self._verify_attempts.clear()
-        removed = 0
-        for p in self.io.stray_partials(root / layout.ROOT):   # unverified leftovers: never claimed
-            try:
-                self.io.remove_partial_file(p)
-                removed += 1
-            except OSError as exc:
-                log.warning("could not discard %s: %s", p, exc)
-        self.missing_on_drive = [r["path"] for r in self.al.copies_on(drive_id)  # type: ignore[union-attr]
-                                 if not (root / r["path"]).is_file()]
-        if self.missing_on_drive:
-            self._event("error", "archive_files_missing", "Files recorded as archived are missing from the drive",
-                        {"drive_id": drive_id, "missing": self.missing_on_drive[:50],
-                         "count": len(self.missing_on_drive)})
-        q = self.al.backlog(drive_id)  # type: ignore[union-attr]
+        try:
+            restored, lost, removed = self._reconcile(root, drive_id)
+        except OSError as exc:
+            if not self._drive_error(exc):
+                raise
+            return False
+        q = self.al.backlog(drive_id)
         self._event("info", "archive_drive_attached", "Archive drive connected",
-                    {"drive_id": drive_id, "label": target.label, "discarded_partials": removed,
-                     "to_copy_segments": q.segments, "to_copy_seconds": round(q.seconds, 1), "full": full})
-        log.info("archive drive %s attached (%d partial(s) discarded, %d segment(s) to copy)", drive_id, removed,
-                 q.segments)
+                    {"drive_id": drive_id, "label": target.label, "restored": restored, "lost": lost,
+                     "discarded_partials": removed, "to_copy_segments": q.segments,
+                     "to_copy_seconds": round(q.seconds, 1), "full": full})
+        log.info("archive drive %s attached (%d restored, %d lost, %d partial(s) discarded, %d to copy)", drive_id,
+                 restored, lost, removed, q.segments)
         if not (root / layout.README).exists():
             try:
                 self.io.write_new(root / layout.README, [idx.README_TEXT.encode("utf-8")])
@@ -400,14 +456,56 @@ class ArchiveWorker:
         self._write_index("attach")
         return self.att is not None
 
+    def _reconcile(self, root: Path, drive_id: str) -> tuple[int, int, int]:
+        """FIRST on attach, before any temporary file is deleted: every recorded copy must be on the
+        drive with its recorded size. A missing one whose ``.partial`` still matches the sealed hash is
+        restored (its rename was rolled back by an unclean removal); otherwise it is marked LOST.
+        Then the remaining ``.partial`` files (never claimed) are deleted. Returns (restored, lost, removed)."""
+        assert self.al is not None
+        partials = {p for p in self.io.stray_partials(root / layout.ROOT)}
+        restored = lost = 0
+        for c in self.al.copies_on(drive_id):
+            p = root / c["path"]
+            try:
+                size = p.stat().st_size
+            except FileNotFoundError:
+                size = None
+            if size == c["size_bytes"]:
+                continue
+            if size is not None:
+                self.al.mark_lost(c["copy_id"], f"size on the drive is {size}, recorded {c['size_bytes']}")
+                lost += 1
+                continue
+            part = partial_path(p)
+            if part in partials:
+                sha, n, method = self._read_hash(part)
+                if sha == c["sha256"] and n == c["size_bytes"] and method != M_BUFFERED:
+                    self.io.restore_partial(part, p)
+                    self.io.seal_read_only(p)
+                    partials.discard(part)
+                    restored += 1
+                    self._event("warning", "archive_copy_restored", "A verified copy whose file name was lost was "
+                                "restored from its temporary file after checking it again", {"path": c["path"]})
+                    continue
+            self.al.mark_lost(c["copy_id"], "file missing from the drive")
+            lost += 1
+        removed = 0
+        for p in sorted(partials):
+            try:
+                self.io.remove_partial_file(p)
+                removed += 1
+            except OSError as exc:
+                log.warning("could not discard %s: %s", p, exc)
+        return restored, lost, removed
+
     def _space_available(self, need: int = 0) -> bool:
-        assert self.att is not None
+        assert self.att is not None and self.al is not None
         try:
             free = self.io.free_bytes(Path(self.att.target.root))
         except OSError:
             return False
         if need == 0:
-            nxt = self.al.pending_segments(self.att.drive_id, limit=1)  # type: ignore[union-attr]
+            nxt = self.al.pending_segments(self.att.drive_id, limit=1)
             need = int(nxt[0]["size_bytes"] or 0) if nxt else 0
         return free >= need + self.reserve
 
@@ -431,7 +529,7 @@ class ArchiveWorker:
     def _do_swap(self) -> str:
         att = self.att
         assert att is not None
-        self._set(ST_SWAP_PENDING, "Preparing the archive drive for removal. Do not remove it yet. Recording continues.")
+        self._set(ST_SWAP_PENDING, "Preparing the archive drive for removal. Do not unplug it yet. Recording continues.")
         self._publish(force=True)
         root = Path(att.target.root)
         for p in self.io.stray_partials(root / layout.ROOT):
@@ -445,6 +543,7 @@ class ArchiveWorker:
         res = self.remover.eject(att.target)
         self._clear_swap()
         self._swapped_drive = att.drive_id
+        self._swapped_absent_polls = 0
         self.after_swap = True
         self.att = None
         self._swap_result = (res.ejected, res.detail)
@@ -458,13 +557,13 @@ class ArchiveWorker:
         if ejected:
             self._set(ST_SAFE, "SAFE TO REMOVE ARCHIVE DRIVE. Recording continues.")
         elif os.name == "nt":
-            self._set(ST_REMOVE_MANUALLY, "The archive drive is ready to be removed. Before unplugging it, click the "
-                                          "\"Safely Remove Hardware\" icon near the clock, choose this drive, and wait "
-                                          "for the message that it is safe to remove. Recording continues.")
+            self._set(ST_REMOVE_MANUALLY, "Do not unplug the archive drive yet. Click the \"Safely Remove "
+                                          "Hardware\" icon near the clock, choose this drive, and unplug it only "
+                                          "after Windows says it is safe to remove. Recording continues.")
         else:
-            self._set(ST_REMOVE_MANUALLY, "The archive drive is ready to be removed. Before unplugging it, use the "
-                                          "\"Eject\" or \"Safely remove\" option for this drive and wait until it "
-                                          "disappears. Recording continues.")
+            self._set(ST_REMOVE_MANUALLY, "Do not unplug the archive drive yet. Use the \"Eject\" or \"Safely "
+                                          "remove\" option for this drive and unplug it only after it has "
+                                          "disappeared. Recording continues.")
 
     # ================================================================== copying
     def _expire_source_failures(self) -> None:
@@ -485,6 +584,7 @@ class ArchiveWorker:
         for kind in kinds:
             if self._stop.is_set() or self.att is None:
                 return
+            drive_id = self.att.drive_id
             try:
                 self._archive_file(seg, kind)
             except Aborted:
@@ -495,15 +595,21 @@ class ArchiveWorker:
                 self._event("error", "archive_source_unreadable", "A local recording could not be read for archiving",
                             {"segment_id": seg["segment_id"], "kind": kind, "error": f"{type(exc).__name__}: {exc}"})
                 return
+            except UnverifiableCopy as exc:
+                self._skip.add(seg["segment_id"])
+                self.al.add_problem(drive_id, "unverifiable", str(exc), seg["segment_id"])
+                self._event("error", "archive_unverifiable", "Archive copies on this drive cannot be checked "
+                            "without the operating-system cache", {"segment_id": seg["segment_id"], "detail": str(exc)})
+                return
             except VerifyMismatch as exc:
-                key = f"{seg['segment_id']}|{self.att.drive_id if self.att else ''}|{kind}"
+                key = f"{seg['segment_id']}|{drive_id}|{kind}"
                 n = self._verify_attempts.get(key, 0) + 1
                 self._verify_attempts[key] = n
                 self._event("error", "archive_verify_failed", "An archive copy did not verify",
                             {"segment_id": seg["segment_id"], "kind": kind, "attempt": n, "detail": str(exc)})
                 if n >= self.acfg.verify_attempts:
-                    self.verify_failed[key] = str(exc)
                     self._skip.add(seg["segment_id"])
+                    self.al.add_problem(drive_id, "verify_failed", str(exc), seg["segment_id"])
                 return
             except DriveFull as exc:
                 self._drive_full(str(exc))
@@ -518,8 +624,7 @@ class ArchiveWorker:
         att = self.att
         if att is not None and not self.io.root_present(Path(att.target.root)):
             self._detached(unexpected=True)
-            self._set(ST_ABSENT, "The archive drive was removed without preparing it. No recordings were lost; "
-                                 "copying will continue when a drive is inserted. Recording continues.")
+            self._set(ST_ABSENT, MSG_REMOVED)
             return True
         if is_disk_full(exc):
             self._drive_full(f"{type(exc).__name__}: {exc}")
@@ -531,7 +636,7 @@ class ArchiveWorker:
             self._event("warning", "archive_drive_full", "Archive drive is full",
                         {"drive_id": self.att.drive_id if self.att else None, "detail": detail})
         self.full = True
-        self._set(ST_FULL, "The archive drive is full. Replace it with an empty archive drive. Recording continues.")
+        self._set(ST_FULL, MSG_FULL)
 
     def _source_chunks(self, src: Path) -> Iterator[bytes]:
         try:
@@ -566,6 +671,14 @@ class ArchiveWorker:
             self.verify_throttle.consume(len(c))
         return h.hexdigest(), n, method
 
+    def _set_aside(self, dest: Path, rel: str, seg: Any, found: str) -> Path:
+        assert self.att is not None and self.al is not None
+        aside = self.io.rename_aside(dest, f"{layout.SET_ASIDE_MARK}{compact_utc(time.time())}")
+        aside_rel = rel.rsplit("/", 1)[0] + "/" + aside.name
+        self.al.add_problem(self.att.drive_id, "set_aside", f"read back {found}; kept as {aside.name}",
+                            seg["segment_id"], aside_rel)
+        return aside
+
     def _archive_file(self, seg: Any, kind: str) -> None:
         att = self.att
         assert att is not None and self.al is not None
@@ -587,7 +700,7 @@ class ArchiveWorker:
             if sha == expected and n == size:
                 self._verified(seg, kind, rel, dest, sha, n, method, already_present=True)
                 return
-            aside = self.io.rename_aside(dest, f".unverified-{compact_utc(time.time())}")
+            aside = self._set_aside(dest, rel, seg, sha)
             self._event("warning", "archive_unverified_moved", "A file on the archive drive did not match and was "
                         "moved aside (not deleted, not counted)", {"path": rel, "moved_to": aside.name, "found": sha})
         if not self._space_available(int(size)):
@@ -598,7 +711,7 @@ class ArchiveWorker:
         sha, n, method = self._read_hash(dest)
         t2 = self.mono()
         if sha != expected or n != size:
-            aside = self.io.rename_aside(dest, f".unverified-{compact_utc(time.time())}")
+            aside = self._set_aside(dest, rel, seg, sha)
             raise VerifyMismatch(f"{rel}: read back {sha} ({n} bytes), sealed {expected} ({size} bytes); "
                                  f"moved to {aside.name}")
         self.stats.files += 1
@@ -612,33 +725,62 @@ class ArchiveWorker:
 
     def _verified(self, seg: Any, kind: str, rel: str, dest: Path, sha: str, n: int, method: str,
                   already_present: bool) -> None:
+        """Order matters: (1) refuse a cache-served read-back, (2) make the rename durable, (3) seal
+        read-only, (4) journal line on the drive (flushed), (5) ledger row. A removal between any two
+        steps leaves either nothing claimed (re-verified on return) or a journal line for a copy that
+        IS verified on the drive (reconciled when it returns)."""
         att = self.att
         assert att is not None and self.al is not None
+        if method == M_BUFFERED:
+            raise UnverifiableCopy(f"read-back of {rel} could not bypass the operating-system cache")
+        self.io.confirm_in_place(dest)
         self.io.seal_read_only(dest)
-        verified_utc = self.al.record_verified(segment_id=seg["segment_id"], drive_id=att.drive_id, kind=kind,
-                                               path=rel, sha256=sha, size_bytes=n, verify_method=method,
-                                               already_present=already_present)
+        verified_utc = iso_utc(time.time())
+        journal = Path(att.target.root) / self.index_names["journal"]
+        if not journal.exists():
+            self.io.append_line(journal, idx.JOURNAL_HEADER)
+        self.io.append_line(journal, idx.journal_line(verified_utc, self.camera_id, seg["segment_id"], kind, sha, n,
+                                                      rel))
+        self.al.record_verified(segment_id=seg["segment_id"], drive_id=att.drive_id, kind=kind, path=rel,
+                                sha256=sha, size_bytes=n, verify_method=method, already_present=already_present)
         att.copies_since_index += 1
         att.copies_this_attach += 1
         if kind in layout.MEDIA_KINDS:
             att.footage_since_index += float(seg["duration_s"] or 0.0)
-        journal = Path(att.target.root) / layout.JOURNAL
-        try:
-            if not journal.exists():
-                self.io.append_line(journal, idx.JOURNAL_HEADER)
-            self.io.append_line(journal, idx.journal_line(verified_utc, seg["segment_id"], kind, sha, n, rel))
-        except OSError as exc:   # the index written later covers this copy
-            log.warning("could not append to the archive journal: %s", exc)
-            if not self._drive_error(exc):
-                att.stale_index = True
         self._publish()
 
     # ================================================================== index
+    def _read_drive_file(self, p: Path) -> bytes | None:
+        try:
+            return p.read_bytes()
+        except FileNotFoundError:
+            return None
+
     def _write_index(self, reason: str) -> bool:
         att = self.att
         assert att is not None and self.al is not None and self.ledger is not None
         root = Path(att.target.root)
+        try:
+            prev = idx.previous_entries(self._read_drive_file(root / self.index_names["json"]),
+                                        self._read_drive_file(root / self.index_names["journal"]))
+        except OSError as exc:
+            if self._drive_error(exc):
+                return False
+            prev = {}
         copies = self.al.copies_on(att.drive_id)
+        known = self.al.known_paths(att.drive_id)
+        carried = []
+        for path, e in sorted(prev.items()):
+            if path in known:
+                continue
+            try:
+                ok = (root / path).stat().st_size == int(e.get("size_bytes") or -1)
+            except (OSError, ValueError):
+                ok = False
+            if ok:
+                carried.append(dict(e, source="carried_forward"))
+        set_aside = [{"path": r["path"], "segment_id": r["segment_id"], "detail": r["detail"],
+                      "created_utc": r["created_utc"]} for r in self.al.set_aside_on(att.drive_id)]
         media = [c for c in copies if c["kind"] in layout.MEDIA_KINDS]
         gaps: list[Any] = []
         not_on: list[dict[str, Any]] = []
@@ -669,12 +811,14 @@ class ArchiveWorker:
         gen = self.al.next_index_generation(att.drive_id)
         generated = iso_utc(time.time())
         drive = dict(att.target.identity, drive_id=att.drive_id)
-        files = idx.build_index(generation=gen, generated_utc=generated, camera_id=self.camera_id, tz=self.tz,
-                                drive=drive, software={"app_version": __version__}, policy=self.acfg.resume_policy,
-                                copies=copies, gaps=gaps, not_on_drive=not_on)
+        files = idx.build_index(camera_id=self.camera_id, generation=gen, generated_utc=generated,
+                                ledger_instance=self._instance or "", tz=self.tz, drive=drive,
+                                software={"app_version": __version__}, policy=self.acfg.resume_policy,
+                                copies=copies, gaps=gaps, not_on_drive=not_on, carried=carried, set_aside=set_aside)
+        n = self.index_names
         try:
             # data files first, SHA256SUMS last; each file is complete and correct on its own
-            for rel in (layout.INDEX_JSON, layout.INDEX_CSV, layout.GAPS_CSV, layout.SUMS):
+            for rel in (n["json"], n["csv"], n["gaps"], n["sums"]):
                 self.io.replace_file(root / rel, files[rel], verify=lambda p: self._read_hash(p)[0])
         except OSError as exc:
             log.warning("archive index write failed: %s", exc)
@@ -685,8 +829,7 @@ class ArchiveWorker:
                             {"error": f"{type(exc).__name__}: {exc}"})
             return False
         self.al.record_index(att.drive_id, gen, generated, reason, len(copies),
-                             hashlib.sha256(files[layout.INDEX_JSON]).hexdigest(),
-                             hashlib.sha256(files[layout.SUMS]).hexdigest())
+                             hashlib.sha256(files[n["json"]]).hexdigest(), hashlib.sha256(files[n["sums"]]).hexdigest())
         att.footage_since_index = 0.0
         att.copies_since_index = 0
         att.last_index_mono = self.mono()
@@ -700,16 +843,16 @@ class ArchiveWorker:
         self.state, self.message = state, message
         self._publish(force=changed)
 
-    def conditions(self) -> tuple[Condition, Any, Any]:
+    def conditions(self) -> tuple[Condition, Any, Any, list[Any]]:
         assert self.al is not None
         risk = self.al.backlog(None)
         queue = self.al.backlog(self.att.drive_id) if self.att is not None else None
+        problems = self.al.open_problems()
         cond = Condition(state=self.state, backlog_s=risk.seconds, threshold_s=self.acfg.backlog_alert_hours * 3600,
                          removed_unexpectedly=self.removed_unexpectedly, after_swap=self.after_swap, full=self.full,
-                         unusable=self.state == ST_UNUSABLE,
-                         verify_failed=bool(self.verify_failed or self.missing_on_drive),
+                         unusable=self.state == ST_UNUSABLE, verify_failed=bool(problems),
                          source_unreadable=bool(self.source_failed), software_errors=self.errors)
-        return cond, risk, queue
+        return cond, risk, queue, problems
 
     def alerts(self) -> list[Alert]:
         return evaluate_alerts(self.conditions()[0])
@@ -722,7 +865,7 @@ class ArchiveWorker:
         if self.al is None:
             self.status.write(state=self.state, message=self.message, alerts=[])
             return
-        cond, risk, queue = self.conditions()
+        cond, risk, queue, problems = self.conditions()
         alerts = evaluate_alerts(cond)
         drive = ("full" if self.full else "present") if self.att is not None or self._swapped_drive else (
             "unusable" if self.state == ST_UNUSABLE else "absent")
@@ -742,14 +885,14 @@ class ArchiveWorker:
             throughput={"files": st.files, "bytes": st.bytes, "copy_s": round(st.copy_s, 3),
                         "verify_s": round(st.verify_s, 3), "last": st.last,
                         "throttle_mb_s": self.acfg.max_rate_mb_s},
-            problems={"verify_failed": list(self.verify_failed.values())[:20],
-                      "source_unreadable": sorted(self.source_failed)[:20],
-                      "missing_on_drive": self.missing_on_drive[:20], "unusable_reason": self.unusable_reason},
+            problems={"open": [{"problem_id": p["problem_id"], "drive_id": p["drive_id"], "kind": p["kind"],
+                                "path": p["path"], "created_utc": p["created_utc"]} for p in problems[:20]],
+                      "source_unreadable": sorted(self.source_failed)[:20], "unusable_reason": self.unusable_reason},
             priority=self.priority, cpu_process_s=round(time.process_time(), 2))
 
     def _event(self, severity: str, code: str, message: str, detail: dict[str, Any] | None) -> None:
         try:
-            self.ledger.add_event(severity, "archive", code, message, detail)  # type: ignore[union-attr]
+            self.al.event(severity, code, message, detail)  # type: ignore[union-attr]
         except Exception:
             log.exception("could not record archive event %s", code)
 

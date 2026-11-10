@@ -28,6 +28,7 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from . import __version__
 from .alerts import Severity
@@ -79,6 +80,7 @@ class RecorderService:
         self._clock_anomaly_until: float = 0.0
         self._critical_codes: set[str] = set()
         self.last_report: str | None = None
+        self._archive_view: Any = None               # sentinel.archive.status.RecorderArchiveView when enabled
 
     # ------------------------------------------------------------------
     def run(self) -> int:
@@ -382,9 +384,13 @@ class RecorderService:
         alerts = list(d.alerts)
         if cfg.archive.enabled:  # archive-drive copy runs in its own process; show its state and A-0xx alerts here
             try:
-                from .archive.status import recorder_view
+                if self._archive_view is None:
+                    from .archive.status import RecorderArchiveView
 
-                doc.archive, archive_alerts = recorder_view(cfg.data_path, cfg.archive.poll_interval_s)
+                    a = cfg.archive
+                    self._archive_view = RecorderArchiveView(cfg.data_path, cfg.camera.id, a.poll_interval_s,
+                                                             a.backlog_alert_hours * 3600, a.not_running_critical_after_s)
+                doc.archive, archive_alerts = self._archive_view.evaluate(self.ledger)
                 alerts = sorted(alerts + archive_alerts, key=lambda a: -a.severity)
                 doc.messages = doc.messages + [a.message for a in archive_alerts]
             except Exception:

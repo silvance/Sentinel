@@ -18,12 +18,13 @@ from archive_helpers import FakeEjector, FaultyIO, SwitchLocator, check_drive, c
 from conftest import make_config
 from sentinel.alerts import CATALOG, Severity
 from sentinel.archive import layout
-from sentinel.archive.bench import add_synthetic_run
+from tools.archive_bench import add_synthetic_run
 from sentinel.archive.index import parse_journal
 from sentinel.archive.io import ArchiveIO, Throttle
 from sentinel.archive.ledger import ArchiveLedger
-from sentinel.archive.locator import ConfiguredPathLocator
-from sentinel.archive.status import (Condition, backlog_text, evaluate_alerts, read_archive_status, recorder_view)
+from sentinel.archive.locator import VolumeScanLocator
+from sentinel.archive.status import (Condition, RecorderArchiveView, backlog_text, evaluate_alerts,
+                                     read_archive_status)
 from sentinel.archive.worker import ArchiveWorker, request_swap_file
 from sentinel.config import ConfigError
 from sentinel.db import Ledger
@@ -302,18 +303,375 @@ def test_existing_identical_file_reverified_not_copied(env: Env) -> None:
     assert len(rows) == 1 and rows[0]["already_present"] == 1
 
 
-def test_unprepared_drive_is_refused(env: Env, tmp_path: Path) -> None:
+def test_unprepared_or_non_archive_drive_is_never_written(env: Env, tmp_path: Path) -> None:
+    """Review finding 3: only a marker with role 'archive' is used; blank / role-less / review drives never."""
     env.segments(1)
     plain = tmp_path / "plain_drive"
     plain.mkdir()
-    w = env.worker(ConfiguredPathLocator(plain, require_marker=True))
+    w = env.worker(VolumeScanLocator(roots=lambda: [str(plain)]))
+    assert w.step() == "absent"                             # a blank drive is not an archive drive
+    assert list(plain.iterdir()) == []
+    norole = make_drive(tmp_path, "N", marker=True, role=None)
+    review = make_drive(tmp_path, "R", marker=True, role="review")
+    w = env.worker(VolumeScanLocator(roots=lambda: [str(norole.root), str(review.root)]))
     assert w.step() == "unusable"
     assert env.status()["state"] == "UNUSABLE" and "A-005" in env.codes()
-    assert list(plain.iterdir()) == []                      # nothing written
+    assert sorted(p.name for p in norole.root.iterdir()) == ["SENTINEL_DRIVE.json"]   # nothing written
+    assert sorted(p.name for p in review.root.iterdir()) == ["SENTINEL_DRIVE.json"]
     marked = make_drive(tmp_path, "M", marker=True)
-    w2 = env.worker(ConfiguredPathLocator(marked.root, require_marker=True))
+    (marked.root / "README_FIRST.txt").write_text("review drive", "utf-8")     # review layout on an 'archive' drive
+    w = env.worker(VolumeScanLocator(roots=lambda: [str(marked.root)]))
+    assert w.step() == "unusable" and "review-drive layout" in env.status()["problems"]["unusable_reason"]
+    (marked.root / "README_FIRST.txt").unlink()
+    w2 = env.worker(VolumeScanLocator(roots=lambda: [str(marked.root)]))
     assert drain(w2)[-1] == "idle"
     assert len(env.ledger.query("SELECT * FROM archive_copies")) == 1
+
+
+def test_designate_adds_archive_role_and_refuses_review_drives(env: Env, tmp_path: Path) -> None:
+    from sentinel.archive.locator import DriveUnusable, designate_archive, read_marker
+
+    d = make_drive(tmp_path, "D", marker=True, role=None)
+    designate_archive(d.root, "admin-1")
+    m = read_marker(d.root)
+    assert m["role"] == "archive" and m["role_set_by"] == "admin-1" and m["drive_uuid"]
+    r = make_drive(tmp_path, "R2", marker=True, role=None)
+    (r.root / "Manifests").mkdir()
+    with pytest.raises(DriveUnusable):
+        designate_archive(r.root, "admin-1")
+    x = make_drive(tmp_path, "X", marker=True, role=None)
+    with pytest.raises(DriveUnusable):
+        designate_archive(x.root, "admin-1", has_review_batches=lambda key: True)
+    with pytest.raises(DriveUnusable):
+        designate_archive(make_drive(tmp_path, "E", marker=True, role="review").root, "admin-1")
+
+
+def test_drive_found_by_marker_not_by_letter_new_drive_before_old_removed(env: Env, tmp_path: Path) -> None:
+    """Review finding 3: B inserted before A is removed (would get another letter) is still found, the
+    swapped A is never written again, and a different disk at A's old location is not mistaken for A."""
+    env.segments(2)
+    a, b = make_drive(tmp_path, "A", marker=True), make_drive(tmp_path, "B", marker=True)
+    roots = [str(a.root)]
+    w = env.worker(VolumeScanLocator(roots=lambda: list(roots)), remover=FakeEjector())
+    drain(w)
+    w.request_swap()
+    assert w.step() == "swapped"
+    roots.append(str(b.root))                     # B inserted while A is still connected
+    env.segments(1)
+    drain(w)
+    ids = _drive_ids(env)
+    assert len(ids) == 2
+    assert len(claimed(env.ledger, ids[0])) == 2 and len(claimed(env.ledger, ids[1])) == 3
+    roots[:] = [str(b.root)]
+    w.step()
+    w.step()
+    assert w.att is not None and w.att.drive_id == ids[1]
+
+
+def test_live_volume_enumeration_lists_the_volume_of_this_folder(tmp_path: Path) -> None:
+    """Read-only enumeration (no file on any real volume is opened)."""
+    if os.name != "nt":
+        pytest.skip("Windows volume enumeration")
+    import ctypes
+
+    from sentinel.archive.locator import windows_volume_roots
+    k32 = ctypes.WinDLL("kernel32")
+    buf, gbuf = ctypes.create_unicode_buffer(1024), ctypes.create_unicode_buffer(64)
+    k32.GetVolumePathNameW(str(tmp_path), buf, len(buf))
+    k32.GetVolumeNameForVolumeMountPointW(buf.value, gbuf, len(gbuf))
+    assert gbuf.value in windows_volume_roots()
+
+
+def test_rename_rolled_back_by_unplug_is_restored_not_deleted(env: Env) -> None:
+    """Review finding 1 (repro): a verified copy whose rename was rolled back to '.partial' by an
+    unclean unplug must be re-verified and restored on attach — never deleted with the strays."""
+    env.segments(2, size=2 * MIB)
+    a = make_drive(env.tmp, "A")
+    drain(env.worker(SwitchLocator(a)))
+    did = _drive_ids(env)[0]
+    rows = env.ledger.query("SELECT * FROM archive_copies ORDER BY copy_id")
+    p0 = a.root / rows[0]["path"]
+    os.chmod(p0, stat.S_IREAD | stat.S_IWRITE)
+    os.rename(p0, p0.with_name(p0.name + ".partial"))          # what the file system rolled back to
+    p1 = a.root / rows[1]["path"]
+    os.chmod(p1, stat.S_IREAD | stat.S_IWRITE)
+    os.rename(p1, p1.with_name(p1.name + ".partial"))
+    with open(p1.with_name(p1.name + ".partial"), "r+b") as fh:  # ...and this one was damaged too
+        fh.write(b"\xff")
+    w = env.worker(SwitchLocator(a))
+    w.step()                                                    # attach: reconcile, then copy again
+    assert p0.is_file() and sha_file(p0) == rows[0]["sha256"]   # restored
+    states = {r["copy_id"]: r["state"] for r in env.ledger.query("SELECT * FROM archive_copies")}
+    assert states[rows[0]["copy_id"]] == "VERIFIED" and states[rows[1]["copy_id"]] == "LOST"
+    drain(w)
+    assert len(claimed(env.ledger, did)) == 2                   # the lost one was copied again
+    assert not list(a.root.rglob("*.partial"))
+    assert env.codes().get("A-006") == Severity.CRITICAL        # loss is reported and stays reported
+    w.request_swap()
+    w.step()
+    check_drive(a.root, env.ledger, did, complete=True)
+
+
+def test_missing_copy_is_marked_lost_requeued_and_counted(env: Env) -> None:
+    """Review finding 1c: claimed-but-missing → LOST (row kept), back in the backlog, not in the index,
+    persistent A-006."""
+    env.segments(2, size=MIB)
+    a = make_drive(env.tmp, "A")
+    drain(env.worker(SwitchLocator(a)))
+    did = _drive_ids(env)[0]
+    row = env.ledger.query("SELECT * FROM archive_copies ORDER BY copy_id")[0]
+    p = a.root / row["path"]
+    os.chmod(p, stat.S_IREAD | stat.S_IWRITE)
+    p.unlink()                                                  # deleted elsewhere / lost on the drive
+    loc = SwitchLocator(None)
+    w = env.worker(loc)
+    w.step()
+    assert env.status()["backlog"]["segments"] == 0
+    loc.target = a
+    w.step()                                                    # attach + reconcile + recopy
+    lost = env.ledger.query("SELECT * FROM archive_copies WHERE copy_id=?", (row["copy_id"],))[0]
+    assert lost["state"] == "LOST" and lost["lost_reason"]
+    assert len(env.ledger.query("SELECT * FROM archive_copies WHERE segment_id=?", (row["segment_id"],))) == 2
+    assert p.is_file()                                          # copied again
+    assert env.codes().get("A-006") == Severity.CRITICAL
+
+
+def test_lost_copy_counts_in_backlog_until_recopied(env: Env) -> None:
+    ids = env.segments(1)
+    a = make_drive(env.tmp, "A")
+    drain(env.worker(SwitchLocator(a)))
+    al = ArchiveLedger(env.ledger, env.cfg.camera.id)
+    assert al.backlog(None).segments == 0
+    al.mark_lost(env.ledger.query("SELECT copy_id FROM archive_copies")[0]["copy_id"], "test")
+    assert al.backlog(None).segments == 1 and al.pending_segments(_drive_ids(env)[0])[0]["segment_id"] == ids[0]
+
+
+def test_directory_flush_refused_falls_back_to_fresh_listing(env: Env) -> None:
+    """Review finding 1a: if the directory flush is refused, the copy is only recorded after a fresh
+    directory listing shows the final name (and no .partial)."""
+    env.segments(1, size=MIB)
+    a = make_drive(env.tmp, "A")
+    io = FaultyIO(refuse_dir_flush=True)
+    drain(env.worker(SwitchLocator(a, io), io=io))
+    assert len(env.ledger.query("SELECT * FROM archive_copies")) == 1
+    assert io.dir_flushes >= 2
+
+
+def test_directory_flush_really_runs_on_windows(tmp_path: Path) -> None:
+    if os.name != "nt":
+        pytest.skip("Windows directory flush")
+    from sentinel.platform.windows import flush_directory
+    assert flush_directory(tmp_path) is True
+    assert ArchiveIO().fsync_dir(tmp_path) is True
+
+
+def test_buffered_read_back_is_never_recorded_as_verified(env: Env) -> None:
+    """Review finding 5."""
+    from sentinel.archive.ledger import UnverifiableCopy
+    from sentinel.export.fileio import M_BUFFERED
+
+    ids = env.segments(2, size=MIB)
+    a = make_drive(env.tmp, "A")
+    io = FaultyIO(buffered_reads=True)
+    w = env.worker(SwitchLocator(a, io), io=io)
+    drain(w)
+    assert env.ledger.query("SELECT COUNT(*) n FROM archive_copies")[0]["n"] == 0
+    assert env.codes().get("A-006") == Severity.CRITICAL
+    al = ArchiveLedger(env.ledger, env.cfg.camera.id)
+    seg = env.ledger.get_segment(ids[0])
+    with pytest.raises(UnverifiableCopy):
+        al.record_verified(segment_id=ids[0], drive_id=w.att.drive_id, kind="original", path="x",
+                           sha256=seg["sha256"], size_bytes=1, verify_method=M_BUFFERED)
+
+
+def test_verify_alert_persists_after_removal_until_acknowledged(tmp_path: Path) -> None:
+    """Review finding 7 (repro): A-006 must not clear when the drive is removed."""
+    env = Env(tmp_path, verify_attempts=1)
+    try:
+        env.segments(1, size=MIB)
+        a = make_drive(env.tmp, "A")
+        loc = SwitchLocator(a, None)
+        w = env.worker(loc, io=FaultyIO(corrupt_writes=99))
+        drain(w)
+        assert env.codes().get("A-006") == Severity.CRITICAL
+        loc.target = None                                     # drive removed
+        w.step()
+        assert env.codes().get("A-006") == Severity.CRITICAL  # still shown
+        w2 = env.worker(SwitchLocator(None))                  # even after a restart of the worker
+        w2.step()
+        assert env.codes().get("A-006") == Severity.CRITICAL
+        al = ArchiveLedger(env.ledger, env.cfg.camera.id)
+        with pytest.raises(ValueError):
+            al.acknowledge("  ")
+        assert al.acknowledge("admin-7") == 2                 # verify_failed + set_aside
+        w2.step()
+        w2._publish(force=True)
+        assert "A-006" not in env.codes()
+        ev = env.ledger.query("SELECT * FROM events WHERE code='archive_problems_acknowledged'")
+        assert ev and ev[0]["severity"] == "audit" and "admin-7" in ev[0]["detail"]
+    finally:
+        env.close()
+
+
+def test_set_aside_files_are_listed_in_the_index(tmp_path: Path) -> None:
+    """Review finding 9: *.unverified-* files are listed deterministically, not left unexplained."""
+    env = Env(tmp_path)
+    try:
+        env.segments(1, size=MIB)
+        a = make_drive(env.tmp, "A")
+        io = FaultyIO(corrupt_writes=1)                       # first write damaged, second fine
+        w = env.worker(SwitchLocator(a, io), io=io, remover=FakeEjector())
+        drain(w)
+        w.request_swap()
+        w.step()
+        did = _drive_ids(env)[0]
+        doc = check_drive(a.root, env.ledger, did, complete=True)
+        aside = list(a.root.rglob("*.unverified-*"))
+        assert len(aside) == 1
+        assert [s["path"] for s in doc["set_aside_files"]] == [aside[0].relative_to(a.root).as_posix()]
+        assert "A-006" not in env.codes()                     # one transient failure, then verified
+    finally:
+        env.close()
+
+
+def test_index_carries_forward_entries_unknown_to_this_ledger(tmp_path: Path) -> None:
+    """Review finding 4: a reinstalled ledger must not drop entries the drive already documents;
+    other cameras' indexes are untouched (per-camera INDEX)."""
+    first = Env(tmp_path / "one")
+    a = make_drive(tmp_path, "A")
+    try:
+        first.segments(2, size=MIB)
+        drain(first.worker(SwitchLocator(a)))
+        w = first.worker(SwitchLocator(a), remover=FakeEjector())
+        w.step()
+        w.request_swap()
+        w.step()
+        old = json.loads((a.root / layout.index_files("CAM01")["json"]).read_bytes())
+        assert len(old["copies"]) == 2
+    finally:
+        first.close()
+    other = a.root / "Sentinel" / "CAM02" / "INDEX"
+    other.mkdir(parents=True)
+    (other / "archive_index.json").write_text("{}", "utf-8")
+    second = Env(tmp_path / "two")                            # new, empty ledger (reinstall)
+    try:
+        ids = second.segments(1, size=MIB)
+        w = second.worker(SwitchLocator(a), remover=FakeEjector())
+        drain(w)
+        w.request_swap()
+        w.step()
+        did = _drive_ids(second)[0]
+        doc = check_drive(a.root, second.ledger, did, complete=True)
+        assert {c["path"] for c in doc["carried_forward"]} == {c["path"] for c in old["copies"]}
+        assert doc["carried_forward"][0]["ledger_instance"] == old["ledger_instance"] != doc["ledger_instance"]
+        assert [c["segment_id"] for c in doc["copies"]] == ids
+        assert (other / "archive_index.json").read_text("utf-8") == "{}"
+        journal = parse_journal((a.root / layout.index_files("CAM01")["journal"]).read_bytes())
+        assert {j["camera_id"] for j in journal} == {"CAM01"} and len(journal) == 3
+    finally:
+        second.close()
+
+
+def test_journal_written_before_the_claim(env: Env) -> None:
+    """Review finding 9: an unplug between the journal line and the ledger row leaves a journal line for a
+    copy that IS verified on the drive (never a claim without documentation on the drive)."""
+    env.segments(1, size=MIB)
+    a = make_drive(env.tmp, "A")
+    w = env.worker(SwitchLocator(a))
+    order: list[str] = []
+    real_append, real_record = w.io.append_line, None
+
+    def append(path: Path, line: str) -> None:
+        order.append("journal")
+        real_append(path, line)
+    w.io.append_line = append  # type: ignore[method-assign]
+    w._open()
+    real_record = w.al.record_verified
+
+    def record(**kw: Any) -> str:
+        order.append("ledger")
+        return real_record(**kw)
+    w.al.record_verified = record  # type: ignore[method-assign]
+    drain(w)
+    assert order[-2:] == ["journal", "ledger"]
+
+
+def test_worker_survives_errors_inside_its_error_handler(env: Env) -> None:
+    """Review finding 2 (repro): status write / ledger failing inside the error path must not end the worker."""
+    env.segments(1)
+    a = make_drive(env.tmp, "A")
+    w = env.worker(SwitchLocator(a))
+    calls = {"n": 0}
+    real_step = w.step
+
+    def bad_step() -> str:
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise RuntimeError("step failed")
+        return real_step()
+    w.step = bad_step  # type: ignore[method-assign]
+    real_write = w.status.write
+
+    def bad_write(**kw: Any) -> dict[str, Any]:
+        if calls["n"] <= 2:
+            raise OSError("status file unwritable")
+        return real_write(**kw)
+    w.status.write = bad_write  # type: ignore[method-assign]
+    w.acfg = type(w.acfg)(**{**w.acfg.__dict__, "poll_interval_s": 0.01})
+    w.start()
+    end = time.monotonic() + 20
+    while time.monotonic() < end and env.ledger.query("SELECT COUNT(*) n FROM archive_copies")[0]["n"] < 1:
+        time.sleep(0.05)
+    assert w.alive
+    w.stop(10)
+    assert env.ledger.query("SELECT COUNT(*) n FROM archive_copies")[0]["n"] == 1
+
+
+def test_recorder_view_computes_backlog_itself_when_archive_is_dead(env: Env) -> None:
+    """Review finding 2: A-004 must fire from the recorder even if the archive process never ran."""
+    env.segments(3)                                         # 0.25 h
+    v = RecorderArchiveView(env.cfg.data_path, env.cfg.camera.id, 5.0, threshold_s=600, critical_after_s=1800)
+    view, alerts = v.evaluate(env.ledger)
+    codes = {a.code: a.severity for a in alerts}
+    assert codes["A-004"] == Severity.CRITICAL and "A-007" in codes
+    assert view["backlog"]["segments"] == 3 and view["backlog"]["source"] == "ledger"
+    assert "Not yet archived: 0.2 h" in view["message"]
+
+
+def test_ledger_writes_leave_background_mode() -> None:
+    """Review finding 8: normal_priority() ends Windows background mode around a ledger write lock."""
+    if os.name != "nt":
+        pytest.skip("Windows background mode")
+    from sentinel.archive import priority
+
+    out: dict[str, Any] = {}
+
+    def body() -> None:
+        out["lower"] = priority.lower_priority(whole_process=False)
+        with priority.normal_priority():
+            out["inside"] = getattr(priority._bg, "depth", 0)
+            with priority.normal_priority():       # nested: no second END
+                out["nested"] = getattr(priority._bg, "depth", 0)
+        out["after"] = getattr(priority._bg, "depth", 0)
+    t = threading.Thread(target=body)
+    t.start()
+    t.join(10)
+    assert out == {"lower": "windows-thread-background-mode", "inside": 1, "nested": 2, "after": 0}
+
+
+def test_ledger_is_in_wal_mode(env: Env) -> None:
+    assert env.ledger.query("PRAGMA journal_mode")[0][0].lower() == "wal"
+
+
+def test_windows_service_plan_commands() -> None:
+    from sentinel.archive.hosting import ACCOUNT, windows_service_commands
+
+    cmds = windows_service_commands('"C:\\Sentinel\\host.exe" archive', Path("D:/spool"), Path("D:/data"),
+                                    Path("D:/logs"))
+    create = cmds[0]
+    assert create[:3] == ["sc.exe", "create", "SentinelArchive"] and "delayed-auto" in create
+    assert ACCOUNT in create and any(c[:2] == ["sc.exe", "failure"] for c in cmds)
+    assert ["icacls", str(Path("D:/spool")), "/grant", f"{ACCOUNT}:(OI)(CI)RX"] in cmds   # spool read-only
 
 
 def test_archive_onto_recording_or_system_volume_is_refused(env: Env) -> None:
@@ -355,6 +713,7 @@ def test_swap_then_next_drive_resumes_by_policy(tmp_path: Path, policy: str) -> 
         assert w.step() == "waiting_for_removal"     # the swapped drive is not written again
         assert len(claimed(env.ledger, da)) == 3
         loc.target = None
+        assert w.step() == "waiting_for_removal"     # one empty scan is not yet proof that it was removed
         assert w.step() == "absent"
         assert env.codes().get("A-001") == Severity.NOTICE and "Insert the next archive drive" in env.status()["message"]
         loc.target = b
@@ -396,7 +755,7 @@ def test_any_drive_index_names_segments_held_elsewhere(tmp_path: Path) -> None:
         doc_b = check_drive(b.root, env.ledger, db)
         held = {n["segment_id"]: n for n in doc_b["not_on_this_drive"]}
         assert held[ids[2]]["what"] == "on_another_archive_drive" and held[ids[2]]["other_drives"] == ["ARCHIVE_A"]
-        gaps_csv = (b.root / layout.GAPS_CSV).read_text("utf-8")
+        gaps_csv = (b.root / layout.index_files("CAM01")["gaps"]).read_text("utf-8")
         assert "on_another_archive_drive" in gaps_csv and "ARCHIVE_A" in gaps_csv
     finally:
         env.close()
@@ -411,6 +770,7 @@ def test_swap_with_manual_removal_fallback(env: Env) -> None:
     assert w.step() == "swapped"
     st = env.status()
     assert st["state"] == "REMOVE_MANUALLY" and "Safely Remove Hardware" in st["message"]
+    assert st["message"].startswith("Do not unplug the archive drive yet")
     assert "A-0" not in json.dumps(st["alerts"])
     w.resume()                                       # operator decides to keep the drive in
     env.segments(1)
@@ -487,7 +847,7 @@ def test_index_rewritten_after_an_hour_of_footage(tmp_path: Path) -> None:
                                 "ORDER BY generation", (did,))
         assert [(g["reason"], g["copies"]) for g in gens] == [("attach", 0), ("hourly", 3), ("hourly", 6)]
         check_drive(a.root, env.ledger, did, complete=False)      # 7th documented by the journal
-        journal = parse_journal((a.root / layout.JOURNAL).read_bytes())
+        journal = parse_journal((a.root / layout.index_files("CAM01")["journal"]).read_bytes())
         assert len(journal) == 7
     finally:
         env.close()
@@ -495,8 +855,8 @@ def test_index_rewritten_after_an_hour_of_footage(tmp_path: Path) -> None:
 
 def test_journal_ignores_torn_last_line() -> None:
     sha = "a" * 64
-    good = f"2026-11-09T00:00:00.000000Z,id1,original,{sha},10,Sentinel/x.ts\n"
-    data = ("verified_utc,segment_id,kind,sha256,size_bytes,path\n" + good + good[:30]).encode()
+    good = f"2026-11-09T00:00:00.000000Z,CAM01,id1,original,{sha},10,Sentinel/x.ts\n"
+    data = ("verified_utc,camera_id,segment_id,kind,sha256,size_bytes,path\n" + good + good[:30]).encode()
     assert len(parse_journal(data)) == 1
 
 
@@ -519,21 +879,25 @@ def test_alert_rules_and_catalog() -> None:
     c = Condition(state="UP_TO_DATE", backlog_s=0, threshold_s=100)
     assert evaluate_alerts(c) == []
     msg = evaluate_alerts(Condition(state="FULL", backlog_s=0, threshold_s=1, full=True))[0].message
-    assert msg == ("Error A-002: The archive drive is full. Recording continues on this system. "
-                   "Replace it with an empty archive drive.")
+    assert msg == ("Error A-002: The archive drive is full. Recording continues on this system. Do not unplug the "
+                   "archive drive yet: press Swap Archive Drive, wait for SAFE TO REMOVE, then insert an empty "
+                   "archive drive.")
 
 
 def test_recorder_view_reports_stale_archive_status(tmp_path: Path) -> None:
-    view, alerts = recorder_view(tmp_path, 5.0)
-    assert not view["running"] and [a.code for a in alerts] == ["A-007"]
+    v = RecorderArchiveView(tmp_path, "CAM01", 5.0, threshold_s=1e9, critical_after_s=1800)
+    t0 = time.time()
+    view, alerts = v.evaluate(None, now=t0)
+    assert not view["running"] and [(a.code, a.severity) for a in alerts] == [("A-007", Severity.WARNING)]
     (tmp_path / "archive_status.json").write_text(json.dumps({
-        "heartbeat_epoch": time.time(), "state": "FULL", "alerts": [{"code": "A-002", "severity": 2}],
+        "heartbeat_epoch": t0, "state": "FULL", "alerts": [{"code": "A-002", "severity": 2}],
         "backlog": {"text": "Not yet archived: 3.0 h"}}), "utf-8")
-    view, alerts = recorder_view(tmp_path, 5.0)
+    view, alerts = v.evaluate(None, now=t0)
     assert view["running"] and [(a.code, a.severity) for a in alerts] == [("A-002", 2)]
-    view, alerts = recorder_view(tmp_path, 5.0, now=time.time() + 3600)
-    assert [a.code for a in alerts] == ["A-007"]
-
+    view, alerts = v.evaluate(None, now=t0 + 600)
+    assert [(a.code, a.severity) for a in alerts] == [("A-007", Severity.WARNING)]
+    view, alerts = v.evaluate(None, now=t0 + 2000)       # down for more than 30 min: critical
+    assert [(a.code, a.severity) for a in alerts] == [("A-007", Severity.CRITICAL)]
 
 def test_throttle_limits_rate() -> None:
     t = [0.0]
@@ -552,8 +916,6 @@ def test_throttle_limits_rate() -> None:
 
 
 def test_config_validation(tmp_path: Path) -> None:
-    with pytest.raises(ConfigError):
-        make_config(tmp_path, archive={"enabled": True})
     with pytest.raises(ConfigError):
         make_config(tmp_path, archive={"resume_policy": "sometimes"})
     with pytest.raises(ConfigError):

@@ -1,25 +1,30 @@
-"""Self-describing archive drive: ``Sentinel/INDEX/`` documents (pure builders, no I/O).
+"""Self-describing archive drive: ``Sentinel/<camera>/INDEX/`` documents (pure builders, no I/O).
 
-Built ONLY from ``archive_copies`` rows of the drive (= files read back and verified), so an
-index can never list a file that is not verified on that drive. Copies are only ever added,
-never removed, so an older index generation is always a correct (smaller) description: a drive
-pulled while the index is being rewritten is still described correctly by whichever generation
-each file holds. Between index rewrites, ``verified_journal.csv`` (one line appended and flushed
-per verified file) documents the newest copies.
+One index **per camera** (a drive may receive footage from several cameras / appliances; each
+system only rewrites its own camera's index). Built from this system's VERIFIED
+``archive_copies`` rows of the drive (= files read back and matched to the sealed hash), plus
+``carried_forward[]``: entries a previous index or journal on the drive listed that this system's
+ledger does not know (e.g. the ledger was reinstalled), kept as long as the file is still there with
+the recorded size — never silently dropped, and clearly marked as verified by another ledger.
+Copies found missing/damaged are marked LOST in the ledger and are no longer listed.
+
+Between rewrites, ``verified_journal.csv`` documents every copy: its line is appended and flushed
+**before** the copy is recorded as verified in the ledger, so a drive pulled at any moment lists
+(index ∪ journal) every verified copy on it.
 
 Formats:
 
-* ``archive_index.json`` — ``format: "sentinel-archive-index"``, ``format_version: 1``,
-  ``generation``, ``generated_utc``, ``camera_id``, ``display_timezone``, ``drive``,
-  ``software``, ``policy``, ``verification``, ``coverage``, ``copies[]``, ``gaps[]``,
-  ``not_on_this_drive[]``, ``notes[]``.
-* ``archive_index.csv`` — one row per verified file.
+* ``archive_index.json`` — ``format: "sentinel-archive-index"``, ``format_version: 2``,
+  ``generation``, ``generated_utc``, ``camera_id``, ``ledger_instance``, ``display_timezone``,
+  ``drive``, ``software``, ``policy``, ``verification``, ``coverage``, ``copies[]``,
+  ``carried_forward[]``, ``set_aside_files[]``, ``gaps[]``, ``not_on_this_drive[]``, ``notes[]``.
+* ``archive_index.csv`` — one row per listed file (``source`` = this_ledger | carried_forward).
 * ``gaps.csv`` — recorded gaps overlapping the span on the drive, and segments in that span that
   are NOT on this drive (held on another archive drive, or not yet archived).
 * ``SHA256SUMS.txt`` — ``<sha256>  <path>`` (paths relative to the drive root, ``/``), LF. Check
-  with ``sha256sum -c Sentinel/INDEX/SHA256SUMS.txt`` from the drive root.
-* ``verified_journal.csv`` — ``verified_utc,segment_id,kind,sha256,size_bytes,path``. A reader
-  must ignore a final line that does not end with a newline (torn by a power cut).
+  with ``sha256sum -c Sentinel/<camera>/INDEX/SHA256SUMS.txt`` from the drive root.
+* ``verified_journal.csv`` — ``verified_utc,camera_id,segment_id,kind,sha256,size_bytes,path``.
+  A reader must ignore a final line that does not end with a newline (torn by a power cut).
 """
 
 from __future__ import annotations
@@ -35,23 +40,26 @@ from ..export.layout import local_text
 from . import layout
 
 FORMAT = "sentinel-archive-index"
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2
 
-JOURNAL_HEADER = "verified_utc,segment_id,kind,sha256,size_bytes,path\n"
+JOURNAL_FIELDS = ("verified_utc", "camera_id", "segment_id", "kind", "sha256", "size_bytes", "path")
+JOURNAL_HEADER = ",".join(JOURNAL_FIELDS) + "\n"
 
 README_TEXT = """SENTINEL ARCHIVE DRIVE
 ======================
 
-This drive holds archive copies of recordings made by a Sentinel recording system.
+This drive holds archive copies of recordings made by Sentinel recording systems.
 
 * Sentinel/<camera>/<date>/ contains the original recording files, unchanged, named by their
   UTC start and end time. Files ending in .framehash.txt list a fingerprint for every picture.
 * Sentinel/<camera>/Quarantine/ holds recordings that were damaged when they were made.
-* Sentinel/INDEX/ describes everything on this drive: archive_index.csv (one line per file),
-  gaps.csv (times with no recording, and recordings kept on a different archive drive), and
-  SHA256SUMS.txt (a fingerprint of every file, to check the copies).
+* Sentinel/<camera>/INDEX/ describes the files of that camera on this drive:
+  archive_index.csv (one line per file), gaps.csv (times with no recording, and recordings kept
+  on a different archive drive), SHA256SUMS.txt (a fingerprint of every listed file, to check the
+  copies), and verified_journal.csv (every file checked since the index was last rewritten).
 * Every file listed was read back from this drive and checked against the fingerprint taken
-  when it was recorded.
+  when it was recorded. Files whose name contains ".unverified-" failed that check; they were
+  kept, are not evidence copies, and are listed separately in the index.
 
 Do not change, rename or delete anything on this drive. For review, ask for a review drive.
 """
@@ -77,10 +85,34 @@ def _flags(r: Any) -> list[str]:
     return f
 
 
-def build_index(*, generation: int, generated_utc: str, camera_id: str, tz: ZoneInfo, drive: dict[str, Any],
-                software: dict[str, Any], policy: str, copies: list[Any], gaps: list[Any],
-                not_on_drive: list[dict[str, Any]]) -> dict[str, bytes]:
+def previous_entries(index_json: bytes | None, journal: bytes | None) -> dict[str, dict[str, Any]]:
+    """Entries listed on the drive by an earlier index / journal (any ledger), keyed by path."""
+    out: dict[str, dict[str, Any]] = {}
+    if index_json:
+        try:
+            doc = json.loads(index_json)
+            for e in list(doc.get("copies") or []) + list(doc.get("carried_forward") or []):
+                if isinstance(e, dict) and e.get("path") and e.get("sha256"):
+                    src = e.get("ledger_instance") or doc.get("ledger_instance")
+                    out[e["path"]] = dict(e, ledger_instance=src)
+        except ValueError:
+            pass
+    if journal:
+        for j in parse_journal(journal):
+            out.setdefault(j["path"], {"path": j["path"], "kind": j["kind"], "sha256": j["sha256"],
+                                       "size_bytes": int(j["size_bytes"]), "segment_id": j["segment_id"],
+                                       "verified_utc": j["verified_utc"], "ledger_instance": None,
+                                       "from": "journal"})
+    return out
+
+
+def build_index(*, camera_id: str, generation: int, generated_utc: str, ledger_instance: str, tz: ZoneInfo,
+                drive: dict[str, Any], software: dict[str, Any], policy: str, copies: list[Any], gaps: list[Any],
+                not_on_drive: list[dict[str, Any]], carried: list[dict[str, Any]] | None = None,
+                set_aside: list[dict[str, Any]] | None = None) -> dict[str, bytes]:
     """Return {relative path: bytes} for the index files (the journal and README excluded)."""
+    names = layout.index_files(camera_id)
+    carried = carried or []
     entries = []
     for r in copies:
         entries.append({
@@ -104,32 +136,40 @@ def build_index(*, generation: int, generated_utc: str, camera_id: str, tz: Zone
     } for g in gaps]
     doc = {
         "format": FORMAT, "format_version": FORMAT_VERSION, "generation": generation,
-        "generated_utc": generated_utc, "camera_id": camera_id, "display_timezone": str(tz.key),
-        "drive": drive, "software": software, "policy": policy,
+        "generated_utc": generated_utc, "camera_id": camera_id, "ledger_instance": ledger_instance,
+        "display_timezone": str(tz.key), "drive": drive, "software": software, "policy": policy,
         "verification": {
-            "rule": "Every file listed was read back from this drive and its SHA-256 equals the SHA-256 recorded "
-                    "when the recording was sealed on the recording system.",
+            "rule": "Every file in copies[] was read back from this drive and its SHA-256 equals the SHA-256 "
+                    "recorded when the recording was sealed on the recording system. carried_forward[] entries "
+                    "were verified by another ledger (ledger_instance) and are still present with the recorded "
+                    "size; they are not re-verified by this index.",
             "method_notes": "Read-back bypasses the operating-system cache (Windows FILE_FLAG_NO_BUFFERING; Linux "
                             "O_DIRECT). It cannot bypass a cache inside the drive or its USB adapter."},
         "coverage": {"first_start_utc": min(starts) if starts else None, "last_end_utc": max(ends) if ends else None,
                      "media_files": len(media), "sidecar_files": len(entries) - len(media),
                      "recorded_seconds": round(sum(float(e["duration_s"] or 0) for e in media), 3),
-                     "bytes": sum(int(e["size_bytes"]) for e in entries)},
-        "copies": entries, "gaps": gap_list, "not_on_this_drive": not_on_drive,
+                     "bytes": sum(int(e["size_bytes"]) for e in entries),
+                     "carried_forward_files": len(carried)},
+        "copies": entries, "carried_forward": carried, "set_aside_files": set_aside or [],
+        "gaps": gap_list, "not_on_this_drive": not_on_drive,
         "notes": ["Copies verified after this index was written are listed in verified_journal.csv.",
-                  "Times are UTC unless marked local; local times use the display time zone."],
+                  "Times are UTC unless marked local; local times use the display time zone.",
+                  "Files in set_aside_files[] failed read-back verification; they are kept but are not copies."],
     }
     files: dict[str, bytes] = {}
-    files[layout.INDEX_JSON] = json.dumps(doc, indent=1, sort_keys=True).encode("utf-8")
+    files[names["json"]] = json.dumps(doc, indent=1, sort_keys=True).encode("utf-8")
 
     buf = io.StringIO(newline="")
     w = csv.writer(buf, lineterminator="\n")
     cols = ["path", "kind", "sha256", "size_bytes", "segment_id", "run_id", "seq", "segment_state", "start_utc",
             "end_utc", "start_local", "end_local", "duration_s", "verified_utc", "verify_method", "flags"]
-    w.writerow(cols)
+    w.writerow(cols + ["source"])
     for e in entries:
-        w.writerow([";".join(e[c]) if c == "flags" else ("" if e[c] is None else e[c]) for c in cols])
-    files[layout.INDEX_CSV] = buf.getvalue().encode("utf-8")
+        w.writerow([";".join(e[c]) if c == "flags" else ("" if e[c] is None else e[c]) for c in cols] + ["this_ledger"])
+    for e in carried:
+        w.writerow([("" if e.get(c) is None else (";".join(e[c]) if c == "flags" else e[c])) for c in cols]
+                   + ["carried_forward"])
+    files[names["csv"]] = buf.getvalue().encode("utf-8")
 
     buf = io.StringIO(newline="")
     w = csv.writer(buf, lineterminator="\n")
@@ -143,14 +183,15 @@ def build_index(*, generation: int, generated_utc: str, camera_id: str, tz: Zone
         w.writerow([n["what"], n["start_utc"] or "", n["end_utc"] or "", _local(n["start_utc"], tz) or "",
                     _local(n["end_utc"], tz) or "", "" if n["duration_s"] is None else n["duration_s"],
                     n["segment_state"], ";".join(n["other_drives"])])
-    files[layout.GAPS_CSV] = buf.getvalue().encode("utf-8")
+    files[names["gaps"]] = buf.getvalue().encode("utf-8")
 
-    files[layout.SUMS] = "".join(f"{e['sha256']}  {e['path']}\n" for e in entries).encode("utf-8")
+    files[names["sums"]] = "".join(f"{e['sha256']}  {e['path']}\n" for e in entries + carried).encode("utf-8")
     return files
 
 
-def journal_line(verified_utc: str, segment_id: str, kind: str, sha256: str, size: int, path: str) -> str:
-    return f"{verified_utc},{segment_id},{kind},{sha256},{size},{path}\n"
+def journal_line(verified_utc: str, camera_id: str, segment_id: str, kind: str, sha256: str, size: int,
+                 path: str) -> str:
+    return f"{verified_utc},{camera_id},{segment_id},{kind},{sha256},{size},{path}\n"
 
 
 def parse_journal(data: bytes) -> list[dict[str, str]]:
@@ -160,7 +201,7 @@ def parse_journal(data: bytes) -> list[dict[str, str]]:
     out = []
     for ln in lines[1:-1]:   # skip header; the element after the last "\n" is incomplete or empty
         parts = ln.split(",")
-        if len(parts) != 6 or len(parts[3]) != 64:
+        if len(parts) != len(JOURNAL_FIELDS) or len(parts[4]) != 64:
             continue
-        out.append(dict(zip(("verified_utc", "segment_id", "kind", "sha256", "size_bytes", "path"), parts)))
+        out.append(dict(zip(JOURNAL_FIELDS, parts)))
     return out

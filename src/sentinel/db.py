@@ -217,8 +217,10 @@ CREATE INDEX IF NOT EXISTS ix_export_items_seg ON export_items(segment_id, state
 
 # ---------------------------------------------------------------------------------------------
 # Phase 3: continuous archive-drive copies (docs/04 §2-3, requirement S1). Owned by
-# ``sentinel.archive.ledger``. A row exists ONLY for a copy that was read back from the archive
-# drive and matched the sealed hash: unverified / in-flight copies are never recorded.
+# ``sentinel.archive.ledger``. A row is created ONLY for a copy that was read back from the archive
+# drive (bypassing the OS cache) and matched the sealed hash: unverified / in-flight copies are never
+# recorded. A copy later found missing or damaged is marked LOST (the row is kept as history) and the
+# segment is queued again; only VERIFIED rows count as archived.
 ARCHIVE_DDL = """
 CREATE TABLE IF NOT EXISTS archive_copies (
     copy_id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -231,10 +233,27 @@ CREATE TABLE IF NOT EXISTS archive_copies (
     verify_method     TEXT NOT NULL,
     already_present   INTEGER NOT NULL DEFAULT 0,  -- 1: file found on the drive and re-verified, not copied
     verified_utc      TEXT NOT NULL,
-    UNIQUE (segment_id, drive_id, kind),
-    UNIQUE (drive_id, path)
+    state             TEXT NOT NULL DEFAULT 'VERIFIED',  -- VERIFIED | LOST
+    lost_utc          TEXT,
+    lost_reason       TEXT
 );
-CREATE INDEX IF NOT EXISTS ix_archive_copies_seg ON archive_copies(segment_id, kind);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_archive_copies_live ON archive_copies(segment_id, drive_id, kind)
+    WHERE state='VERIFIED';
+CREATE UNIQUE INDEX IF NOT EXISTS ux_archive_copies_path ON archive_copies(drive_id, path) WHERE state='VERIFIED';
+CREATE INDEX IF NOT EXISTS ix_archive_copies_seg ON archive_copies(segment_id, kind, state);
+
+CREATE TABLE IF NOT EXISTS archive_problems (      -- persistent operator alerts (A-006) until acknowledged
+    problem_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    drive_id          TEXT REFERENCES drives(drive_id),
+    kind              TEXT NOT NULL,          -- verify_failed | lost | unverifiable | set_aside
+    segment_id        TEXT,
+    path              TEXT,                   -- file on the drive concerned (e.g. a set-aside *.unverified-* file)
+    detail            TEXT,
+    created_utc       TEXT NOT NULL,
+    acknowledged_utc  TEXT,
+    acknowledged_by   TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_archive_problems_open ON archive_problems(acknowledged_utc, drive_id);
 
 CREATE TABLE IF NOT EXISTS archive_indexes (       -- every Sentinel/INDEX/ generation written to a drive
     drive_id          TEXT NOT NULL REFERENCES drives(drive_id),
@@ -302,14 +321,20 @@ class Ledger:
             # Switching a new database to WAL needs an exclusive lock and SQLite does not wait for
             # it (busy_timeout is not applied), so two processes opening a fresh ledger at the same
             # moment (recorder + archive at first boot) would fail with "database is locked". Retry.
+            # The pragma can also return the OLD mode without raising, so the result is checked.
+            mode = None
             for attempt in range(50):
                 try:
-                    self._conn.execute("PRAGMA journal_mode=WAL")
-                    break
+                    mode = str(self._conn.execute("PRAGMA journal_mode=WAL").fetchone()[0]).lower()
                 except sqlite3.OperationalError as exc:
                     if "locked" not in str(exc) or attempt == 49:
                         raise
-                    time.sleep(0.1)
+                else:
+                    if mode == "wal":
+                        break
+                time.sleep(0.1)
+            if mode != "wal":
+                raise RuntimeError(f"the ledger could not be switched to WAL mode (journal_mode={mode})")
             self._conn.execute("PRAGMA synchronous=FULL")
             self._migrate()
 

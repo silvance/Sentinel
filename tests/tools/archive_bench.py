@@ -1,7 +1,7 @@
 """Throughput / CPU measurement of the real archive worker, and synthetic sealed segments.
 
-``python -m sentinel.archive bench --dir <empty temp folder> [--segments 8] [--segment-mb 256]
-[--rate-mb-s 0]`` builds a throw-away spool + ledger inside ``--dir`` with synthetic sealed
+Development tool (not part of the product): ``python tests/tools/archive_bench.py --dir <empty temp folder>
+[--segments 8] [--segment-mb 256] [--rate-mb-s 0]`` with ``PYTHONPATH=src``. builds a throw-away spool + ledger inside ``--dir`` with synthetic sealed
 segments (random bytes, hashed, read-only), then runs the actual :class:`ArchiveWorker` (same
 code path as production: throttle, 8 MiB chunks, fsync every 64 MiB, no-replace rename,
 uncached read-back, ledger rows, journal, index) to a "drive" folder inside ``--dir`` and
@@ -23,11 +23,12 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from ..clock import iso_utc
-from ..config import AppConfig, ArchiveConfig, load_config_dict
-from ..db import Ledger
-from ..export.target import ExportTarget
-from ..models import SegmentState
+from sentinel.archive.locator import DriveScan
+from sentinel.clock import iso_utc
+from sentinel.config import AppConfig, ArchiveConfig, load_config_dict
+from sentinel.db import Ledger
+from sentinel.export.target import ExportTarget
+from sentinel.models import SegmentState
 
 MB = 1_000_000
 
@@ -38,10 +39,10 @@ class FixedLocator:
     def __init__(self, target: ExportTarget | None = None) -> None:
         self.target = target
 
-    def locate(self) -> ExportTarget | None:
-        if self.target is not None and not Path(self.target.root).is_dir():
-            return None
-        return self.target
+    def scan(self) -> DriveScan:
+        if self.target is None or not Path(self.target.root).is_dir():
+            return DriveScan()
+        return DriveScan([self.target])
 
 
 def add_synthetic_run(ledger: Ledger, cfg: AppConfig, n: int, size: int, *, seconds_each: float = 300.0,
@@ -93,7 +94,7 @@ def bench_config(root: Path, **archive: Any) -> AppConfig:
 
 
 def run_bench(root: Path, segments: int, segment_mb: float, rate_mb_s: float) -> dict[str, Any]:
-    from .worker import ArchiveWorker
+    from sentinel.archive.worker import ArchiveWorker
 
     root = Path(root)
     if root.exists() and any(root.iterdir()):
@@ -141,3 +142,16 @@ def main_bench(root: Path, segments: int, segment_mb: float, rate_mb_s: float) -
 
 
 __all__ = ["FixedLocator", "add_synthetic_run", "bench_config", "run_bench"]
+
+
+if __name__ == "__main__":
+    import argparse
+    import sys
+
+    ap = argparse.ArgumentParser(description="archive copy+verify throughput and CPU on this machine")
+    ap.add_argument("--dir", required=True, help="empty folder (created) on the disk to measure")
+    ap.add_argument("--segments", type=int, default=8)
+    ap.add_argument("--segment-mb", type=float, default=256.0)
+    ap.add_argument("--rate-mb-s", type=float, default=0.0, help="throttle; 0 = unthrottled")
+    a = ap.parse_args()
+    sys.exit(main_bench(Path(a.dir), a.segments, a.segment_mb, a.rate_mb_s))

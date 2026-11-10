@@ -61,8 +61,12 @@ sample_span_frames = 30
 # Runs as its own process: python -m sentinel.archive run --config <this file>
 [archive]
 enabled = false
-drive_path = "/media/sentinel-archive"   # Windows example: "E:\\" (the archive drive's root)
-require_drive_marker = true        # only drives prepared by Sentinel (SENTINEL_DRIVE.json)
+# Archive drives are found by their marker on any mounted volume (never by drive letter).
+# drive_path is optional: an extra folder to look in (e.g. a fixed mount point on Linux).
+drive_path = ""
+require_drive_marker = true        # SENTINEL_DRIVE.json with drive_uuid and "role": "archive"
+                                   #   (python -m sentinel.archive designate --drive <root> --admin-id <id>)
+not_running_critical_after_s = 1800  # archive process down this long => critical alert A-007
 resume_policy = "this_drive"       # or "any_drive": a new drive continues where the last one stopped
 max_rate_mb_s = 40                 # throttle for reading local recordings (recording uses ~0.5-1.5 MB/s)
 backlog_alert_hours = 24           # "not yet archived" longer than this => critical alert A-004

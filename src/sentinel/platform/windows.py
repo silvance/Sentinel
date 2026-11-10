@@ -21,6 +21,38 @@ CREATE_NO_WINDOW = 0x08000000
 BELOW_NORMAL_PRIORITY_CLASS = 0x00004000
 
 
+def flush_directory(path: Path) -> bool:
+    """Commit a directory's metadata (e.g. a rename into it) to the device: open the directory with
+    ``FILE_FLAG_BACKUP_SEMANTICS`` and ``GENERIC_WRITE`` and call ``FlushFileBuffers``. Works without
+    administrator rights on NTFS (verified on the development host). Returns False if the file
+    system refuses (callers then confirm the result another way); raises OSError if the directory
+    cannot be opened at all (e.g. the drive is gone)."""
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+                                wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    k32.CreateFileW.restype = wintypes.HANDLE
+    k32.FlushFileBuffers.argtypes = [wintypes.HANDLE]
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    GENERIC_WRITE, SHARE_ALL, OPEN_EXISTING, BACKUP_SEMANTICS = 0x40000000, 0x7, 3, 0x02000000
+    p = os.path.abspath(path)
+    p = p if p.startswith("\\\\") else "\\\\?\\" + p
+    h = k32.CreateFileW(p, GENERIC_WRITE, SHARE_ALL, None, OPEN_EXISTING, BACKUP_SEMANTICS, None)
+    if h is None or h == ctypes.c_void_p(-1).value:
+        err = ctypes.get_last_error()
+        if err in (5, 50, 87):         # access denied / not supported / invalid parameter: refused
+            return False
+        raise ctypes.WinError(err)
+    try:
+        if k32.FlushFileBuffers(h):
+            return True
+        err = ctypes.get_last_error()
+        if err in (5, 1, 50, 87):
+            return False
+        raise ctypes.WinError(err)
+    finally:
+        k32.CloseHandle(h)
+
+
 class _IO_COUNTERS(ctypes.Structure):
     _fields_ = [(n, ctypes.c_ulonglong) for n in (
         "ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
@@ -123,7 +155,13 @@ class WindowsPlatform(Platform):
                 os.chmod(path, stat.S_IREAD)
 
     def fsync_dir(self, path: Path) -> None:
-        return None  # NTFS metadata is journaled; directory handles cannot be fsynced via CRT
+        # Best effort for the recorder: NTFS journals metadata, and a refusal must never stop
+        # recording. Archive/export use flush_directory() directly and act on a refusal.
+        try:
+            if not flush_directory(path):
+                log.debug("directory flush refused for %s", path)
+        except OSError as exc:
+            log.debug("directory flush failed for %s: %s", path, exc)
 
     def seal_read_only(self, path: Path) -> None:
         os.chmod(path, stat.S_IREAD)  # sets FILE_ATTRIBUTE_READONLY

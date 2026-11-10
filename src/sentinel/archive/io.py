@@ -58,6 +58,22 @@ class ArchiveIO(TargetIO):
 
     def __init__(self, read_chunk: int = 8 * MIB) -> None:
         self.read_chunk = max(CHUNK, read_chunk)
+        self.last_dir_flush: bool | None = None     # result of the most recent directory flush
+
+    def fsync_dir(self, path: Path) -> bool:
+        self.last_dir_flush = super().fsync_dir(path)
+        return self.last_dir_flush
+
+    def confirm_in_place(self, dest: Path) -> None:
+        """Before a copy is recorded: make sure its rename is durable. If the file system refused the
+        directory flush, re-list the directory (fresh listing, not a cached stat) and require the final
+        name to be present and the ``.partial`` gone; then ask for the flush once more."""
+        if self.fsync_dir(dest.parent):
+            return
+        names = set(os.listdir(dest.parent))
+        if dest.name not in names or partial_path(dest).name in names:
+            raise OSError(f"rename of {dest.name} is not visible in a fresh directory listing")
+        self.fsync_dir(dest.parent)
 
     def read_back(self, path: Path) -> tuple[Iterator[bytes], str]:
         return open_unbuffered(path, self.read_chunk)
@@ -77,8 +93,11 @@ class ArchiveIO(TargetIO):
         return new
 
     def replace_file(self, dest: Path, data: bytes, verify: Callable[[Path], str]) -> str:
-        """Atomically replace ``dest`` with ``data``; ``verify(path)`` returns the uncached read-back
-        SHA-256 of the temporary file, which must match before the old file is replaced."""
+        """Replace ``dest`` with ``data``; ``verify(path)`` returns the uncached read-back SHA-256. The
+        temporary file must verify before the old file is replaced, and the final file is verified again
+        afterwards (write-then-verify). ``os.replace`` is atomic on NTFS and ext4; on exFAT/FAT it is NOT
+        guaranteed to be atomic — a power cut during the replace can leave the old or no file under the
+        final name (the next index rewrite repairs it; the journal still lists every copy)."""
         import hashlib
 
         self.makedirs(dest.parent)
@@ -108,6 +127,8 @@ class ArchiveIO(TargetIO):
                 pass
             raise
         self.fsync_dir(dest.parent)
+        if verify(dest) != expected:
+            raise OSError(f"index file {dest.name} does not read back correctly after replacing it")
         return expected
 
     def append_line(self, path: Path, line: str) -> None:
@@ -116,6 +137,12 @@ class ArchiveIO(TargetIO):
             self._write(fh, line.encode("utf-8"))
             fh.flush()
             os.fsync(fh.fileno())
+
+    def restore_partial(self, partial: Path, dest: Path) -> None:
+        """Put back a verified copy whose rename was lost (the file system rolled it back to its
+        ``.partial`` name after an unclean removal). No-replace rename, then directory flush."""
+        self.rename_noreplace(partial, dest)
+        self.confirm_in_place(dest)
 
     def stray_partials(self, root: Path) -> list[Path]:
         """Every ``*.partial`` under ``root`` (left by an unplug / crash; never claimed)."""

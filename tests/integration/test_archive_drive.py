@@ -22,7 +22,7 @@ import pytest
 from archive_helpers import FakeEjector, SwitchLocator, check_drive, make_drive
 from conftest import requires_ffmpeg
 from harness import Harness, contiguous, wait_for
-from sentinel.archive.bench import add_synthetic_run
+from tools.archive_bench import add_synthetic_run
 from sentinel.archive.status import read_archive_status
 from sentinel.archive.worker import ArchiveWorker
 from sentinel.db import Ledger
@@ -252,6 +252,7 @@ critical_free_gb = 0
 enabled = true
 drive_path = "{drive.as_posix()}"
 require_drive_marker = true
+scan_volumes = false               # tests never look at real volumes
 poll_interval_s = 0.2
 """, encoding="utf-8")
     return cfg

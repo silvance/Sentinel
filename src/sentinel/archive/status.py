@@ -113,24 +113,74 @@ def read_archive_status(path: Path) -> dict[str, Any] | None:
         return None
 
 
-def recorder_view(data_path: Path, poll_interval_s: float, now: float | None = None) -> tuple[dict[str, Any], list[Alert]]:
-    """For the recorder's status.json: the archive section and its alerts. A missing or stale
-    archive status (archive process not running / hung) is alert A-007."""
-    now = time.time() if now is None else now
-    doc = read_archive_status(data_path / STATUS_FILE)
-    max_age = max(60.0, 6 * poll_interval_s)
-    if doc is None or now - float(doc.get("heartbeat_epoch", 0)) > max_age:
-        age = None if doc is None else round(now - float(doc.get("heartbeat_epoch", 0)), 1)
-        view = {"running": False, "state": None if doc is None else doc.get("state"), "status_age_s": age,
-                "backlog": (doc or {}).get("backlog"),
-                "message": "Archive copying is not running."}
-        return view, [make_alert("A-007", Severity.WARNING, detail={"status_age_s": age})]
-    alerts = []
-    for a in doc.get("alerts") or []:
-        try:
-            alerts.append(make_alert(a["code"], Severity(int(a["severity"])), detail=a.get("detail") or {}))
-        except (KeyError, ValueError):
-            continue
-    view = {"running": True, "state": doc.get("state"), "drive": doc.get("drive"), "message": doc.get("message"),
-            "backlog": doc.get("backlog"), "drive_label": doc.get("drive_label")}
-    return view, alerts
+def _merge(alerts: list[Alert]) -> list[Alert]:
+    """One alert per code (the most severe), most severe first."""
+    best: dict[str, Alert] = {}
+    for a in alerts:
+        if a.code not in best or a.severity > best[a.code].severity:
+            best[a.code] = a
+    return sorted(best.values(), key=lambda a: -a.severity)
+
+
+class RecorderArchiveView:
+    """For the recorder's ``status.json`` (runs inside the recorder process): the archive section and
+    its alerts. It does NOT depend on the archive process being alive:
+
+    * the "not yet archived" backlog is computed from the ledger itself (cached ``backlog_every_s``),
+      so A-004 still fires when the archive process is dead;
+    * open archive problems (A-006) are read from the ledger, so they persist until acknowledged;
+    * a missing or stale ``archive_status.json`` is A-007, WARNING at first and CRITICAL once it has
+      lasted ``critical_after_s`` (default 30 min)."""
+
+    def __init__(self, data_path: Path, camera_id: str, poll_interval_s: float, threshold_s: float,
+                 critical_after_s: float, backlog_every_s: float = 60.0) -> None:
+        self.data_path = data_path
+        self.camera_id = camera_id
+        self.max_age = max(60.0, 6 * poll_interval_s)
+        self.threshold_s = threshold_s
+        self.critical_after_s = critical_after_s
+        self.backlog_every_s = backlog_every_s
+        self._down_since: float | None = None
+        self._cache: tuple[float, float, int, str | None, int] | None = None   # (t, seconds, segments, oldest, problems)
+
+    def _from_ledger(self, ledger: Any, now: float) -> tuple[float, int, str | None, int]:
+        if self._cache is None or now - self._cache[0] >= self.backlog_every_s:
+            from .ledger import ArchiveLedger
+
+            al = ArchiveLedger(ledger, self.camera_id)
+            b = al.backlog(None)
+            self._cache = (now, b.seconds, b.segments, b.oldest_start_utc, len(al.open_problems()))
+        return self._cache[1], self._cache[2], self._cache[3], self._cache[4]
+
+    def evaluate(self, ledger: Any, now: float | None = None) -> tuple[dict[str, Any], list[Alert]]:
+        now = time.time() if now is None else now
+        alerts: list[Alert] = []
+        seconds, segments, oldest, problems = self._from_ledger(ledger, now) if ledger is not None else (0.0, 0, None, 0)
+        if seconds >= self.threshold_s:
+            alerts.append(make_alert("A-004", Severity.CRITICAL, detail={"backlog_s": round(seconds, 1)}))
+        if problems:
+            alerts.append(make_alert("A-006", Severity.CRITICAL, detail={"open_problems": problems}))
+        backlog = {"text": backlog_text(seconds), "seconds": round(seconds, 1), "segments": segments,
+                   "oldest_start_utc": oldest, "source": "ledger"}
+        doc = read_archive_status(self.data_path / STATUS_FILE)
+        age = None if doc is None else now - float(doc.get("heartbeat_epoch", 0))
+        if doc is None or age is None or age > self.max_age:
+            if self._down_since is None:
+                self._down_since = now - (age if age is not None and age > self.max_age else 0.0)
+            down = now - self._down_since
+            sev = Severity.CRITICAL if down >= self.critical_after_s else Severity.WARNING
+            alerts.append(make_alert("A-007", sev, detail={"status_age_s": None if age is None else round(age, 1),
+                                                           "down_s": round(down, 1)}))
+            view = {"running": False, "state": None if doc is None else doc.get("state"),
+                    "status_age_s": None if age is None else round(age, 1), "backlog": backlog,
+                    "message": f"Archive copying is not running. {backlog['text']}."}
+            return view, _merge(alerts)
+        self._down_since = None
+        for a in doc.get("alerts") or []:
+            try:
+                alerts.append(make_alert(a["code"], Severity(int(a["severity"])), detail=a.get("detail") or {}))
+            except (KeyError, ValueError):
+                continue
+        view = {"running": True, "state": doc.get("state"), "drive": doc.get("drive"), "message": doc.get("message"),
+                "backlog": doc.get("backlog") or backlog, "drive_label": doc.get("drive_label")}
+        return view, _merge(alerts)

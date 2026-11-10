@@ -106,8 +106,9 @@ class ArchiveConfig:
     """Continuous copy of sealed recordings to an attached archive drive (S1, docs/04 §2-3).
     Runs as its own process (``python -m sentinel.archive run``); see sentinel/archive/."""
     enabled: bool = False
-    drive_path: str = ""                      # mounted folder of the archive drive, e.g. "E:\\" or a mount point
-    require_drive_marker: bool = True         # only drives prepared by Sentinel (SENTINEL_DRIVE.json with drive_uuid)
+    drive_path: str = ""                      # optional extra folder to scan; drives are found by marker on any volume
+    require_drive_marker: bool = True         # SENTINEL_DRIVE.json must carry drive_uuid AND "role": "archive"
+    scan_volumes: bool = True                 # look for archive drives on every mounted volume (false: drive_path only)
     resume_policy: str = "this_drive"         # this_drive | any_drive: what counts as "already archived"
     chunk_mib: int = 8                        # copy chunk size
     fsync_every_mib: int = 64                 # flush to the drive at least this often while copying
@@ -118,6 +119,7 @@ class ArchiveConfig:
     poll_interval_s: float = 5.0              # how often to look for a drive / new recordings when idle
     swap_max_wait_s: float = 120.0            # on swap, finish the file in flight if it takes no longer than this
     verify_attempts: int = 3                  # read-back failures per file before alerting and skipping it
+    not_running_critical_after_s: float = 1800.0  # archive process down this long => A-007 becomes critical
 
 
 @dataclass(frozen=True)
@@ -237,15 +239,14 @@ def _validate(cfg: AppConfig) -> None:
     if ex.sample_edge_frames < 1 or ex.sample_spans < 0 or ex.sample_span_frames < 1:
         raise ConfigError("[export] sample_edge_frames and sample_span_frames must be >= 1, sample_spans >= 0")
     arc = cfg.archive
-    if arc.enabled and not arc.drive_path:
-        raise ConfigError("[archive] drive_path is required when enabled = true")
     if arc.resume_policy not in ("this_drive", "any_drive"):
         raise ConfigError("[archive] resume_policy must be 'this_drive' or 'any_drive'")
     if not 1 <= arc.chunk_mib <= 64 or arc.fsync_every_mib < arc.chunk_mib:
         raise ConfigError("[archive] require 1 <= chunk_mib <= 64 and fsync_every_mib >= chunk_mib")
     if arc.verify_attempts < 1:
         raise ConfigError("[archive] verify_attempts must be at least 1")
-    for name in ("max_rate_mb_s", "index_every_s", "backlog_alert_hours", "poll_interval_s", "swap_max_wait_s"):
+    for name in ("max_rate_mb_s", "index_every_s", "backlog_alert_hours", "poll_interval_s", "swap_max_wait_s",
+                 "not_running_critical_after_s"):
         if getattr(arc, name) <= 0:
             raise ConfigError(f"[archive] {name} must be positive")
     if arc.reserve_free_mb < 0:

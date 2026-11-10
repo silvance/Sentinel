@@ -49,8 +49,8 @@ The drive always carries its own index of what is on it.
 * **Layout:** `Sentinel/<camera>/<YYYY-MM-DD>/<HHMMSS>Z_<HHMMSS>Z_<seg8>.ts` (+ `.framehash.txt`),
   **UTC** names (no DST ambiguity; the reviewer-friendly local names are the review export's job),
   `<seg8>` = first 8 hex digits of the segment id (unique even for two segments in the same second).
-* **Self-describing drive:** `Sentinel/INDEX/archive_index.json` (`format: sentinel-archive-index`,
-  v1: copies with UTC + local times, flags, verify method; gaps; `not_on_this_drive[]`; coverage),
+* **Self-describing drive:** `Sentinel/<camera>/INDEX/archive_index.json` (`format: sentinel-archive-index`,
+  v2 — per camera since the QA review: copies with UTC + local times, flags, verify method; gaps; `not_on_this_drive[]`; coverage),
   `archive_index.csv`, `gaps.csv`, `SHA256SUMS.txt` (`sha256sum -c` from the drive root), and
   `README_ARCHIVE.txt`. Built **only** from verified `archive_copies` rows. Each file is written as
   `.partial`, fsynced, read back uncached, then atomically replaced (SHA256SUMS last). Rewritten on
@@ -72,7 +72,9 @@ The drive always carries its own index of what is on it.
 * **Resume policy** `resume_policy = this_drive` (default, as specified: a new drive gets everything
   from the oldest segment not verified on *that* drive) or `any_drive` (continue with what is on no
   archive drive yet). "Not yet archived: N h" always means *not verified on any archive drive*.
-* **Drive acceptance:** `ConfiguredPathLocator` watches `[archive] drive_path`; with
+* **Drive acceptance (revised after QA, see §8):** `VolumeScanLocator` finds archive drives by marker
+  (`role: "archive"`) on every mounted volume (Windows: volume GUID paths), never by letter. Originally:
+  `ConfiguredPathLocator` watched `[archive] drive_path`; with
   `require_drive_marker = true` (default) only a drive with `SENTINEL_DRIVE.json` (`drive_uuid`,
   written by the drive-preparation branch) is used, else A-005 and nothing is written. An archive
   location on the volume of the recording storage, the ledger, the logs or the operating system is
@@ -85,7 +87,8 @@ The drive always carries its own index of what is on it.
   `io.py` (`ArchiveIO(TargetIO)`, `Throttle`, atomic index replace, journal append, partial cleanup),
   `ledger.py` (`ArchiveLedger`: pending/backlog queries, `record_verified` refuses a hash ≠ sealed),
   `index.py`, `layout.py`, `status.py` (`archive_status.json`, `Condition`→alerts, `recorder_view`),
-  `locator.py`, `priority.py`, `bench.py` (synthetic sealed segments + benchmark), `__main__.py`
+  `locator.py`, `priority.py`, `hosting.py`, `__main__.py`; benchmark + synthetic segments moved to
+  `tests/tools/archive_bench.py` (not shipped)
   (`run | swap | resume | status | bench`).
 * `src/sentinel/db.py`: separate `ARCHIVE_DDL` (`archive_copies`, `archive_indexes`), one line in
   `_migrate`; **and** a retry around `PRAGMA journal_mode=WAL` — found by the tests: recorder and
@@ -147,7 +150,7 @@ One recording run, no gap row, all 40 real segments contiguous and FINALIZED, ma
 progress about once a second, hence ~1.0 s.) An earlier run of the same test with a 0.7 GB
 unthrottled phase (2.2 s) gave the same picture (lag −0.015..0.036 s, max progress interval 0.97 s).
 
-**Throughput / CPU** (`python -m sentinel.archive bench`, real worker code path, to a folder on the
+**Throughput / CPU** (`tests/tools/archive_bench.py`, formerly `python -m sentinel.archive bench`; real worker code path, to a folder on the
 internal NVMe SSD; source files freshly written, so likely served from the OS cache; read-back uncached):
 
 | Run | data | end-to-end | copy | verify | CPU | CPU per GB |
@@ -200,10 +203,12 @@ the throttle, not the disk, should be the limit; over USB 2 (~30 MB/s) expect ro
    successive volumes (swap when full / weekly), `any_drive` is the natural choice. Recommend deciding
    with S6 (swap interval).
 2. Once a file has been verified on a drive, the ledger keeps counting it even if the drive is later
-   damaged or files are deleted elsewhere; on re-attach missing files are detected (A-006) but not
+   damaged or files are deleted elsewhere; (QA fix: missing/damaged copies are now marked LOST on attach,
+   re-queued and alerted — see §8) — originally: on re-attach missing files are detected (A-006) but not
    re-copied automatically (needs support). Retention (local deletion) must not rely on a single
    archive copy — it is deliberately not implemented (E6).
-3. A-006 / A-005 alerts clear when that drive is removed (the event stays in the ledger).
+3. (Fixed after QA, §8: A-006 now persists until an administrator acknowledges it.) A-005 clears when
+   the unusable drive is removed.
 4. Index cadence: up to 1 h of copies are documented only in the journal until the next rewrite/swap.
 5. Archive and review drives are different drives; the archive worker refuses the recording,
    ledger, log and system volumes, not a review drive inserted at the archive location (require the marker, and in
@@ -220,3 +225,33 @@ the throttle, not the disk, should be the limit; over USB 2 (~30 MB/s) expect ro
 hardware test on the real dock + 3.5" drive (sustained throughput, unplug mid-copy, full drive, swap)
 before operational use. The logic is covered end to end with real recordings; the hardware-facing
 parts are not.
+
+## 8. Independent QA review findings (review of `7f003e4`) — status
+
+| # | Finding | Status | Fix / regression test (`tests/unit/test_archive_units.py` unless noted) |
+|---|---|---|---|
+| 1 HIGH | Verified copy could be lost: Windows directory not flushed after the no-replace rename; on attach all `*.partial` were deleted **before** checking claimed-but-missing files | **Fixed** | (a) `platform.windows.flush_directory`: CreateFileW(dir, GENERIC_WRITE, FILE_FLAG_BACKUP_SEMANTICS) + FlushFileBuffers — works without admin on NTFS here; used by `TargetIO.fsync_dir` (shared with export) and best-effort by the recorder platform; if refused, `ArchiveIO.confirm_in_place` requires the final name (and no `.partial`) in a fresh listing before the claim. (b) attach reconciles FIRST: a claimed-but-missing file whose `.partial` re-verifies against the sealed hash is restored, else the `.partial` is deleted afterwards. (c) `archive_copies.state` VERIFIED/LOST (row kept, `lost_utc`, `lost_reason`), LOST re-queued, counted in backlog, excluded from the index, persistent A-006. Tests: `test_rename_rolled_back_by_unplug_is_restored_not_deleted`, `test_missing_copy_is_marked_lost_requeued_and_counted`, `test_lost_copy_counts_in_backlog_until_recopied`, `test_directory_flush_refused_falls_back_to_fresh_listing`, `test_directory_flush_really_runs_on_windows` |
+| 2 HIGH | Exception inside the error handler killed the worker; A-004 depended on the archive process | **Fixed** | `_report_error` fully guarded (each part in try/except, minimal status fallback); `RecorderArchiveView` (in the recorder) computes the backlog and open problems from the ledger itself, so A-004/A-006 fire with the archive dead; A-007 WARNING → CRITICAL after `not_running_critical_after_s` (1800 s). Hosting: `sentinel.archive.hosting` + `python -m sentinel.archive service-plan` generate the `SentinelArchive` Windows service commands (sc.exe create/failure/failureflag/sidtype/privs + icacls) consistent with `design/windows-service` — **NOT EXECUTED**; the actual service host (SCM control handler) is that branch's ctypes host, wired after merge. Tests: `test_worker_survives_errors_inside_its_error_handler`, `test_recorder_view_computes_backlog_itself_when_archive_is_dead`, `test_recorder_view_reports_stale_archive_status`, `test_windows_service_plan_commands` |
+| 3 MED-HIGH | One fixed path; marker role unchecked | **Fixed** | `VolumeScanLocator`: every volume (Windows `FindFirstVolumeW`, GUID paths kept for I/O; Linux mountinfo, NOT EXECUTED) + optional `drive_path`; only `SENTINEL_DRIVE.json` with `drive_uuid` and `"role": "archive"`; marker present-but-unreadable / other role → A-005; review layout or `export_batches` for the drive → refused. `python -m sentinel.archive designate` (admin, audit event) adds the role to a prepared marker. Sticky selection; the swapped drive is never chosen; a new drive inserted before the old one is removed is used. Tests: `test_unprepared_or_non_archive_drive_is_never_written`, `test_designate_adds_archive_role_and_refuses_review_drives`, `test_drive_found_by_marker_not_by_letter_new_drive_before_old_removed`, `test_live_volume_enumeration_lists_the_volume_of_this_folder` (read-only enumeration) |
+| 4 MED | INDEX rebuilt from this ledger only | **Fixed** | Per-camera `Sentinel/<camera>/INDEX/`; `carried_forward[]` keeps entries of an earlier index/journal unknown to this ledger while the file is present with its size; `ledger_instance` UUID in every index; journal has `camera_id`; README wording updated. Test: `test_index_carries_forward_entries_unknown_to_this_ledger` |
+| 5 MED | Buffered read-back recorded as verified | **Fixed** | `record_verified` raises `UnverifiableCopy` for `buffered-cache-not-bypassed`; worker records an `unverifiable` problem (A-006) and skips. Test: `test_buffered_read_back_is_never_recorded_as_verified` |
+| 6 MED | Wording invited unsafe unplugging | **Fixed** | FULL / A-002 / REMOVE_MANUALLY / COPYING / SWAP_PENDING lead with "Do not unplug … yet" and the action; only SAFE_TO_REMOVE says it is safe. Tests: `test_alert_rules_and_catalog`, `test_swap_with_manual_removal_fallback` |
+| 7 MED | A-006 cleared on removal | **Fixed** | `archive_problems` table; A-006 stays (worker and recorder status, across restarts) until `python -m sentinel.archive acknowledge --admin-id` (audit event `archive_problems_acknowledged`). Test: `test_verify_alert_persists_after_removal_until_acknowledged` |
+| 8 LOW-MED | Priority inversion on ledger lock; WAL not asserted | **Fixed** | `priority.normal_priority()` ends background mode (PROCESS/THREAD_MODE_BACKGROUND_END) around every archive ledger write; `retry_locked` on all calls; `Ledger` checks the `journal_mode` result is `wal` (raises otherwise). Tests: `test_ledger_writes_leave_background_mode`, `test_ledger_is_in_wal_mode` |
+| 9 LOW | journal/claim order; exFAT replace; `.unverified-*`; swapped drive with unreadable marker; bench in package | **Fixed** (exFAT: documented) | Journal line written and flushed **before** the ledger claim; index replace is write-then-verify (final file read back) and the non-atomicity of `os.replace` on exFAT/FAT is documented in `ArchiveIO.replace_file`; set-aside files recorded (`archive_problems.kind=set_aside`) and listed in `set_aside_files[]`; `_swapped_drive` is kept while any drive is present-but-unusable and cleared only after two empty scans; bench + synthetic segments moved to `tests/tools/archive_bench.py`. Tests: `test_journal_written_before_the_claim`, `test_set_aside_files_are_listed_in_the_index`, swap tests |
+
+Remaining / not verified after the fixes:
+* The directory flush and volume-GUID handling were exercised only on this host's internal NTFS
+  volume; behaviour on exFAT/NTFS over USB, and whether a USB bridge honours the flush, is unknown.
+* Volume scanning reads `SENTINEL_DRIVE.json` at every volume root each poll (5 s); a sleeping
+  platter drive may be woken by this (not measured). Tests never scan real volumes (`scan_volumes =
+  false`); only the read-only enumeration was run.
+* The Windows service for the archive is a generated plan only (NOT EXECUTED) and needs the
+  `design/windows-service` host; drive preparation should write `role` itself (today: `designate`).
+* Reconcile checks size, not hash, of present files on every attach (a full re-hash of a 4 TB drive
+  would take hours); bit rot inside a present file is not detected at attach.
+
+Tests after the QA fixes (this host): `tests/unit` → **138 passed** (90 export base + 48 archive, of
+which 18 are new regression tests for the findings); `tests/integration/test_archive_drive.py` → **3
+passed** (107 s; while archiving: lag −0.019..0.016 s, max progress interval 1.016 s, no gap, one run);
+`tests/integration/test_review_export.py` → **26 passed** (83 s).

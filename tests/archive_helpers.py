@@ -14,6 +14,7 @@ from typing import Any
 from sentinel.archive import layout
 from sentinel.archive.index import parse_journal
 from sentinel.archive.io import ArchiveIO
+from sentinel.archive.locator import DriveScan
 from sentinel.db import Ledger
 from sentinel.export.fileio import PARTIAL
 from sentinel.export.target import ExportTarget, RemovalResult
@@ -23,13 +24,15 @@ def sha_file(p: Path) -> str:
     return hashlib.sha256(p.read_bytes()).hexdigest()
 
 
-def make_drive(tmp: Path, name: str, marker: bool = False) -> ExportTarget:
+def make_drive(tmp: Path, name: str, marker: bool = False, role: str | None = "archive") -> ExportTarget:
     root = tmp / f"archive_{name}"
     root.mkdir(exist_ok=True)
     duid = str(uuid.uuid5(uuid.NAMESPACE_URL, f"sentinel-test-{name}"))
     if marker:
-        (root / "SENTINEL_DRIVE.json").write_text(json.dumps({"drive_uuid": duid, "label": f"ARCHIVE_{name}"}),
-                                                  "utf-8")
+        m: dict[str, Any] = {"drive_uuid": duid, "label": f"ARCHIVE_{name}"}
+        if role:
+            m["role"] = role
+        (root / "SENTINEL_DRIVE.json").write_text(json.dumps(m), "utf-8")
     return ExportTarget(root, {"drive_uuid": duid, "label": f"ARCHIVE_{name}"})
 
 
@@ -38,8 +41,11 @@ class FaultyIO(ArchiveIO):
 
     def __init__(self, *, quota: int | None = None, free: int | None = None, unplug_on_write_file: int | None = None,
                  eio_on_write_file: int | None = None, unplug_on_read_file: int | None = None,
-                 corrupt_writes: int = 0) -> None:
+                 corrupt_writes: int = 0, refuse_dir_flush: bool = False, buffered_reads: bool = False) -> None:
         super().__init__()
+        self.refuse_dir_flush = refuse_dir_flush
+        self.buffered_reads = buffered_reads
+        self.dir_flushes = 0
         self.quota, self.free = quota, free
         self.written = 0
         self.unplug_on_write_file = unplug_on_write_file
@@ -106,10 +112,21 @@ class FaultyIO(ArchiveIO):
         self.fsyncs += 1
         super()._fsync(fh)
 
+    def fsync_dir(self, path: Path) -> bool:
+        self._gone()
+        self.dir_flushes += 1
+        if self.refuse_dir_flush:
+            self.last_dir_flush = False
+            return False
+        return super().fsync_dir(path)
+
     def read_back(self, path: Path) -> tuple[Iterator[bytes], str]:
         self._gone()
         self.read_files += 1
         chunks, method = super().read_back(path)
+        if self.buffered_reads:
+            from sentinel.export.fileio import M_BUFFERED
+            method = M_BUFFERED
         if self.unplug_on_read_file is not None and self.read_files == self.unplug_on_read_file:
             def gen() -> Iterator[bytes]:
                 for c in chunks:
@@ -131,12 +148,12 @@ class SwitchLocator:
         self.target = target
         self.io = io
 
-    def locate(self) -> ExportTarget | None:
+    def scan(self) -> DriveScan:
         if self.target is None or (self.io is not None and self.io.unplugged):
-            return None
+            return DriveScan()
         if not Path(self.target.root).is_dir():
-            return None
-        return self.target
+            return DriveScan()
+        return DriveScan([self.target])
 
 
 class FakeEjector:
@@ -163,15 +180,16 @@ def drain(worker: Any, max_steps: int = 500) -> list[str]:
 
 
 def claimed(ledger: Ledger, drive_id: str) -> dict[str, str]:
-    return {r["path"]: r["sha256"] for r in ledger.query("SELECT * FROM archive_copies WHERE drive_id=?", (drive_id,))}
+    return {r["path"]: r["sha256"] for r in ledger.query("SELECT * FROM archive_copies WHERE drive_id=? AND "
+                                                          "state='VERIFIED'", (drive_id,))}
 
 
-def check_drive(root: Path, ledger: Ledger, drive_id: str, complete: bool = True) -> dict[str, Any]:
+def check_drive(root: Path, ledger: Ledger, drive_id: str, complete: bool = True, camera: str = "CAM01") -> dict[str, Any]:
     """The index on the drive never lists anything that is not a verified copy on it; together
     with the journal it documents every verified copy; every claimed file is really there with
     the sealed hash."""
     rows = ledger.query("SELECT a.*, s.sha256 AS sealed, s.framehash_sha256 AS fsealed FROM archive_copies a "
-                        "JOIN segments s ON s.segment_id=a.segment_id WHERE a.drive_id=?", (drive_id,))
+                        "JOIN segments s ON s.segment_id=a.segment_id WHERE a.drive_id=? AND a.state='VERIFIED'", (drive_id,))
     have = {}
     for r in rows:
         p = root / r["path"]
@@ -180,23 +198,30 @@ def check_drive(root: Path, ledger: Ledger, drive_id: str, complete: bool = True
         assert r["sha256"] == (r["fsealed"] if r["kind"] == layout.KIND_FRAMEHASH else r["sealed"])
         assert not r["path"].endswith(PARTIAL)
         have[r["path"]] = r["sha256"]
-    doc = json.loads((root / layout.INDEX_JSON).read_text("utf-8"))
+    names = layout.index_files(camera)
+    doc = json.loads((root / names["json"]).read_text("utf-8"))
     assert doc["format"] == "sentinel-archive-index"
     listed = {c["path"]: c["sha256"] for c in doc["copies"]}
     assert listed.items() <= have.items(), "index lists a file that is not a verified copy on this drive"
     sums = {}
-    for ln in (root / layout.SUMS).read_text("utf-8").splitlines():
+    for ln in (root / names["sums"]).read_text("utf-8").splitlines():
         sha, path = ln.split("  ", 1)
         sums[path] = sha
-    assert sums == listed
-    csv_lines = (root / layout.INDEX_CSV).read_text("utf-8").splitlines()
-    assert len(csv_lines) == 1 + len(listed)
+    carried = {c["path"]: c["sha256"] for c in doc.get("carried_forward") or []}
+    assert sums == {**listed, **carried}
+    assert not set(carried) & set(have)
+    csv_lines = (root / names["csv"]).read_text("utf-8").splitlines()
+    assert len(csv_lines) == 1 + len(listed) + len(carried)
     journal = {}
-    jp = root / layout.JOURNAL
+    jp = root / names["journal"]
     if jp.exists():
         journal = {e["path"]: e["sha256"] for e in parse_journal(jp.read_bytes())}
-    assert journal.items() <= have.items(), "journal lists a file that is not a verified copy"
-    assert set(listed) | set(journal) == set(have), "drive does not document every verified copy"
+    lost = {r["path"] for r in ledger.query("SELECT path FROM archive_copies WHERE drive_id=? AND state='LOST'",
+                                            (drive_id,))} - set(have)   # a re-copy re-uses the path
+    for path, sha in journal.items():   # history: a journal line is a copy verified at that time
+        assert have.get(path) == sha or path in lost or path in carried, f"journal line for unknown copy {path}"
+    assert not set(listed) & lost, "index lists a copy marked LOST"
+    assert set(have) <= set(listed) | set(journal), "drive does not document every verified copy"
     if complete:
         assert listed == have
     return doc

@@ -300,14 +300,20 @@ class TargetIO:
                 raise FileExistsError(errno.EEXIST, "destination exists", str(dst)) from None
             os.rename(src, dst)
 
-    def fsync_dir(self, path: Path) -> None:
+    def fsync_dir(self, path: Path) -> bool:
+        """Commit the directory entry of a just-renamed file. True if the device was asked to commit
+        it; False if the file system refused (callers that must be sure then re-list the directory).
+        Windows: FlushFileBuffers on a directory handle (``platform.windows.flush_directory``)."""
         if sys.platform == "win32":
-            return
-        fd = os.open(path, os.O_RDONLY)
+            from ..platform.windows import flush_directory
+
+            return flush_directory(path)
+        fd = os.open(path, os.O_RDONLY)  # NOT EXECUTED on the development host
         try:
             os.fsync(fd)
         finally:
             os.close(fd)
+        return True
 
     def read_back(self, path: Path) -> tuple[Iterator[bytes], str]:
         return open_unbuffered(path)
