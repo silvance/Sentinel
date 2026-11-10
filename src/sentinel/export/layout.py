@@ -23,7 +23,7 @@ Naming decisions (design choices, see docs/branches/req-review-drive-export.md):
 from __future__ import annotations
 
 import re
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 RECORDINGS = "Recordings"
@@ -73,8 +73,11 @@ def _hms(dt: datetime) -> str:
 
 
 def mp4_rel_path(start_epoch: float, end_epoch: float, tz: ZoneInfo, suffix: str = "") -> str:
+    """Both times are written in the START's UTC offset, which the name states. A file ending at
+    the instant clocks fall back is therefore e.g. ``010000-020000_EDT_UTC-0400`` (02:00 EDT is
+    01:00 EST), never the misleading ``010000-010000``."""
     s = to_local(round(start_epoch), tz)
-    e = to_local(round(end_epoch), tz)
+    e = datetime.fromtimestamp(round(end_epoch), tz=UTC).astimezone(timezone(s.utcoffset() or timedelta(0)))
     name = f"{_hms(s)}-{_hms(e)}_{tz_label(s)}{suffix}.mp4"
     return f"{RECORDINGS}/{s.strftime('%Y-%m-%d')}/{name}"
 

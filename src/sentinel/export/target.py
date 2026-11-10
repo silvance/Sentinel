@@ -190,9 +190,36 @@ def identify_target(root: Path) -> ExportTarget:
     return ExportTarget(root=root, identity=ident)
 
 
+def _volume_id(path: Path) -> int:
+    """Device/volume id of ``path`` or, if it does not exist yet, of its nearest existing parent.
+    Raises TargetError if nothing can be examined (callers fail closed)."""
+    p = Path(path).absolute()
+    for cand in (p, *p.parents):
+        try:
+            return os.stat(cand).st_dev
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise TargetError(f"cannot examine {cand}: {exc}") from None
+    raise TargetError(f"cannot examine {path}")
+
+
+def system_paths() -> dict[str, Path]:
+    if sys.platform == "win32":
+        return {"system disk": Path(os.environ.get("SystemRoot") or os.environ.get("windir") or "C:\\Windows")}
+    return {"system disk": Path("/")}
+
+
+def protected_volume_conflicts(target: Path, protected: dict[str, Path]) -> list[str]:
+    """Names of protected locations (recording storage, ledger, logs, system disk) that share a
+    volume with ``target``. Any stat failure raises TargetError: the check fails closed."""
+    t = _volume_id(target)
+    return [name for name, p in protected.items() if _volume_id(p) == t]
+
+
 def same_volume(a: Path, b: Path) -> bool:
-    """True if two existing paths are on the same volume (used to refuse exporting onto the spool disk)."""
+    """True if two paths are on the same volume. Fails closed: True when either cannot be examined."""
     try:
-        return os.stat(a).st_dev == os.stat(b).st_dev
-    except OSError:
-        return False
+        return _volume_id(a) == _volume_id(b)
+    except TargetError:
+        return True

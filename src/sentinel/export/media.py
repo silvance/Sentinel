@@ -20,8 +20,10 @@ the segments' lists; remuxing twice gives byte-identical files.
 
 from __future__ import annotations
 
+import json
 import subprocess
 import threading
+from fractions import Fraction
 from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 from typing import Any
@@ -96,21 +98,57 @@ def frame_hashes_from_path(ffmpeg: str, path: Path, timeout: float,
     return [f.sha256 for f in parse_framehash(cp.stdout.decode("ascii", "replace"))]
 
 
-def frame_hashes_from_concat(ffmpeg: str, sources: list[Path], list_path: Path, timeout: float,
-                             popen_kwargs: dict[str, Any] | None = None) -> list[str]:
-    """Decode the original segments as ONE continuous stream (concat demuxer, no remux) and return
-    the per-frame list. Reference for MP4 verification when a segment ends in a damaged frame:
-    error concealment of a damaged frame depends on decoder state, so decoding a segment on its
-    own can legitimately differ from decoding it as part of the joined stream (measured: 1 of 6
-    camera-drop recordings on FFmpeg 9.0.1). Intact frames decode identically either way."""
-    write_concat_list(list_path, sources)
+def has_decode_errors(ffmpeg: str, path: Path, timeout: float, popen_kwargs: dict[str, Any] | None = None) -> bool:
+    """True if FFmpeg's decoder reports errors (damaged pictures) anywhere in ``path``."""
+    argv = [ffmpeg, "-hide_banner", "-nostdin", "-v", "error", "-i", str(path), "-map", "0:v:0", "-f", "null", "-"]
     try:
-        return frame_hashes_from_path(ffmpeg, list_path, timeout, popen_kwargs, input_args=["-f", "concat", "-safe", "0"])
-    finally:
-        try:
-            list_path.unlink()
-        except OSError:
-            pass
+        cp = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, timeout=timeout, check=False,
+                            **(popen_kwargs or {}))
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        raise MediaError(f"decoder check failed: {exc}") from None
+    return cp.returncode != 0 or bool(cp.stderr.strip())
+
+
+def packet_pts(ffprobe: str, path: Path, timeout: float) -> tuple[list[int], Fraction]:
+    """(sorted presentation timestamps of every video packet, stream time base). Sorted pts order
+    is decoded frame order with ``-fps_mode passthrough``. Demux only (no decoding): fast."""
+    argv = [ffprobe, "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=time_base:packet=pts",
+            "-of", "json", str(path)]
+    try:
+        cp = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, timeout=timeout, check=False)
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        raise MediaError(f"packet listing failed: {exc}") from None
+    if cp.returncode != 0:
+        raise MediaError(f"packet listing failed (exit {cp.returncode})", _tail(cp.stderr))
+    try:
+        data = json.loads(cp.stdout.decode("utf-8", "replace") or "{}")
+        tb = Fraction(data["streams"][0]["time_base"])
+    except (ValueError, KeyError, IndexError, ZeroDivisionError):
+        raise MediaError("packet listing unreadable") from None
+    pts = sorted(int(p["pts"]) for p in data.get("packets", []) if p.get("pts") not in (None, "N/A"))
+    return pts, tb
+
+
+def frame_hashes_span(ffmpeg: str, path: Path, seek_s: float | None, frames: int, timeout: float,
+                      popen_kwargs: dict[str, Any] | None = None) -> list[tuple[int, str]]:
+    """Decode ``frames`` frames starting at the first frame with pts >= ``seek_s`` (accurate
+    seek: FFmpeg decodes from the preceding keyframe and drops the frames before the target).
+    Returns (pts in the stream time base, frame SHA-256) pairs. ``-copyts`` and
+    ``-enc_time_base demux`` keep the container timestamps (verified on FFmpeg 9.0.1)."""
+    seek = ["-copyts", "-ss", f"{seek_s:.6f}"] if seek_s is not None else []
+    argv = [ffmpeg, "-hide_banner", "-nostdin", "-v", "error", *seek, "-i", str(path), "-frames:v", str(frames),
+            "-map", "0:v:0", "-an", "-sn", "-dn", "-fps_mode", "passthrough", "-enc_time_base:v", "demux",
+            "-f", "framehash", "-hash", "sha256", "-"]
+    try:
+        cp = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, timeout=timeout, check=False,
+                            **(popen_kwargs or {}))
+    except FileNotFoundError:
+        raise MediaError(f"tool not found: {ffmpeg}") from None
+    except subprocess.TimeoutExpired:
+        raise MediaError(f"span decode timed out after {timeout:.0f}s") from None
+    if cp.returncode != 0:
+        raise MediaError(f"span decode failed (exit {cp.returncode})", _tail(cp.stderr))
+    return [(f.pts, f.sha256) for f in parse_framehash(cp.stdout.decode("ascii", "replace"))]
 
 
 def frame_hashes_from_stream(ffmpeg: str, chunks: Iterable[bytes], timeout: float,

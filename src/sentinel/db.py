@@ -199,6 +199,9 @@ CREATE TABLE IF NOT EXISTS export_items (
     size_bytes        INTEGER,
     planned_bytes     INTEGER,
     verify_method     TEXT,
+    written_sha256    TEXT,                   -- mp4/documents: SHA-256 of the file as written, before read-back
+    content_check     TEXT,                   -- mp4: full | sampled | deferred (decoded-picture check level)
+    content_verified_utc TEXT,
     content_sha256    TEXT,                   -- mp4: decoded-frame content hash, verified equal to sources
     frame_count       INTEGER,
     already_present   INTEGER NOT NULL DEFAULT 0,

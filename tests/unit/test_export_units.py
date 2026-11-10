@@ -55,6 +55,89 @@ def test_dst_fall_back_hour_gets_two_distinct_names_and_keys() -> None:
     assert a.split("/")[-1].startswith("013000-013100") and b.split("/")[-1].startswith("013000-013100")
 
 
+def test_file_ending_at_fall_back_instant_is_named_in_its_start_offset() -> None:
+    # EDT hour 01:00-02:00 ends at 06:00Z, which is 01:00 EST: name says 02:00 in EDT terms.
+    p = layout.mp4_rel_path(_ep(2026, 11, 1, 5, 0), _ep(2026, 11, 1, 6, 0), NY)
+    assert p.endswith("/010000-020000_EDT_UTC-0400.mp4")
+    q = layout.mp4_rel_path(_ep(2026, 11, 1, 6, 0), _ep(2026, 11, 1, 7, 0), NY)
+    assert q.endswith("/010000-020000_EST_UTC-0500.mp4") and p != q
+
+
+# ------------------------------------------------------------------ content check helpers
+def test_choose_spans_covers_edges_is_deterministic_and_merged() -> None:
+    from sentinel.export.contentcheck import choose_spans
+
+    s1 = choose_spans(108_000, 30, 3, 30, "batch:file.mp4")
+    assert s1 == choose_spans(108_000, 30, 3, 30, "batch:file.mp4")
+    assert s1[0] == (0, 30) and s1[-1] == (107_970, 108_000) and len(s1) == 5
+    assert s1 != choose_spans(108_000, 30, 3, 30, "other")
+    assert choose_spans(40, 30, 3, 30, "x") == [(0, 40)]
+    assert choose_spans(0, 30, 3, 30, "x") == []
+
+
+def test_damaged_differences_only_in_last_two_frames_of_damaged_sources() -> None:
+    from sentinel.export.contentcheck import accept_differences, mismatches
+
+    counts = [10, 10]                                   # frames 0-9 source 0, 10-19 source 1
+    exp = [f"{i:064x}" for i in range(20)]
+    got = dict(enumerate(exp))
+    got[19] = "f" * 64
+    assert mismatches(got, exp) == [19]
+    assert accept_differences([19], counts, lambda pos: pos == 1) == (True, [19])
+    assert accept_differences([18, 19], counts, lambda pos: True) == (True, [18, 19])
+    assert accept_differences([17, 18, 19], counts, lambda pos: True)[0] is False   # > 2 frames
+    assert accept_differences([19], counts, lambda pos: False)[0] is False          # intact source
+    assert accept_differences([5], counts, lambda pos: True)[0] is False            # middle frame
+    assert accept_differences([], counts, lambda pos: False) == (True, [])
+
+
+def test_export_config_validation(tmp_path: Path) -> None:
+    from conftest import make_config
+    from sentinel.config import ConfigError
+
+    assert make_config(tmp_path).export.content_check == "sampled"
+    assert make_config(tmp_path, export={"content_check": "full"}).export.content_check == "full"
+    with pytest.raises(ConfigError):
+        make_config(tmp_path, export={"content_check": "quick"})
+    with pytest.raises(ConfigError):
+        make_config(tmp_path, export={"sample_edge_frames": 0})
+
+
+def test_protected_volume_check_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import sentinel.export.target as tgt
+
+    assert tgt.protected_volume_conflicts(tmp_path, {"spool": tmp_path / "not-yet-created" / "x"}) == ["spool"]
+    real = tgt.os.stat
+
+    def boom(p: Any, *a: Any, **k: Any) -> Any:
+        if Path(p) == tmp_path:
+            raise PermissionError(13, "denied")
+        return real(p, *a, **k)
+
+    monkeypatch.setattr(tgt.os, "stat", boom)
+    with pytest.raises(TargetError):
+        tgt.protected_volume_conflicts(tmp_path, {"spool": Path(".")})
+    assert tgt.same_volume(tmp_path, Path("."))       # fails closed
+
+
+def test_ledger_writes_retry_when_database_is_locked(tmp_path: Path) -> None:
+    import sqlite3
+    import threading
+
+    led = Ledger(tmp_path / "s.db")
+    try:
+        led.query("PRAGMA busy_timeout=50")
+        xl = ExportLedger(led)
+        other = sqlite3.connect(tmp_path / "s.db", isolation_level=None, check_same_thread=False)
+        other.execute("BEGIN IMMEDIATE")
+        threading.Timer(1.2, lambda: other.execute("COMMIT")).start()
+        drive = xl.upsert_drive(ExportTarget(tmp_path, {"drive_uuid": "d"}))   # waits out the lock
+        assert drive == "drive_uuid:d"
+        other.close()
+    finally:
+        led.close()
+
+
 # ------------------------------------------------------------------ grouping
 def _seg(sid: str, start: float, dur: float = 300.0, run: str = "R1", seq: int = 0, **kw: Any) -> dict[str, Any]:
     d = {"segment_id": sid, "run_id": run, "seq": seq, "start_utc": iso_utc(start), "end_utc": iso_utc(start + dur),
@@ -212,7 +295,7 @@ def test_export_ledger_state_machine(tmp_path: Path) -> None:
         xl.set_item_state(doc, "VERIFIED", sha256="11")
         xl.set_batch_state(bid, "COMPLETE")
         with pytest.raises(IllegalTransition):
-            xl.set_batch_state(bid, "COPYING")              # terminal
+            xl.set_batch_state(bid, "COPYING")              # COMPLETE is terminal (FAILED is retryable)
         assert xl.latest_complete_end("CAM01") == "b"
         assert xl.known_sha_on_drive(drive, "Originals/x.ts") == "00"
         assert xl.resumable_batch("CAM01", drive) is None

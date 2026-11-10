@@ -74,10 +74,24 @@ class Plan:
     coverage: dict[str, Any]
     warnings: list[dict[str, Any]] = field(default_factory=list)
     planned_bytes: int = 0
+    segments: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def to_json(self) -> dict[str, Any]:
         return {"groups": self.groups, "gaps": self.gaps, "coverage": self.coverage, "warnings": self.warnings,
-                "planned_bytes": self.planned_bytes}
+                "planned_bytes": self.planned_bytes, "segments": self.segments}
+
+
+# Segment metadata frozen into the batch at planning time, so a resumed batch (and its
+# regenerated manifest) never depends on ledger rows that the recorder fills in later.
+SNAPSHOT_FIELDS = ("segment_id", "camera_id", "run_id", "seq", "rel_path", "state", "start_utc", "end_utc",
+                   "duration_s", "time_source", "sha256", "size_bytes", "sealed_utc", "video_codec", "width",
+                   "height", "pix_fmt", "content_sha256", "content_hash_method", "decoded_frame_count",
+                   "framehash_rel_path", "framehash_sha256", "packet_count", "keyframe_count", "interrupted",
+                   "clock_anomaly", "warnings")
+
+
+def snapshot(s: dict[str, Any]) -> dict[str, Any]:
+    return {k: s.get(k) for k in SNAPSHOT_FIELDS}
 
 
 # ------------------------------------------------------------------------------ pure helpers
@@ -334,8 +348,10 @@ class Planner:
                 warnings.append({"code": "clock_anomaly", "segment_id": s["segment_id"], "message":
                                  "The system clock was changed while this recording was made; its times may be "
                                  "inaccurate."})
+        used = exported_ids | {sid for i in items_out for sid in (i.sources or [])}
+        snap = {s["segment_id"]: snapshot(s) for s in late + main if s["segment_id"] in used}
         return Plan(cam, start, end, items_out, group_meta, gaps, coverage, warnings,
-                    planned_bytes=sum(i.planned_bytes for i in items_out))
+                    planned_bytes=sum(i.planned_bytes for i in items_out), segments=snap)
 
     def _check_source(self, s: dict[str, Any]) -> None:
         p = self.spool / s["rel_path"]

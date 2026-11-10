@@ -4,6 +4,9 @@ Runs as its own process, separate from the recorder (both write the SQLite ledge
 ``busy_timeout`` let them share it). Progress for a future GUI goes to
 ``<data_dir>/export_status.json``; the last line printed is the plain-language result.
 
+``python -m sentinel.export verify-content --config <toml> --target <drive folder>`` completes the
+picture-by-picture check of MP4s exported with ``content_check = "sampled"`` or ``"deferred"``.
+
 Exit codes: 0 complete (or nothing new to export), 2 failed (needs attention),
 3 interrupted (drive removed; run again with the same drive to finish), 1 usage/config error.
 """
@@ -57,7 +60,9 @@ def _cmd_run(args: argparse.Namespace) -> int:
     except TargetError as exc:
         print(f"Error E-005: The review drive cannot be used. ({exc})", file=sys.stderr)
         return 2
-    res = ReviewExporter(cfg, target, operator_id=args.operator_id, allow_same_volume=args.allow_same_volume).run()
+    exporter = ReviewExporter(cfg, target, operator_id=getattr(args, "operator_id", None),
+                              allow_same_volume=getattr(args, "allow_same_volume", False))
+    res = exporter.verify_content() if args.cmd == "verify-content" else exporter.run()
     print(res.message)
     return {"COMPLETE": 0, "NOTHING_TO_EXPORT": 0, "INTERRUPTED": 3}.get(res.state, 2)
 
@@ -82,10 +87,14 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--operator-id", default=None, help="recorded in the manifest and the ledger")
     r.add_argument("--allow-same-volume", action="store_true",
                    help="development/test only: allow a target on the recording storage volume")
+    v = sub.add_parser("verify-content", help="compare every frame of the videos on a review drive whose picture "
+                                              "check was sampled or deferred")
+    v.add_argument("--config", required=True)
+    v.add_argument("--target", required=True)
     s = sub.add_parser("status", help="print the last export status")
     s.add_argument("--config", required=True)
     args = ap.parse_args(argv)
-    return _cmd_run(args) if args.cmd == "run" else _cmd_status(args)
+    return _cmd_status(args) if args.cmd == "status" else _cmd_run(args)
 
 
 if __name__ == "__main__":

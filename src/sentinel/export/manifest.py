@@ -50,15 +50,17 @@ FLAG_TEXT = {
 }
 
 CONTENT_TEXT = {
-    "per-segment-frame-lists":
-        "per-frame decoded SHA-256 list of this MP4, read back from the drive, equals the concatenation of "
-        "the source segments' per-frame lists",
-    "joined-decode-of-originals":
-        "per-frame decoded SHA-256 list of this MP4, read back from the drive, equals the list obtained by "
-        "decoding the original segments as one continuous stream; the frames listed in "
-        "frames_differing_from_segment_lists are damaged (cut off) and their error-concealed pictures differ "
-        "from the per-segment lists, which decode each segment on its own",
+    "full": "every frame of this MP4, decoded from the bytes read back from the drive, equals the concatenated "
+            "per-frame SHA-256 lists of its source segments (except any unverifiable_damaged_frames)",
+    "sampled": "the MP4's frame count equals its sources' total, and the frames in 'spans' (decoded from the "
+               "file on the drive) equal the sources' per-frame SHA-256 at the same positions; other frames "
+               "were NOT decoded",
+    "deferred": "content not yet verified: the pictures of this MP4 have not been compared with the originals "
+                "(see 'reason'; a later Content_Verification file in this folder may complete it). The file's "
+                "bytes were verified.",
 }
+HTML_LEVEL = {"full": "all frames checked", "sampled": "sample of frames checked",
+              "deferred": "pictures not yet checked"}
 
 VERIFY_NOTES = {
     "windows-unbuffered(FILE_FLAG_NO_BUFFERING)":
@@ -102,7 +104,8 @@ WHAT THE OTHER FOLDERS ARE
               (This folder only exists if there were damaged files.)
   Manifests   Lists of every file with its SHA-256 fingerprint (hash), in machine-readable
               (Export_Manifest.json), spreadsheet (Export_Manifest.csv) and plain-text
-              (SHA256SUMS.txt) form.
+              (SHA256SUMS.txt) form. A Content_Verification file, if present, records a later
+              picture-by-picture check of the videos.
 
 HOW TO CHECK THAT A FILE IS UNCHANGED (WINDOWS)
   1. Click Start, type PowerShell, and open "Windows PowerShell".
@@ -192,7 +195,8 @@ class ManifestBuilder:
                 "height": first["height"] if first else None,
                 "segment_state": seg["state"] if seg else None,
                 "verified_utc": i["verified_utc"], "verify_method": i["verify_method"],
-                "already_present": bool(i["already_present"])})
+                "already_present": bool(i["already_present"]),
+                "content_check": _level_of(i, d) if i["kind"] == "mp4" else None})
         return sorted(out, key=lambda e: e["path"])
 
     def _computed(self) -> dict[str, dict[str, Any]]:
@@ -242,9 +246,10 @@ class ManifestBuilder:
                 "sources": [{"segment_id": sid, "original_path": self._orig_path(sid),
                              "original_sealed_sha256": self.segments[sid]["sha256"]} for sid in srcs],
                 "made_by": "FFmpeg concat demuxer, stream copy (-c copy), -movflags +faststart; no re-encoding",
-                "content_reference": d.get("content_reference", "per-segment-frame-lists"),
-                "content_verification": CONTENT_TEXT.get(d.get("content_reference", "per-segment-frame-lists"), ""),
-                "frames_differing_from_segment_lists": d.get("frames_differing_from_segment_lists", []),
+                "byte_verification": "SHA-256 of the file as written by FFmpeg equals the SHA-256 read back from "
+                                     "the drive (" + (i["verify_method"] or "") + ")",
+                "written_sha256": i.get("written_sha256"),
+                "content_check": dict(_content_of(i, d), description=CONTENT_TEXT.get(_level_of(i, d), "")),
                 "note": "This file's SHA-256 differs from its sources' SHA-256 by design (different container).",
             })
         out.sort(key=lambda e: (e["start_utc"] or "", e["path"]))
@@ -305,8 +310,12 @@ class ManifestBuilder:
             "verification": {"file_hash": "SHA-256", "read_back_methods": methods,
                              "method_notes": {m: VERIFY_NOTES.get(m, "") for m in methods},
                              "rule": "every file listed was written as .partial, flushed, renamed, then read back "
-                                     "from the drive and its SHA-256 compared (originals: with the hash recorded "
-                                     "when the recording was sealed)."},
+                                     "from the drive and its SHA-256 compared with a value known beforehand "
+                                     "(originals: the hash recorded when the recording was sealed; MP4s: the hash "
+                                     "of the file as FFmpeg wrote it; documents: the hash of the generated text). "
+                                     "MP4 pictures were additionally compared as stated per file in "
+                                     "derivatives[].content_check (full | sampled | deferred).",
+                             "content_check_configured": (self.plan.get("content_check") or {}).get("level", "full")},
             "files": self._file_entries(),
             "originals": self._originals(),
             "derivatives": self._derivatives(),
@@ -340,9 +349,10 @@ class ManifestBuilder:
         for d in derivs:
             notes = "; ".join(FLAG_TEXT.get(f, f) for f in d["flags"])
             dur = parse_iso_utc(d["end_utc"]) - parse_iso_utc(d["start_utc"]) if d["start_utc"] and d["end_utc"] else 0
+            lvl = d["content_check"]["level"]
             rows.append(f"<tr><td>{e(d['start_local'] or '')}</td><td>{e(d['end_local'] or '')}</td>"
                         f"<td>{_dur(dur)}</td><td class='path'>{e(d['path'].replace('/', chr(92)))}</td>"
-                        f"<td>{e(notes)}</td></tr>")
+                        f"<td>{e(HTML_LEVEL.get(lvl, lvl))}</td><td>{e(notes)}</td></tr>")
         gap_rows = []
         for g in gaps:
             dur = g.get("duration_s")
@@ -372,9 +382,12 @@ Camera: {e(b['camera_id'])}. Every file listed was copied to this drive and then
 <p>Open the <b>Recordings</b> folder, then the folder for the day, and double-click a video. File names are the local
 start and end time followed by the time zone. A new file starts after every gap.</p>
 <h2>Videos ({len(derivs)})</h2>
-<table><tr><th>Starts</th><th>Ends</th><th>Length</th><th>File</th><th>Notes</th></tr>
-{''.join(rows) or '<tr><td colspan=5>No videos in this export.</td></tr>'}
+<table><tr><th>Starts</th><th>Ends</th><th>Length</th><th>File</th><th>Pictures compared with originals</th><th>Notes</th></tr>
+{''.join(rows) or '<tr><td colspan=6>No videos in this export.</td></tr>'}
 </table>
+<p><small>Every file's bytes were read back from this drive and checked. "All frames checked": every picture of the
+video was compared with the original recordings. "Sample of frames checked": the number of pictures and selected
+parts were compared. "Pictures not yet checked": only the bytes were checked so far.</small></p>
 <h2>Gaps &mdash; periods with no recording ({len(gaps)})</h2>
 {'<p>None recorded.</p>' if not gaps else '<table><tr><th>From</th><th>To</th><th>Length</th><th>Reason</th></tr>' + ''.join(gap_rows) + '</table>'}
 {'<div class="bad"><b>Unexplained time:</b> ' + str(len(unacc)) + ' period(s) have neither video nor a recorded gap. Treat them as missing.</div>' if unacc else ''}
@@ -399,6 +412,18 @@ format differs; the MP4 pictures were checked frame by frame against the origina
 </body></html>
 """
         return page.replace("\n", "\r\n").encode("utf-8")
+
+
+def _level_of(i: dict[str, Any], d: dict[str, Any]) -> str:
+    return i.get("content_check") or (d.get("content") or {}).get("level") or "full"
+
+
+def _content_of(i: dict[str, Any], d: dict[str, Any]) -> dict[str, Any]:
+    c = dict(d.get("content") or {})
+    c["level"] = _level_of(i, d)
+    c.setdefault("unverifiable_damaged_frames", [])
+    c["checked_utc"] = i.get("content_verified_utc")
+    return c
 
 
 def _dur(seconds: float | None) -> str:
