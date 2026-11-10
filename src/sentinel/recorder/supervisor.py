@@ -9,7 +9,10 @@ One FFmpeg child per *run*. The supervisor measures, never assumes:
   that FFmpeg removed from its timeline (e.g. MPEG-TS discontinuity correction absorbs forward
   jumps > 10 s). The lost interval is recorded as a gap and the run is restarted on a fresh
   time anchor;
-* every run end is followed by a gap record (via the finaliser queue).
+* every run end is followed by a gap record (via the finaliser queue);
+* segment times follow measured reception time: at each segment boundary the run anchor gets a
+  rate-limited correction for camera-clock and PC-monotonic drift (``DriftTracker``, docs/03
+  §4.2); wall-clock steps and sudden timing jumps are flagged, never followed.
 
 It retries forever: a camera that is unplugged for a week is retried every ``backoff_max_s``
 for a week. Unexpected internal errors are retried too; only repeated internal failures end

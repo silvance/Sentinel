@@ -43,6 +43,7 @@ network. Approval is the deploying organisation's decision.
 - [ ] `/etc/sentinel/camera.secret` 0600 owned by `sentinel`; `/etc/sentinel/sentinel.toml` root:sentinel 0640.
 - [ ] systemd unit installed as shipped (`ProtectProc=invisible`, `UMask=0027`, watchdog, `Restart=always`).
 - [ ] NTP from an approved local source (or documented manual time procedure); `timedatectl` shows synchronised.
+- [ ] Windows: Windows Time service set to start automatically (it is demand-start on Windows Home and was found stopped on the development PC) and pointed at the approved source; `w32tm /query /status` shows a stratum and a recent "Last Successful Sync Time". The diagnostic report's clock observations must show `synchronized = 1` (docs/03 §4.4).
 - [ ] Suspend/hibernate disabled; BIOS set to power on after power loss; UPS recommended.
 - [ ] SSH disabled or restricted to administrators; no remote desktop.
 - [ ] Removable-drive filesystem approved (risk C1); drive preparation authority decided (docs/04 §4).

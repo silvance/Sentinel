@@ -29,6 +29,7 @@ timeline_drift_tolerance_s = 3.0   # stream time behind real time by more than t
 timeline_drift_persist_s = 5.0
 escalate_after_s = 180             # outage longer than this => "Automatic recovery unsuccessful"
 clock_step_tolerance_s = 2.0
+max_clock_drift_ppm = 1000        # segment-time drift correction never follows faster changes (flags them)
 display_timezone = "America/New_York"   # IANA name; all stored times remain UTC
 
 [storage]
@@ -44,3 +45,4 @@ ffprobe = "/usr/bin/ffprobe"
 
 [service]
 log_level = "INFO"
+clock_observation_interval_s = 900 # OS time-sync / clock-offset record for the evidence ledger (E1)

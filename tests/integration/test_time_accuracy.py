@@ -24,7 +24,7 @@ from pathlib import Path
 import pytest
 
 from conftest import requires_ffmpeg
-from harness import DriftingClock, Harness, contiguous
+from harness import DriftingClock, Harness, contiguous, wait_for
 from sentinel.clock import parse_iso_utc
 from sentinel.sim.camera import SimulatedCamera
 
@@ -99,6 +99,47 @@ def test_slow_camera_and_drifting_pc_clock_stay_on_reception_time(tmp_path: Path
     assert run["camera_drift_ppm"] == pytest.approx(-10000, abs=1500)       # camera slow
     assert run["host_clock_drift_ppm"] == pytest.approx(5000, abs=300)      # wall fast vs monotonic
     assert run["time_correction_s"] == pytest.approx(0.015 * run["last_stream_time_s"], abs=0.5)
+
+
+def test_absorbed_freeze_is_still_a_gap_under_drift(tmp_path: Path) -> None:
+    # Like test_freeze_absorbed_by_ffmpeg_is_recorded_as_gap, but with a 1 % slow camera: the lost
+    # 12 s must be an explicit gap, not a drift correction, and drift must not distort it.
+    cam = SimulatedCamera(fps=15, clock_rate=0.99).start()
+    try:
+        h = Harness(tmp_path, cam.url, service={"poll_interval_s": 0.05},
+                    recording={"stall_timeout_s": 15, "io_timeout_s": 30, "segment_seconds": 4,
+                               "max_clock_drift_ppm": 20000.0}).start()
+        try:
+            time.sleep(40)                                   # let 0.4 s of drift accumulate
+            cam.freeze()
+            t_freeze = time.time()
+            time.sleep(12)
+            cam.resume()
+            t_resume = time.time()
+            wait_for(lambda: any(g["reason"] == "source_discontinuity_absorbed" for g in h.gaps()), 40,
+                     what="absorbed-discontinuity gap row")
+            n = h.sealed_count()
+            h.wait_sealed(n + 2, timeout=40)
+        finally:
+            h.stop()
+    finally:
+        cam.stop()
+    g = [x for x in h.gaps() if x["reason"] == "source_discontinuity_absorbed"]
+    assert len(g) == 1
+    assert g[0]["duration_s"] == pytest.approx(12.0, abs=2.0)
+    assert parse_iso_utc(g[0]["start_utc"]) == pytest.approx(t_freeze, abs=1.5)
+    assert parse_iso_utc(g[0]["end_utc"]) == pytest.approx(t_resume, abs=1.5)
+    broken = h.runs()[0]
+    assert broken["end_reason"] == "timeline_discontinuity"
+    assert broken["time_correction_limited_count"] == 0, "the absorbed jump leaked into the drift correction"
+    assert broken["time_correction_s"] == pytest.approx(0.01 * broken["timeline_break_stream_s"], abs=0.3)
+    segs = [s for s in h.segments() if s["run_id"] == broken["run_id"]]
+    for s in segs[1:]:
+        if s["stream_end_s"] is not None and s["stream_end_s"] < broken["timeline_break_stream_s"] - 1:
+            err = parse_iso_utc(s["end_utc"]) - parse_iso_utc(s["observed_closed_utc"])
+            assert abs(err) <= TOL_S, (s["seq"], err)
+    starts = [parse_iso_utc(s["start_utc"]) for s in h.segments()]
+    assert starts == sorted(starts)
 
 
 def test_fast_camera_stays_on_reception_time(tmp_path: Path) -> None:

@@ -1,0 +1,104 @@
+# Branch `design/time-accuracy` — drift-corrected segment times and clock observations
+
+## 1. Summary
+Recording times used to be worked out from a single starting point per recording run, so a
+camera clock or PC clock that runs slightly fast or slow made the times drift (about 4 s per
+day at a typical 50 ppm). Each 5-minute segment now has its time checked against when the
+footage actually arrived and is nudged back — slowly, never in jumps, and with segments still
+joining up exactly. The recorder also writes a "clock observation" every 15 minutes (is the PC
+clock synchronised, to what, how far off) so an examiner can state how accurate the times are.
+
+## 2. Requirements addressed
+| ID | Item | Stated requirement or design choice |
+|---|---|---|
+| E1 | Documented clock source, UTC handling (docs/03 §4.1, §4.5) | Stated requirement |
+| E1 | Measured clock offset: `clock_observations` table, OS sync status/source/offset, camera and PC drift in ppm | Stated requirement; *what* is measured and how is my design |
+| E1 / U8 | Drift-corrected segment times for multi-day runs (docs/PHASE2_REPORT §5 limitation) | Design choice (the scheme, rate limit, default 1000 ppm, 0.1 s jitter allowance, 8 s/2 s window) |
+| E3 | Contiguity kept; absorbed-discontinuity gaps still recorded; drift never creates false gaps | Stated (E3); preserving existing behaviour |
+| E7 | Recorded test results for drift scenarios | Stated |
+
+## 3. What changed
+* `src/sentinel/recorder/timebase.py` — `DriftTracker` (rate-limited per-boundary correction,
+  `set_break` for absorbed discontinuities), `TimeKnot`, `interpolate_correction`;
+  `ClockStepDetector` gained `drift_s` / `drift_ppm` (gradual wall-vs-monotonic drift, steps
+  excluded); `RunTimebase.iso_for/epoch_for` take a correction.
+* `src/sentinel/recorder/supervisor.py` — feeds progress reports to the tracker, fixes a knot
+  when each segment closes (and at run end for interrupted segments), persists per-run drift
+  and per-segment corrections, one `time_correction_limited` event per run.
+* `src/sentinel/recorder/finalizer.py` — segment times = anchor + stream time + interpolated
+  correction; legacy runs (no `time_method`) unchanged; segments without a measured correction
+  in a tracked run hold the last one (`time_correction_held` warning). Gap/shift logic untouched.
+* `src/sentinel/ledger_timing.py` (new) — separate DDL block (`clock_observations`) and
+  `ALTER TABLE ADD COLUMN` helper for run/segment columns, own `schema_meta` key; `db.py` only
+  gained one import, one call in `_migrate` and `| TIMING_WRITE_ONCE`.
+* `src/sentinel/timesync.py` (new) — read-only OS time-sync queries/parsers: Windows `sc query
+  w32time`, `w32tm /query /status [/verbose]`, registry `W32Time\Parameters`; Linux `chronyc
+  tracking`, `timedatectl show` / `show-timesync`. `platform/*.py` not touched.
+* `src/sentinel/service.py` — clock observations at start-up, every
+  `clock_observation_interval_s` (900 s) and after a clock step, in a background thread; drift
+  and last observation in `status.json`.
+* `src/sentinel/diagnostics.py` — `clock_observations.csv`, drift/correction columns in
+  `runs.csv`/`segments.csv` (only columns that exist), "Time accuracy" section in `summary.txt`.
+* `src/sentinel/config.py`, `config/sentinel.example.toml` — `[recording] max_clock_drift_ppm`
+  (1000), `[service] clock_observation_interval_s` (900).
+* `src/sentinel/sim/camera.py` — `clock_rate` (and `--clock-rate`): `settb=1/90000,setpts=PTS*rate`
+  with `-fps_mode passthrough`, frames still paced in real time by `-re`.
+* Tests: `tests/unit/test_time_accuracy_units.py` (new), `tests/integration/test_time_accuracy.py`
+  (new), `tests/integration/harness.py` (`DriftingClock`).
+* Docs: `docs/03` §4 rewritten (4.1 clock source, 4.2 scheme, 4.3 alternatives, 4.4 clock
+  observations, 4.5 examiner statement + OSD procedure) and §5; `docs/05` row 30; `docs/06`;
+  `docs/07` Windows Time checklist item.
+
+### Measurements made for design decisions (FFmpeg 9.0.1, this PC)
+| Question | Result |
+|---|---|
+| What makes simulated stream time run fast/slow vs wall time? | Encoder → pipe → receiver `-progress`, 32.5 s: `-re` 1.00065; `-readrate 0.99` 0.98891; `-readrate 1.01` 1.00816; `-re` + `setpts=PTS*1.01` 1.01101. `setpts` chosen (exact scaling; `-readrate` pacing was off by ~0.1 %). |
+| Windows Time on this PC | Service `w32time` STOPPED, DEMAND_START; `w32tm /query /status` → "The following error occurred: The service has not been started. (0x80070426)", exit 0x80070426; registry NtpServer `time.windows.com,0x9`, Type NTP. Used as a unit-test fixture. |
+| Reference error of `observed_closed_utc` | No drift (rate 1.0): segment 0 −1.19 s (FFmpeg probe backlog writes segment 0 late), others −0.18..−0.41 s with 0.2 s poll. Hence the drift tests use a 50 ms poll and skip segment 0 in the reception comparison. |
+
+## 4. Tests run (Windows 11, Python 3.14.3, FFmpeg 9.0.1)
+Baseline before changes: `pytest tests/unit tests/integration/test_recorder_faults.py
+tests/integration/test_unattended.py` → **68 passed**.
+
+RESULTS_PLACEHOLDER
+
+## 5. NOT executed / not verified
+* **Linux:** `chronyc tracking`, `timedatectl show`/`show-timesync` parsing is from documented
+  formats only (unit-tested with hand-written fixtures); never run on Linux.
+* **Successful `w32tm` output** (service running, synchronised): parsed from the documented
+  format; on this PC the service is stopped so only the error path ran for real. The sign of
+  w32tm's `Phase Offset` is kept raw, not normalised. Non-English Windows labels are not parsed
+  (kept raw, `synchronized` unknown).
+* **Real camera / RTSP:** drift only emulated with the simulator (MPEG-TS over TCP). Real camera
+  drift rate, RTSP timestamp behaviour, and capture-to-receipt latency are unmeasured; the OSD
+  procedure (docs/03 §4.5) is written but not performed.
+* **Multi-day runs:** only simulated (unit test: 3 days of synthetic reports at ±50-80 ppm);
+  the longest real run in tests is 150 s at exaggerated 1 % drift.
+* **Real Windows monotonic drift:** emulated with `DriftingClock` (wall 0.5 % fast vs
+  monotonic); the real QPC-vs-UTC drift of the deployment PC is unmeasured (the clock
+  observations will measure it).
+* Python 3.12 not run (no 3.13+ features used knowingly).
+
+## 6. Risks, limitations, open decisions
+* **Reference time is the PC clock.** If the PC's time service is not running (as on this
+  development PC) the times are only as good as the free-running PC clock; this is now *recorded*
+  (`synchronized = 0`) but not alerted by this branch — T-002 depends on
+  `Platform.clock_synchronized()`, which another branch is implementing for Windows. Suggest
+  wiring `timesync.query_windows()` behind it, or alerting from the clock observations.
+* **Rate limit default (1000 ppm)** is my choice: a camera worse than that (broken crystal) gets
+  flagged segments and lagging correction rather than followed. With very short segments the
+  0.1 s jitter allowance per boundary dominates the limit (e.g. 2 s test segments allow
+  0.1 s + 2 ms per boundary).
+* **Sub-tolerance wall-clock steps** (< 2 s) are treated as drift but rate-limited, so they are
+  smeared in over several segments and flagged, not followed instantly.
+* **Crash recovery:** segments closed by startup recovery hold the last measured correction
+  (flagged `time_correction_held`); the error is at most the drift since the last measured
+  boundary.
+* **Schema:** new columns are append-only via `ledger_timing.py`; other branches adding columns
+  to `db.py` DDL will not conflict, but if another branch also edits `Ledger._migrate` there is a
+  one-line merge.
+* Accuracy figures in docs/03 §4.5 (latency 0.2-1 s) are estimates to be replaced by the OSD /
+  reference-clock measurement on the real camera.
+
+## 7. Recommendation
+RECOMMENDATION_PLACEHOLDER

@@ -18,6 +18,7 @@ Faults:
     go_online()
     restart_encoder()  new encoder process: stream timestamps restart (camera reboot)
     corrupt(n)      overwrite the next n TS packets' payloads with random bytes
+    clock_rate=     (constructor) camera clock runs fast/slow: stream time = rate x real time
 
 CLI: ``python -m sentinel.sim.camera --port 8554`` then type a fault name and Enter.
 """
