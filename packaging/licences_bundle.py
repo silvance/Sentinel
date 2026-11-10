@@ -49,6 +49,10 @@ def _dist_licence_files(name: str) -> list[Path]:
     out = []
     for f in dist.files or []:
         p = Path(str(f))
+        if "Commercial" in p.name:
+            # The Qt wheels' only licence file is Qt's commercial licence; Sentinel uses Qt under
+            # the LGPL, so shipping that file would wrongly suggest a commercial licence.
+            continue
         if "licenses" in p.parts or p.name.upper().startswith(("LICENSE", "COPYING", "NOTICE")):
             located = Path(str(dist.locate_file(f)))
             if located.is_file():

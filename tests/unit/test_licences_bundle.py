@@ -45,7 +45,7 @@ def test_licences_folder_contents(tmp_path: Path) -> None:
     names = {p.name for p in d.iterdir()}
     assert {"LGPL-3.0.txt", "GPL-3.0.txt", "Python-LICENSE.txt", "SOURCE-OFFER.txt",
             "THIRD-PARTY-NOTICES.txt"} <= names
-    assert any(n.startswith("pyside6-essentials-") for n in names)
+    assert not any("Commercial" in n for n in names)          # Qt is used under the LGPL, not commercially
     offer = (d / "SOURCE-OFFER.txt").read_text(encoding="utf-8")
     qt = block["qt_for_python"]
     assert "https://github.com/FFmpeg/FFmpeg/archive/d4070a14ce.tar.gz" in offer
