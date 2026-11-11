@@ -183,6 +183,9 @@ HEADLINES: dict[str, tuple[str, Tone]] = {
 }
 UNKNOWN_HEADLINE = ("System error", Tone.CRITICAL)
 RECORDING_STATES = {str(OverallStatus.RECORDING), str(OverallStatus.STORAGE_WARNING)}
+# The notice that explains each planned not-recording state.
+STATE_ALERTS = {str(OverallStatus.PAUSED): "P-001", str(OverallStatus.CAMERA_NOT_SET_UP): "P-002",
+                str(OverallStatus.WATCHING): "P-003"}
 
 
 def severity_tone(severity: int) -> Tone:
@@ -312,6 +315,8 @@ def _storage_tile(doc: dict[str, Any] | None, stale: bool) -> TileView:
         detail = "Full — no space left for new recordings."
     elif isinstance(secs, (int, float)):
         detail = f"Space for {tf.approx_remaining(secs)} of recording."
+    elif (doc or {}).get("overall") not in RECORDING_STATES:
+        detail = "Recording time left is measured once recording starts."
     else:
         detail = "Recording time left is still being measured."
     if stale:
@@ -366,8 +371,12 @@ def build_dashboard(read: StatusRead, *, tz: ZoneInfo, now: float | None = None,
     banner = top if (doc.get("banner") and top is not None) else None
     notice = top if (top is not None and banner is None) else None
     takes_over = banner is not None and banner.severity >= Severity.CRITICAL
+    # The notice that explains the headline (P-001/P-002/P-003) belongs under it, not in the
+    # "Also:" list, even when a warning such as T-002 holds the banner (owner review 2026-11-10).
+    state_alert = next((a for a in alerts if a.code == STATE_ALERTS.get(str(overall))), None)
     others = tuple(a for a in alerts if a.code != "Z-001"
-                   and (top is None or a.code != top.code or a.message != top.message))
+                   and (top is None or a.code != top.code or a.message != top.message)
+                   and a is not state_alert)
 
     supporting = ""
     if overall in RECORDING_STATES:
@@ -385,6 +394,8 @@ def build_dashboard(read: StatusRead, *, tz: ZoneInfo, now: float | None = None,
         supporting = "The recorder reported a state this screen does not recognise. Contact technical support."
     if notice is not None:
         supporting = notice.message      # exact text; the notice IS the explanation
+    elif state_alert is not None:
+        supporting = state_alert.message
 
     detail = ""
     gap_since = _epoch((doc.get("open_gap") or {}).get("since_utc"))

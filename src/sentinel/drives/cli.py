@@ -75,7 +75,11 @@ class _Env:
         if self.cfg is None:
             return KnownDrives()
         db = self.cfg.data_path / "sentinel.db"
-        if not db.is_file():
+        present, why = _installed.path_state(db)
+        if present is None:   # review 2026-11-10: access denied is NOT "no ledger" (fail closed)
+            return KnownDrives(error=f"the recorder ledger {db} cannot be read by this account ({why}); "
+                                     f"{_installed.ADMIN_HINT}")
+        if not present:
             return KnownDrives()
         from ..db import Ledger
 

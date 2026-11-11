@@ -35,10 +35,10 @@ from pathlib import Path
 from typing import Any
 
 from .. import __version__
-from ..clock import Clock, SystemClock, compact_utc, iso_utc
+from ..clock import Clock, SystemClock, compact_utc, iso_utc, parse_iso_utc
 from ..config import AppConfig
 from ..credentials import redact
-from ..db import Ledger
+from ..db import NOT_RUNNING_REASON, PLANNED_GAP_REASONS, RESUMING_REASON, Ledger
 from ..models import RunEndReason, SegmentState
 from ..platform.base import Platform
 from ..storage.monitor import StorageMonitor
@@ -81,6 +81,7 @@ class LiveState:
     run_id: str | None = None
     run_launched_utc: str | None = None
     media_seen: bool = False
+    media_since_mono: float | None = None       # when this run's media started (seal deadline counts from here)
     last_out_time_s: float | None = None
     last_advance_mono: float | None = None
     last_media_mono_any: float | None = None   # across runs: when media last advanced at all
@@ -111,6 +112,7 @@ class LiveState:
     resumed_mono: float | None = None          # when the last scheduled pause ended
     # motion-triggered recording ([schedule] action "motion", sentinel.motion)
     motion_idle: bool = False                  # waiting for motion (not recording)
+    motion_record_failures: int = 0            # runs started for motion that got no video, in a row
 
 
 @dataclass
@@ -137,6 +139,7 @@ class RecordingSupervisor:
         self.clock = clock or SystemClock()
         self.ffmpeg_version = ffmpeg_version
         self.live = LiveState()
+        self._first_attempt = True               # gap left open by a previous recorder not checked yet
         self._tick = tick or (lambda: None)
         self.cam_dir = cfg.spool_path / cfg.camera.id
         self.current_proc: subprocess.Popen[bytes] | None = None
@@ -152,6 +155,7 @@ class RecordingSupervisor:
             self._wait_for_camera()
             return
         consecutive_internal = 0
+        self._reconcile_gap_at_start()
         while not self.stop_event.is_set():
             pause = self._pause_reason()
             if pause is not None:
@@ -162,6 +166,9 @@ class RecordingSupervisor:
                 log.error("storage critical (%d bytes free); not starting FFmpeg", sample.free_bytes)
                 self._wait(10.0)
                 continue
+            # About to record: a planned gap ends now; it stays "resuming" until footage or a failure.
+            self._switch_gap(RESUMING_REASON, "recording_resumed")
+            for_motion = self._mode_now() == "motion"
             try:
                 outcome = self.run_once()
                 consecutive_internal = 0
@@ -180,6 +187,11 @@ class RecordingSupervisor:
                 if consecutive_internal >= MAX_CONSECUTIVE_INTERNAL_ERRORS:
                     raise  # let the service manager restart the whole process from a clean state
                 outcome = RunOutcome(RunEndReason.INTERNAL_ERROR, None, 0.0)
+            with self.live.lock:
+                if outcome.media_seconds > 0:
+                    self.live.motion_record_failures = 0
+                elif for_motion and outcome.reason is not RunEndReason.GRACEFUL_STOP:
+                    self.live.motion_record_failures += 1
             if self.stop_event.is_set():
                 break
             if outcome.reason in (RunEndReason.SCHEDULED_PAUSE, RunEndReason.MOTION_IDLE):
@@ -235,6 +247,42 @@ class RecordingSupervisor:
             log.exception("recording schedule / motion state could not be evaluated; recording")
             return None
 
+    def _switch_gap(self, new_reason: str | None, basis: str, from_reasons: frozenset[str] = frozenset(),
+                    at_epoch: float | None = None) -> None:
+        """Record in the ledger that the reason for not recording changed now (review 2026-11-10:
+        a camera outage after a pause was otherwise exported as "planned"). Never blocks recording."""
+        try:
+            self.ledger.switch_open_gap(self.cfg.camera.id, iso_utc(self.clock.wall() if at_epoch is None else at_epoch),
+                                        new_reason, basis, from_reasons)
+        except Exception:
+            log.exception("could not record the change of gap reason (%s)", basis)
+
+    def _reconcile_gap_at_start(self) -> None:
+        """A planned gap left open by the previous recorder: the recorder was not running from that
+        recorder's last sign of life until now, which is not "planned"."""
+        if self._first_attempt is False:
+            return
+        self._first_attempt = False
+        try:
+            gap = self.ledger.open_gap(self.cfg.camera.id)
+            if gap is None or gap["reason"] not in PLANNED_GAP_REASONS:
+                return
+            alive = self.ledger.previous_instance_last_event()
+        except Exception:
+            log.exception("could not check the open gap at start")
+            return
+        if alive is not None:
+            self._switch_gap(NOT_RUNNING_REASON, "recorder_stopped", at_epoch=parse_iso_utc(alive))
+        pause = self._pause_reason()
+        self._switch_gap(str(pause) if pause is not None else RESUMING_REASON, "recorder_started",
+                         frozenset(PLANNED_GAP_REASONS | {NOT_RUNNING_REASON}))
+
+    def _mode_now(self) -> str | None:
+        try:
+            return self.schedule.mode_at(self.clock.wall()) if self.schedule is not None else None
+        except Exception:
+            return None
+
     def _schedule_says_pause(self) -> bool:
         return self._pause_reason() is not None
 
@@ -263,10 +311,15 @@ class RecordingSupervisor:
             self.stop_event.wait(min(0.2, self.cfg.service.poll_interval_s))
         with self.live.lock:
             self.live.motion_idle = False
-            if not self.stop_event.is_set():
-                self.live.resumed_mono = self.clock.mono()
         if self.stop_event.is_set():
             return
+        if self._pause_reason() is RunEndReason.SCHEDULED_PAUSE:
+            # Motion standby became a schedule pause: nothing records; say so, not "recording"
+            # (review 2026-11-10). _pause_for_schedule logs the pause itself.
+            self._switch_gap(str(RunEndReason.SCHEDULED_PAUSE), "schedule_changed")
+            return
+        with self.live.lock:
+            self.live.resumed_mono = self.clock.mono()
         m = self.motion
         snap = m.snapshot() if m is not None else {}
         why = ("motion_detected" if snap.get("seconds_since_motion") is not None
@@ -316,10 +369,22 @@ class RecordingSupervisor:
         with self.live.lock:
             self.live.scheduled_pause = False
             self.live.resume_epoch = None
-            if not self.stop_event.is_set():
-                self.live.resumed_mono = self.clock.mono()
         if self.stop_event.is_set():
             return
+        if self._pause_reason() is RunEndReason.MOTION_IDLE:
+            # The pause became a motion period with nothing moving: still not recording
+            # (review 2026-11-10: this was logged as "Recording resumed").
+            self._switch_gap(str(RunEndReason.MOTION_IDLE), "schedule_changed")
+            log.info("recording schedule says record on motion; waiting for motion")
+            try:
+                self.ledger.add_event("audit", "schedule", "schedule_motion",
+                                      "Recording schedule changed: recording only when motion is detected",
+                                      {"paused_since_utc": iso_utc(wall)})
+            except Exception:
+                log.exception("could not record schedule_motion event")
+            return
+        with self.live.lock:
+            self.live.resumed_mono = self.clock.mono()
         log.info("recording schedule says record; resuming")
         try:
             self.ledger.add_event("audit", "schedule", "schedule_resume", "Recording resumed by the recording schedule",
@@ -354,6 +419,7 @@ class RecordingSupervisor:
             lv = self.live
             lv.run_id, lv.run_launched_utc = run_id, iso_utc(wall0)
             lv.media_seen, lv.last_out_time_s, lv.last_advance_mono = False, None, None
+            lv.media_since_mono = None
             lv.lag_s, lv.drift_since_mono, lv.drift_break_stream_s, lv.last_ok_out_time_s = 0.0, None, None, None
             lv.lag_baseline_s = None
             lv.camera_drift_ppm, lv.host_clock_drift_ppm, lv.time_correction_s = None, None, None
@@ -601,8 +667,14 @@ class RecordingSupervisor:
         try:
             run = self.ledger.get_run(run_id)
             if run is not None and run["ended_utc"] is None:
-                self.ledger.update_run(run_id, ended_utc=iso_utc(self.clock.wall()),
-                                       end_reason=str(RunEndReason.INTERNAL_ERROR))
+                with self.live.lock:
+                    last_t = self.live.last_out_time_s
+                cols: dict[str, Any] = {"ended_utc": iso_utc(self.clock.wall()),
+                                        "end_reason": str(RunEndReason.INTERNAL_ERROR)}
+                if last_t is not None and last_t > (run["last_stream_time_s"] or 0):
+                    cols["last_stream_time_s"] = last_t      # not the value from up to 10 s ago
+                self.ledger.update_run(run_id, **cols)
+                self._close_listed_segments(run_id, run["anchor_utc"])
                 prev_end: float | None = 0.0
                 for s in self.ledger.run_segments(run_id):
                     if s["state"] == str(SegmentState.ACTIVE):
@@ -617,6 +689,24 @@ class RecordingSupervisor:
         except Exception:
             log.exception("could not close run %s after internal error; startup recovery will", run_id)
         self._open_run = None
+
+    def _close_listed_segments(self, run_id: str, anchor: str | None) -> None:
+        """Files FFmpeg listed as complete before the internal error are sealed as complete with
+        their listed times, not as "interrupted" with guessed ones (review 2026-11-10; startup
+        recovery already does this)."""
+        from ..clock import add_seconds_iso
+
+        listed = {e.filename: e for e in SegmentListReader(self._open_run_dir / SEGMENT_LIST_NAME).read_all()}
+        for seg in self.ledger.run_segments(run_id):
+            e = listed.get(Path(seg["rel_path"]).name)
+            if e is None or seg["state"] != str(SegmentState.ACTIVE):
+                continue
+            self.ledger.transition(
+                seg["segment_id"], SegmentState.CLOSED, stream_start_s=e.start_s, stream_end_s=e.end_s,
+                start_utc=add_seconds_iso(anchor, e.start_s) if anchor else None,
+                end_utc=add_seconds_iso(anchor, e.end_s) if anchor else None,
+                time_source="run_anchor" if anchor else None, observed_closed_utc=iso_utc(self.clock.wall()))
+            self.finalizer.submit(SegmentJob(seg["segment_id"], "closed"))
 
     # ------------------------------------------------------------------ helpers
     def _remove_empty_run_dir(self, run_dir: Path) -> None:
@@ -750,6 +840,8 @@ class RecordingSupervisor:
                     lv.last_out_time_s = snap.out_time_s
                     lv.last_advance_mono = mono
                     if snap.out_time_s > 0:
+                        if not lv.media_seen:
+                            lv.media_since_mono = mono
                         lv.media_seen = True
                         lv.last_media_mono_any = mono
                         timebase.observe(snap.out_time_s, mono)

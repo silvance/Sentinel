@@ -3,14 +3,16 @@
     <build-venv-python> packaging/build.py --ffmpeg-dir <folder containing ffmpeg[.exe] and ffprobe[.exe]>
 
 Steps (docs/08_PACKAGING.md):
-1. Record the source state (git commit, uncommitted changes) and the build environment.
+1. Record the source state (git commit, uncommitted changes and untracked files; refused unless
+   ``--allow-dirty``) and the build environment.
 2. Inspect the FFmpeg given on the command line: version, configure flags, licence class.
    It is never downloaded; a build with ``--enable-nonfree`` is refused (not redistributable).
 3. Run PyInstaller with the platform's spec (one-folder) with PYTHONHASHSEED=0 and
    SOURCE_DATE_EPOCH = commit time, into ``dist/Sentinel``.
 4. Copy FFmpeg/FFprobe and their licence files into ``dist/Sentinel/ffmpeg/`` unchanged, and write
    ``dist/Sentinel/licences/`` (LGPL/GPL texts, Python and package notices, the source offer for
-   FFmpeg and Qt/PySide6; ``packaging/licences_bundle.py``).
+   FFmpeg, the libraries linked into it and Qt/PySide6, and the third-party notices kept by
+   ``packaging/fetch_sources.py``; ``packaging/licences_bundle.py``).
 5. Write ``BUILD-MANIFEST.json`` (versions, FFmpeg facts, SHA-256 of every file) and
    ``SHA256SUMS.txt``; ``Sentinel about --verify`` checks an installed copy against it.
 
@@ -36,7 +38,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import licences_bundle  # noqa: E402
 import spec_common  # noqa: E402
-from fetch_sources import BTBN_RELEASE  # noqa: E402
+from fetch_sources import BTBN_RELEASE, is_btbn_build  # noqa: E402
+from fetch_sources import ffmpeg_source_ref as _ffmpeg_source_ref  # noqa: E402
 
 IS_WIN = sys.platform == "win32"
 EXE_SUFFIX = ".exe" if IS_WIN else ""
@@ -245,7 +248,8 @@ Status:         {status}
 
 Sentinel's policy (owner decision 2026-11-10) is to ship an LGPL FFmpeg. An LGPL build must be
 accompanied by its licence text (in this folder and in ..\\licences) and its source must be
-obtainable: ..\\licences\\SOURCE-OFFER.txt says where. A GPL build
+obtainable: ..\\licences\\SOURCE-OFFER.txt says where. Libraries linked into these programs
+and their notices: ..\\licences\\THIRD-PARTY-NOTICES.txt. A GPL build
 is only present if the builder explicitly chose --allow-gpl-internal-use: such a folder must NOT
 be given to anyone outside the organisation. See docs/08_PACKAGING.md section 8.
 """
@@ -265,22 +269,40 @@ def write_tree_manifest(app: Path, meta: dict) -> dict:
 
 
 def ffmpeg_source_ref(version: str) -> str:
-    """Git commit (``-g<sha>``) of a git-describe version, else the version itself (a release tag)."""
-    import re
+    """Git commit (``-g<sha>``) of a git-describe version, else the release tag ``n<version>``
+    (review 2026-11-10: a bare ``7.1.2`` pointed at a GitHub archive that does not exist)."""
+    return _ffmpeg_source_ref(version)
 
-    m = re.search(r"-g([0-9a-f]{7,40})(?:-|$)", version)
-    return m.group(1) if m else version.split("-")[0]
+
+DEFAULT_NOTICES_DIR = ROOT / "third_party" / "sources" / "notices"   # written by packaging/fetch_sources.py
+
+
+def source_state(allow_dirty: bool) -> tuple[str, bool]:
+    """(git commit, dirty) of the source tree; refuses what the manifest could not describe honestly.
+
+    Review 2026-11-10: untracked files count (they are bundled if imported; ``.gitignore`` is
+    respected), and a tree whose commit cannot be read (no ``.git``, no git) is refused unless
+    --allow-dirty, and then recorded as dirty."""
+    commit = git("rev-parse", "HEAD")
+    if not commit:
+        if not allow_dirty:
+            raise BuildError("cannot read the git commit of the source tree (no .git folder, or git is not on "
+                             "PATH); build from a git checkout or pass --allow-dirty (the manifest then says so)")
+        return "unknown", True
+    dirty = bool(git("status", "--porcelain"))
+    if dirty and not allow_dirty:
+        raise BuildError("the source tree has uncommitted changes or untracked files; commit them or pass "
+                         "--allow-dirty (the manifest then says so)")
+    return commit, dirty
 
 
 def build(ffmpeg_dir: Path, dist_root: Path, work: Path, allow_dirty: bool,
-          allow_gpl_internal_use: bool = False, btbn_release: str = BTBN_RELEASE,
-          source_offer_contact: str | None = None) -> Path:
-    commit = git("rev-parse", "HEAD")
-    dirty = bool(git("status", "--porcelain", "--untracked-files=no"))
-    if dirty and not allow_dirty:
-        raise BuildError("the source tree has uncommitted changes; commit them or pass --allow-dirty "
-                         "(the manifest then says so)")
+          allow_gpl_internal_use: bool = False, btbn_release: str | None = None,
+          source_offer_contact: str | None = None, notices_dir: Path | None = DEFAULT_NOTICES_DIR) -> Path:
+    commit, dirty = source_state(allow_dirty)
     ff = inspect_ffmpeg(ffmpeg_dir, allow_gpl_internal_use)
+    # Name the BtbN release only for a BtbN build (review 2026-11-10); an explicit value wins.
+    btbn = btbn_release or (BTBN_RELEASE if is_btbn_build(ff["configuration"]) else None)
     print(f"FFmpeg {ff['version']} from {ffmpeg_dir}: {ff['licence_block']['license_status']}")
     app = dist_root / "Sentinel"
     started = time.time()
@@ -308,9 +330,12 @@ def build(ffmpeg_dir: Path, dist_root: Path, work: Path, allow_dirty: bool,
     shutil.copy2(readme, app / readme.name)
     try:
         licences = licences_bundle.write_licences(app, ff["version"], ffmpeg_source_ref(ff["version"]),
-                                                  btbn_release, source_offer_contact)
+                                                  btbn, source_offer_contact, ffmpeg_licence=ff["license"],
+                                                  ffmpeg_configuration=ff["configuration"], notices_dir=notices_dir)
     except licences_bundle.LicenceError as exc:
         raise BuildError(str(exc)) from None
+    for problem in licences["notices_problems"]:
+        print(f"WARNING (not ready to hand out): {problem}", file=sys.stderr)
     if not IS_WIN:
         shutil.copy2(ROOT / "packaging" / "linux" / "sentinel.desktop", app / "sentinel.desktop")
         installer = app / "install-desktop-entry.sh"
@@ -329,7 +354,7 @@ def build(ffmpeg_dir: Path, dist_root: Path, work: Path, allow_dirty: bool,
         "ffmpeg_license_status": ff["licence_block"]["license_status"],
         "version": spec_common.version(),
         "built_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "git_commit": commit or "unknown",
+        "git_commit": commit,
         "git_dirty": dirty,
         "build_host": {"os": pyplatform.platform(), "machine": pyplatform.machine()},
         "python": sys.version.split()[0],
@@ -359,8 +384,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--allow-gpl-internal-use", action="store_true",
                     help="bundle a GPL FFmpeg anyway, for a build that never leaves the organisation "
                          "(recorded in BUILD-MANIFEST.json and shown by 'Sentinel about'); nonfree is never allowed")
-    ap.add_argument("--btbn-release", default=BTBN_RELEASE,
-                    help="BtbN FFmpeg-Builds release the FFmpeg came from (named in the source offer)")
+    ap.add_argument("--btbn-release", default=None,
+                    help="BtbN FFmpeg-Builds release the FFmpeg came from (named in the source offer; default: "
+                         f"{BTBN_RELEASE} when the FFmpeg is a BtbN build, else none)")
+    ap.add_argument("--notices-dir", type=Path, default=DEFAULT_NOTICES_DIR,
+                    help="notices/ folder written by packaging/fetch_sources.py for this FFmpeg and Qt "
+                         "(copied to licences/third-party/; default: third_party/sources/notices)")
     ap.add_argument("--source-offer-contact",
                     help="who honours the written source offer (e.g. a unit name and phone); default: generic wording")
     ap.add_argument("--inspect-only", action="store_true",
@@ -373,7 +402,7 @@ def main(argv: list[str] | None = None) -> int:
                               "required_components": "all present"}, indent=2))
             return 0
         build(args.ffmpeg_dir.resolve(), args.dist.resolve(), args.work.resolve(), args.allow_dirty,
-              args.allow_gpl_internal_use, args.btbn_release, args.source_offer_contact)
+              args.allow_gpl_internal_use, args.btbn_release, args.source_offer_contact, args.notices_dir.resolve())
     except (BuildError, subprocess.CalledProcessError) as exc:
         print(f"BUILD FAILED: {exc}", file=sys.stderr)
         return 1

@@ -25,6 +25,7 @@ import hashlib
 import json
 import logging
 import os
+import sqlite3
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -52,8 +53,8 @@ from .media import (MediaError, frame_hashes_from_path, frame_hashes_from_stream
                     has_decode_errors, packet_pts, remux_concat)
 from .planner import PlanError, Planner
 from .status import STATUS_FILE, ExportStatusWriter
-from .target import (ExportTarget, ManualRemovalFallback, SafeRemover, TargetError, protected_volume_conflicts,
-                     system_paths)
+from .target import (ExportTarget, ManualRemovalFallback, SafeRemover, TargetError, archive_drive_reason,
+                     protected_volume_conflicts, system_paths)
 
 log = logging.getLogger(__name__)
 
@@ -162,6 +163,11 @@ class ReviewExporter:
             return self._fail_without_batch(ExportFailure("E-005", str(exc)))
         batch = self.xl.resumable_batch(self.camera_id, self.drive_id)
         if batch is not None:
+            removed = self.xl.removed_sources(batch["batch_id"])
+            if removed:
+                self._replan(batch, removed)
+                batch = None
+        if batch is not None:
             self.batch_id = batch["batch_id"]
             self.xl.bump_attempts(self.batch_id)
             if batch["state"] == B_FAILED:
@@ -198,6 +204,34 @@ class ReviewExporter:
                          "items": len(plan.items), "planned_bytes": plan.planned_bytes,
                          "operator_id": self.operator_id, "content_check": ex.content_check})
         return self._execute()
+
+    def _replan(self, batch: Any, removed: list[str]) -> None:
+        """(review 2026-11-10) Recordings this unfinished batch still has to copy were removed from this
+        computer by the retention rule (they are kept on archive drives). Close the batch as FAILED and
+        plan the export again: the new plan leaves those recordings out and names them in its warnings,
+        instead of failing with E-006 on every attempt. Files already verified on the drive are kept and
+        re-checked by the new batch; unfinished temporary files are discarded."""
+        bid = batch["batch_id"]
+        detail = (f"planned again: {len(removed)} recording(s) in this export were removed from this computer "
+                  f"(kept on archive drives) before they were copied")
+        if batch["state"] == B_FAILED:
+            self.xl.update_batch(bid, error_code="E-006", error_detail=detail)
+        else:
+            self.xl.set_batch_state(bid, B_FAILED, error_code="E-006", error_detail=detail)
+        if self.io.root_present(self.root):
+            for it in self.xl.items(bid):
+                if it["state"] != I_VERIFIED:
+                    try:
+                        self.io.discard_partial(self.root / it["dest_rel_path"])
+                    except OSError:
+                        pass
+        self.xl.event("warning", "export_replanned",
+                      "An unfinished review-drive export was planned again because some of its recordings were "
+                      "removed from this computer; they are kept on archive drives",
+                      {"batch_id": bid, "drive_id": self.drive_id, "previous_state": batch["state"],
+                       "removed_segment_ids": removed[:200], "removed_count": len(removed)})
+        log.warning("export %s: %d source recording(s) removed by retention; planning the export again",
+                    bid, len(removed))
 
     def _load_batch(self, batch_id: str) -> dict[str, Any]:
         b = self.xl.batch(batch_id)
@@ -271,6 +305,14 @@ class ReviewExporter:
     def _check_target(self) -> None:
         if not self.io.root_present(self.root):
             raise ExportFailure("E-005", "target directory is not present")
+        why = archive_drive_reason(self.root, self.target.identity)
+        if why is None:
+            why = self._archive_in_ledger()
+        if why is not None:
+            # (review 2026-11-10) never write a review export onto an archive drive: the archive copy may
+            # be writing it, and the drive would be refused for archiving from then on.
+            raise ExportFailure("E-005", f"this is an archive drive ({why}); review exports are never written "
+                                         "to archive drives")
         if not self.allow_same_volume:
             protected = {"recording storage": self.cfg.spool_path, "recorder database": self.cfg.data_path,
                          "recorder logs": self.cfg.log_path, **system_paths()}
@@ -290,6 +332,21 @@ class ReviewExporter:
             probe.unlink()
         except OSError as exc:
             raise self._classify(exc, default="E-005") from None
+
+    def _archive_in_ledger(self) -> str | None:
+        """The ledger has archive copies or archive presence records for this drive."""
+        try:
+            key = self.target.drive_key
+        except TargetError:
+            return None
+        for table in ("archive_copies", "archive_drive_sessions"):
+            try:
+                if self.xl.query(f"SELECT 1 FROM {table} WHERE drive_id=? LIMIT 1", (key,)):
+                    return "archive copies to this drive are recorded in the ledger"
+            except sqlite3.OperationalError as exc:
+                if "no such table" not in str(exc).lower():
+                    raise
+        return None
 
     def _classify(self, exc: BaseException, default: str = "E-005") -> ExportFailure:
         detail = f"{type(exc).__name__}: {exc}"

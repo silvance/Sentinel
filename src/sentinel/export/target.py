@@ -118,6 +118,35 @@ def _read_marker(root: Path) -> dict[str, str]:
     return out
 
 
+# Archive-drive markers (see sentinel.archive.locator / layout; not imported, to keep export independent).
+ARCHIVE_ROLE = "archive"
+ARCHIVE_ROOT = "Sentinel"
+ARCHIVE_README = "README_ARCHIVE.txt"
+
+
+def archive_drive_reason(root: Path, identity: dict[str, str] | None = None) -> str | None:
+    """Why ``root`` (or the volume it is on) is an archive drive, or None. Looks at the drive marker's
+    role and at the archive folder, at ``root`` and at the volume's mount point (review 2026-11-10)."""
+    places = [Path(root)]
+    mount = (identity or {}).get("mount_point")
+    if mount and Path(mount) != Path(root):
+        places.append(Path(mount))
+    for base in places:
+        try:
+            doc = json.loads((base / DRIVE_MARKER).read_text("utf-8"))
+        except (OSError, ValueError):
+            doc = None
+        if isinstance(doc, dict) and doc.get("role") == ARCHIVE_ROLE:
+            return "its drive marker gives it the archive role"
+        arch = base / ARCHIVE_ROOT
+        try:
+            if (arch / ARCHIVE_README).exists() or any((d / "INDEX").is_dir() for d in arch.iterdir() if d.is_dir()):
+                return "it holds the archive folder 'Sentinel'"
+        except OSError:
+            continue
+    return None
+
+
 def _windows_volume_identity(path: Path) -> dict[str, str]:
     from ctypes import wintypes
 

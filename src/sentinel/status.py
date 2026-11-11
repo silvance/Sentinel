@@ -54,6 +54,7 @@ class Measurements:
     camera_pending: bool = False                # set up with "camera later"; no camera yet (P-002)
     motion_idle: bool = False                   # motion period, waiting for motion (planned; P-003)
     motion_broken: bool = False                 # motion period but the detector gets no pictures (W-001)
+    motion_record_failures: int = 0             # recordings after motion that got no video, in a row (W-002)
 
 
 @dataclass
@@ -112,6 +113,8 @@ def evaluate(m: Measurements, stall_timeout_s: float, segment_seconds: float, co
         alerts.append(make_alert("R-004", Severity.WARNING, detail={"restarts_10min": m.unstable_restarts}))
     if m.motion_broken:
         alerts.append(make_alert("W-001", Severity.WARNING))
+    if m.motion_record_failures:
+        alerts.append(make_alert("W-002", Severity.CRITICAL, detail={"failed_attempts": m.motion_record_failures}))
     if m.simulated:
         # First among equal-severity alerts, so the single-alert banner shows "not evidence"
         # rather than another warning (e.g. T-002 on a host whose time service is stopped).
@@ -128,7 +131,7 @@ def evaluate(m: Measurements, stall_timeout_s: float, segment_seconds: float, co
         # Prepared in advance; nothing to connect to, so no outage alert and no escalation.
         pending = True
         alerts.append(make_alert("P-002", Severity.NOTICE))
-    elif m.motion_idle and not flowing and not fatal:
+    elif m.motion_idle and not flowing and not fatal and not m.motion_record_failures:
         watching = True
         alerts.append(make_alert("P-003", Severity.NOTICE))
     elif m.scheduled_pause and not flowing and not fatal:

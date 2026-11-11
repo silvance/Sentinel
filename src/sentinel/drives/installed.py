@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import stat
 import sys
 from pathlib import Path
 from typing import Any
@@ -44,6 +45,23 @@ def _same(a: Path, b: Path) -> bool:
         return os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
 
 
+ADMIN_HINT = "run this command as administrator (elevated Command Prompt)"
+
+
+def path_state(path: Path, want_dir: bool = False) -> tuple[bool | None, str]:
+    """(True, "") when ``path`` exists as a file (or directory with ``want_dir``), (False, "") when
+    it does not, (None, reason) when this account cannot tell (e.g. access denied). Review
+    2026-11-10: ``Path.is_file`` returns False on access denied, which made an unreadable ledger
+    look absent (fail open) and produced false "no ledger" / "never run" texts."""
+    try:
+        st = os.stat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return False, ""
+    except OSError as exc:
+        return None, str(exc)
+    return (stat.S_ISDIR(st.st_mode) if want_dir else stat.S_ISREG(st.st_mode)), ""
+
+
 def installed_config_problems(config_path: str | Path | None, cfg: Any,
                               expected: Path | None = None) -> list[str]:
     problems: list[str] = []
@@ -51,12 +69,19 @@ def installed_config_problems(config_path: str | Path | None, cfg: Any,
     if config_path is None or not _same(Path(config_path), expected):
         problems.append(f"the configuration given is not the installed recorder configuration ({expected})")
     spool, data = Path(cfg.storage.spool_dir), Path(cfg.storage.data_dir)
-    if not spool.is_dir():
-        problems.append("the recording storage folder named in the configuration does not exist")
-    if not data.is_dir():
-        problems.append("the data folder named in the configuration does not exist")
+    for label, folder in (("recording storage", spool), ("data", data)):
+        ok, why = path_state(folder, want_dir=True)
+        if ok is None:
+            problems.append(f"the {label} folder named in the configuration cannot be checked by this "
+                            f"account ({why}); {ADMIN_HINT}")
+        elif not ok:
+            problems.append(f"the {label} folder named in the configuration does not exist")
     db = data / "sentinel.db"
-    if not db.is_file():
+    db_ok, why = path_state(db)
+    if db_ok is None:
+        problems.append(f"the recorder ledger in the data folder cannot be read by this account ({why}); "
+                        f"{ADMIN_HINT}")
+    elif not db_ok:
         problems.append("no recorder ledger found in the data folder")
     else:
         try:
@@ -69,6 +94,10 @@ def installed_config_problems(config_path: str | Path | None, cfg: Any,
                 problems.append("the ledger in the data folder is not a Sentinel ledger")
         except sqlite3.Error as exc:
             problems.append(f"the ledger in the data folder cannot be read ({exc})")
-    if not (data / "recorder.lock").is_file():
+    lock_ok, why = path_state(data / "recorder.lock")
+    if lock_ok is None:
+        problems.append(f"cannot check whether the recorder has run with this configuration ({why}); "
+                        f"{ADMIN_HINT}")
+    elif not lock_ok:
         problems.append("the recorder has never run with this configuration")
     return problems

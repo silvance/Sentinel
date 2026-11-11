@@ -19,7 +19,8 @@ EXIT_OK, EXIT_FAILED, EXIT_USAGE, EXIT_NOT_ADMIN = 0, 1, 2, 5
 # What the recorder's exit codes mean (sentinel.service), for `status`.
 EXIT_MEANINGS = {0: "stopped normally", 1: "unexpected error", 2: "configuration or startup problem "
                  "(run: python -m sentinel.service check-config)", 3: "another recorder instance was running",
-                 4: "recording supervisor failed repeatedly", 5: "watchdog: the recording loop stopped responding",
+                 4: "recording supervisor failed repeatedly, or an unexpected error in the service host "
+                 "(see the recorder log and the Windows Application event log)",5: "watchdog: the recording loop stopped responding",
                  6: "did not stop within the stop deadline"}
 
 
@@ -406,9 +407,11 @@ def cmd_host(args: argparse.Namespace) -> int:
     return host.exit_code if host.exit_code is not None else EXIT_FAILED
 
 
-def _raw_storage_paths(config: str) -> tuple[str, Path | None, Path | None]:
+def _raw_storage_paths(config: str, layout: object | None = None) -> tuple[str, Path | None, Path | None]:
     """Best effort for a configuration that failed validation: (camera id, status file, log dir)
-    taken from the raw TOML, so the failure can still be shown to operators and logged."""
+    taken from the raw TOML, so the failure can still be shown to operators and logged.
+    If the file cannot be read or parsed at all and it is the installed configuration, the
+    installed layout's status and log folders are used (review 2026-11-10)."""
     import tomllib
 
     base = Path(config).resolve().parent
@@ -416,6 +419,12 @@ def _raw_storage_paths(config: str) -> tuple[str, Path | None, Path | None]:
         with open(config, "rb") as fh:
             raw = tomllib.load(fh)
     except (OSError, tomllib.TOMLDecodeError):
+        from ..paths import default_layout
+
+        lay = layout if layout is not None else default_layout("win32")
+        if os.path.normcase(str(Path(config).resolve())) == os.path.normcase(str(Path(lay.config_file))):  # type: ignore[attr-defined]
+            sd = lay.status_dir  # type: ignore[attr-defined]
+            return "unknown", (Path(sd) / "status.json") if sd else None, Path(lay.log_dir)  # type: ignore[attr-defined]
         return "unknown", None, None
 
     def path(v: object) -> Path | None:
@@ -487,7 +496,18 @@ def run_recorder_in_host(host: object, config: str, recorder_factory: Callable |
     except ConfigError as exc:
         _startup_failure(f"configuration error: {exc}", *_raw_storage_paths(config), event_log=event_log)
         return EXIT_CONFIG          # SCM restarts it every 60 s; each attempt is visible as above
-    setup_logging(cfg.log_path, cfg.service.log_level, to_stderr=False)
+    except OSError as exc:
+        # Review 2026-11-10: e.g. the service account may not read the file (PermissionError).
+        # Not a ConfigError, but it must be just as visible and must not look like exit 4.
+        _startup_failure(f"the configuration file cannot be read by the service account: {exc}",
+                         *_raw_storage_paths(config), event_log=event_log)
+        return EXIT_CONFIG
+    try:
+        setup_logging(cfg.log_path, cfg.service.log_level, to_stderr=False)
+    except OSError as exc:
+        _startup_failure(f"the log folder {cfg.log_path} cannot be used: {exc}", cfg.camera.id, cfg.status_path,
+                         None, event_log)
+        return EXIT_CONFIG
     wlog = logging.getLogger("sentinel.winsvc")
     try:
         unsafe = (code_check or _running_code_problems)(cfg, config)
@@ -521,23 +541,45 @@ def run_archive_in_host(host: object, config: str, worker_factory: Callable | No
     Real SCM operation NOT EXECUTED (administrator rights); tested with a fake host."""
     from ..config import ConfigError, load_config
     from ..logging_setup import setup_logging
-    from ..service import EXIT_CONFIG
+    import threading
+
+    from ..service import EXIT_CONFIG, EXIT_LOCKED
 
     try:
         cfg = load_config(config)
     except ConfigError as exc:
         event_log(f"Sentinel archive cannot start: configuration error: {exc}")
         return EXIT_CONFIG
+    except OSError as exc:   # review 2026-11-10: e.g. access denied for the service account
+        event_log(f"Sentinel archive cannot start: the configuration file cannot be read by the service "
+                  f"account: {exc}")
+        return EXIT_CONFIG
     if not cfg.archive.enabled:
         event_log("Sentinel archive: [archive] enabled = false in the configuration; the service stops.")
         return 0
-    setup_logging(cfg.log_path, cfg.service.log_level, to_stderr=False)
+    try:
+        setup_logging(cfg.log_path, cfg.service.log_level, to_stderr=False)
+    except OSError as exc:
+        event_log(f"Sentinel archive cannot start: the log folder {cfg.log_path} cannot be used: {exc}")
+        return EXIT_CONFIG
     if worker_factory is None:
         from ..archive.worker import ArchiveWorker as worker_factory  # noqa: N813
     w = worker_factory(cfg)
-    host.on_stop(lambda: w.stop(0))        # type: ignore[attr-defined]
+    stop_asked = threading.Event()
+
+    def stop() -> None:
+        stop_asked.set()
+        w.stop(0)
+    host.on_stop(stop)                     # type: ignore[attr-defined]
     host.report_running()                  # type: ignore[attr-defined]
     w.run(whole_process=True)
+    if not stop_asked.is_set():
+        # Review 2026-11-10: the worker only returns by itself when it could not start, in
+        # practice because another archive worker holds data/archive.lock. A clean exit (0) would
+        # stop the service for good; a non-zero exit lets the SCM retry until the lock is free.
+        event_log("Sentinel archive: the archive copy ended without being asked to stop (another archive "
+                  "copy may be running); Windows will start it again.")
+        return EXIT_LOCKED
     return 0
 
 

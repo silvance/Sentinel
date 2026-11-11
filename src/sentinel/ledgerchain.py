@@ -605,6 +605,24 @@ _RUN_END = frozenset({"ended_utc", "end_reason", "exit_code", "end_detail", "las
 _RUN_WRITE_ONCE = frozenset({"anchor_utc", "anchor_method", "timeline_break_stream_s", "timeline_shift_s",
                              "time_method"})
 _GAP_WHILE_OPEN = frozenset({"ended_run_id", "end_utc", "duration_s", "next_segment_id", "closed_utc"})
+# Review 2026-11-10 (planned gaps no longer absorb outages): when an open gap is ended without
+# footage, its detail gains one note saying why; a "resuming" gap takes the first failure's reason.
+_GAP_DETAIL_NOTES = frozenset({"ended_by", "planned_period_ended_by"})
+_GAP_PLACEHOLDER_REASON = "resuming"
+
+
+def _detail_adds_only_notes(a: Any, b: Any) -> bool:
+    """``b`` is ``a`` (JSON object text, or NULL) plus only ending notes with short text values."""
+    try:
+        old = json.loads(a) if a else {}
+        new = json.loads(b) if b else {}
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(old, dict) or not isinstance(new, dict):
+        return False
+    added = set(new) - set(old)
+    return (bool(added) and added <= _GAP_DETAIL_NOTES and all(new[k] == old[k] for k in old)
+            and all(isinstance(new[k], str) and len(new[k]) <= 64 for k in added))
 VALID_KINDS = frozenset({"genesis", "adopted", "run_started", "run_updated", "run_ended", "segment_sealed",
                          "segment_updated", "gap_opened", "gap_recorded", "gap_updated", "gap_closed", "event",
                          "clock_observation", "discrepancy", "protection_gap", "chain_repair",
@@ -641,7 +659,9 @@ def illegal_changes(table: str, prev: dict[str, Any], cur: dict[str, Any]) -> li
             when = "after it was recorded"
         elif table == "recording_gaps":
             if prev.get("closed_utc") is None and (f in _GAP_WHILE_OPEN or (
-                    f == "attempts" and isinstance(a, int) and isinstance(b, int) and b >= a)):
+                    f == "attempts" and isinstance(a, int) and isinstance(b, int) and b >= a)
+                    or (f == "detail" and _detail_adds_only_notes(a, b))
+                    or (f == "reason" and a == _GAP_PLACEHOLDER_REASON and isinstance(b, str) and b)):
                 continue
             when = "after the gap was closed" if prev.get("closed_utc") is not None else "after the gap was opened"
         elif table == "recording_runs":
@@ -1142,10 +1162,10 @@ class _Verifier:
 
 
 # ---------------------------------------------------------------------- CLI
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, prog: str = "python -m sentinel.ledgerchain") -> int:
     from .config import ConfigError, load_config
 
-    ap = argparse.ArgumentParser(prog="python -m sentinel.ledgerchain",
+    ap = argparse.ArgumentParser(prog=prog,   # "Sentinel ledger" from the built program (review 2026-11-10)
                                  description="Check the recording log for alteration. Exit status: 0 intact, "
                                              "1 altered, 2 cannot check, 3 intact with protection gaps.")
     sub = ap.add_subparsers(dest="cmd", required=True)

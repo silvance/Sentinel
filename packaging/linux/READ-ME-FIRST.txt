@@ -21,5 +21,6 @@ For the installing technician
 * Settings: /etc/sentinel/sentinel.toml when run as root (systemd service), otherwise
   ~/.config/sentinel/sentinel.toml; recordings under ~/.local/share/sentinel/ (see "./sentinel about").
 * Commands: ./sentinel about | check-config | status | diagnostics | stop | setup --force
+  | ledger head|verify (recording-log chain head for the custody form at every drive swap)
 * For unattended use install the systemd unit (packaging/systemd in the source) with
   ExecStart=/opt/sentinel/sentinel recorder run --config /etc/sentinel/sentinel.toml

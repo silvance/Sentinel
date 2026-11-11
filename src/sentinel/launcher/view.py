@@ -177,14 +177,21 @@ class GuiStatusView:
         return run_window(self.cfg)
 
 
-def gui_view_provider(cfg: Any) -> StatusView | None:
-    if cfg is None or os.environ.get("SENTINEL_TEXT_STATUS") == "1":
-        return None
+def gui_available() -> bool:
+    """A window can be shown (not forced to text, a display exists, Qt is installed)."""
+    if os.environ.get("SENTINEL_TEXT_STATUS") == "1":
+        return False
     if sys.platform != "win32" and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
-        return None
+        return False
     try:
         import PySide6.QtWidgets  # noqa: F401
     except ImportError:
+        return False
+    return True
+
+
+def gui_view_provider(cfg: Any) -> StatusView | None:
+    if cfg is None or not gui_available():
         return None
     return GuiStatusView(cfg)
 

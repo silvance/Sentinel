@@ -6,6 +6,7 @@ silently fall back to defaults. Credentials are never stored here; see ``credent
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import tomllib
@@ -279,6 +280,12 @@ def _validate_camera_url(cam: CameraConfig) -> None:
         raise ConfigError("[camera] url must not put the recorder in listening (server) mode")
     if parts.scheme != "file" and not parts.hostname:
         raise ConfigError("[camera] url must include the camera host")
+    try:
+        port = parts.port   # review 2026-11-10: 'rtsp://host:99999/x' was accepted (endless R- alerts)
+    except ValueError:
+        port = -1
+    if port is not None and not 1 <= port <= 65535:
+        raise ConfigError("[camera] url port must be a number from 1 to 65535")
     if cam.input_format not in ALLOWED_INPUT_FORMATS:
         raise ConfigError("[camera] input_format must be omitted (or \"mpegts\" for the simulator)")
     if cam.input_format and not cam.development_source:
@@ -311,6 +318,8 @@ def _validate_rest(cfg: AppConfig) -> None:
         raise ConfigError(f"[recording] unknown display_timezone {rec.display_timezone!r}") from None
     if sto.critical_free_gb < 0 or sto.warning_free_gb < sto.critical_free_gb:
         raise ConfigError("[storage] require 0 <= critical_free_gb <= warning_free_gb")
+    if sto.status_dir:
+        _validate_status_dir(sto)
     if any(v <= 0 for v in (cfg.service.poll_interval_s, cfg.service.status_interval_s,
                             cfg.service.audit_interval_s, cfg.service.janitor_interval_s,
                             cfg.service.chain_anchor_interval_s, cfg.service.chain_verify_interval_s,
@@ -353,6 +362,39 @@ def _validate_rest(cfg: AppConfig) -> None:
         raise ConfigError("[retention] requires [archive] enabled = true (only archived recordings may be removed)")
 
 
+def _norm_dir(p: str) -> str:
+    return os.path.normcase(os.path.normpath(os.path.abspath(p)))
+
+
+def _same_or_inside(child: str, parent: str) -> bool:
+    c, par = _norm_dir(child), _norm_dir(parent)
+    return c == par or c.startswith(par.rstrip(os.sep) + os.sep)
+
+
+def _validate_status_dir(sto: StorageConfig) -> None:
+    """Review 2026-11-10: the operator-readable status folder must not be, contain or lie inside the
+    service-only spool/data/log folders. The Windows installer grants operators read access to it
+    and resets the permissions of everything below it, so status_dir = C:\\ProgramData\\Sentinel
+    would have exposed every recording and the live ledger."""
+    assert sto.status_dir is not None
+    for key in ("spool_dir", "data_dir", "log_dir"):
+        other = getattr(sto, key)
+        if _same_or_inside(sto.status_dir, other) or _same_or_inside(other, sto.status_dir):
+            raise ConfigError(f"[storage] status_dir must be its own folder: it may not be, contain or lie "
+                              f"inside {key}, because operators may read it (e.g. use a 'status' folder next to "
+                              f"the data folder)")
+
+
+def _table(raw: dict[str, Any], section: str) -> dict[str, Any] | None:
+    """``raw[section]`` if it is a TOML table (or absent). Review 2026-11-10: '[[camera]]' or
+    'recording = [..]' raised a bare ValueError/TypeError instead of ConfigError (no C-001)."""
+    value = raw.get(section)
+    if value is None or isinstance(value, dict):
+        return value
+    kind = "[[" + section + "]] (a list of tables)" if isinstance(value, list) else f"{section} = <value>"
+    raise ConfigError(f"[{section}] must be a single table ('[{section}]'), not {kind}")
+
+
 def _build_drives(raw: Any) -> DrivePolicy:
     if raw is not None and not isinstance(raw, dict):
         raise ConfigError("[drives] must be a table")
@@ -370,29 +412,31 @@ def load_config_dict(raw: dict[str, Any], base_dir: Path | None = None, source: 
         raise ConfigError(f"unknown section(s): {', '.join(unknown)}")
     if "camera" not in raw:
         raise ConfigError("[camera] section is required")
+    sections = {name: _table(raw, name) for name in ("camera", "recording", "storage", "tools", "service",
+                                                      "export", "archive", "retention", "motion")}
     # Omitted keys fall back to the install layout (sentinel/paths.py): bundled FFmpeg next to a
     # frozen executable before PATH, and the per-machine data folders.
-    storage_raw = {**default_storage_dirs(), **dict(raw.get("storage") or {})}
-    tools_raw = {**{t: default_tool(t) for t in TOOL_NAMES}, **dict(raw.get("tools") or {})}
+    storage_raw = {**default_storage_dirs(), **dict(sections["storage"] or {})}
+    tools_raw = {**{t: default_tool(t) for t in TOOL_NAMES}, **dict(sections["tools"] or {})}
     for t in TOOL_NAMES:   # always hand absolute tool paths to the recorder (no cwd/PATH surprises)
         if isinstance(tools_raw.get(t), str):
             tools_raw[t] = absolute_tool(tools_raw[t], base_dir)
-    camera_raw = dict(raw.get("camera") or {})
+    camera_raw = dict(sections["camera"] or {})
     cred = camera_raw.get("credentials_file")
     if isinstance(cred, str) and cred and not Path(cred).is_absolute():
         camera_raw["credentials_file"] = str((base_dir / cred).resolve())
     cfg = AppConfig(
         camera=_build(CameraConfig, "camera", camera_raw, base_dir),
-        recording=_build(RecordingConfig, "recording", raw.get("recording"), base_dir),
+        recording=_build(RecordingConfig, "recording", sections["recording"], base_dir),
         storage=_build(StorageConfig, "storage", storage_raw, base_dir),
         tools=_build(ToolsConfig, "tools", tools_raw, base_dir),
-        service=_build(ServiceConfig, "service", raw.get("service"), base_dir),
-        export=_build(ExportConfig, "export", raw.get("export"), base_dir),
+        service=_build(ServiceConfig, "service", sections["service"], base_dir),
+        export=_build(ExportConfig, "export", sections["export"], base_dir),
         source_path=source,
         drives=_build_drives(raw.get("drives")),
-        archive=_build(ArchiveConfig, "archive", raw.get("archive"), base_dir),
-        retention=_build(RetentionConfig, "retention", raw.get("retention"), base_dir),
-        motion=_build(MotionConfig, "motion", raw.get("motion"), base_dir),
+        archive=_build(ArchiveConfig, "archive", sections["archive"], base_dir),
+        retention=_build(RetentionConfig, "retention", sections["retention"], base_dir),
+        motion=_build(MotionConfig, "motion", sections["motion"], base_dir),
     )
     _validate(cfg)
     try:

@@ -17,7 +17,7 @@ from gui_support import base_measurements, populate_ledger, status_doc, write_do
 from sentinel.alerts import CATALOG, Severity, make_alert
 from sentinel.clock import iso_utc
 from sentinel.db import Ledger
-from sentinel.gui import admin_pin, textfmt as tf
+from sentinel.gui import textfmt as tf
 from sentinel.gui.ledger_view import (SpanKind, build_timeline, load_exports, load_timeline, open_ledger,
                                       recording_since, snapshot)
 from sentinel.gui.report import save_diagnostic_report
@@ -436,23 +436,6 @@ def test_exports_unknown_schema_is_reported_not_guessed(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------- admin PIN
-def test_admin_pin_set_check_and_lockout(tmp_path: Path) -> None:
-    gate = admin_pin.AdminGate(tmp_path)
-    assert not gate.configured() and not gate.check("482915")
-    for bad in ("12345", "abcdef", "111111", "123456", "1234567890123"):
-        with pytest.raises(admin_pin.PinError):
-            admin_pin.set_pin(tmp_path, bad)
-    path = admin_pin.set_pin(tmp_path, "482915")
-    assert "482915" not in path.read_text("utf-8")
-    assert gate.configured() and gate.check("482915", now=0.0)
-    for _ in range(admin_pin.MAX_FAILURES):
-        assert not gate.check("000001", now=1.0)
-    assert gate.seconds_locked(now=2.0) > 0
-    assert not gate.check("482915", now=2.0)                # locked out even with the right PIN
-    assert gate.check("482915", now=2.0 + admin_pin.LOCKOUT_S)
-
-
-# ---------------------------------------------------------------------------- diagnostic report
 def test_save_report_never_prunes_or_overwrites_user_files(tmp_path: Path) -> None:
     cfg = make_config(tmp_path)
     cfg.data_path.mkdir(parents=True)
@@ -485,3 +468,21 @@ def test_text_formatting() -> None:
 def test_status_doc_helper_is_consistent() -> None:
     doc = status_doc(replace(base_measurements(), simulated=False), NOW)
     assert doc["alert"] is None and doc["banner"] is False and doc["overall"] == "RECORDING"
+
+
+def test_camera_not_added_with_a_warning_keeps_its_explanation_under_the_headline() -> None:
+    """Owner review 2026-11-10 (development PC, no camera, no time server, no archive drive):
+    T-002 held the banner, so P-002 appeared again as an "Also:" line, A-001 claimed
+    "Recording continues", and the storage tile waited for a measurement that never comes."""
+    base = StatusDocument(overall="CAMERA_NOT_SET_UP", camera_link="not_set_up", messages=[], camera_id="CAM01",
+                          generated_utc=iso_utc(NOW), heartbeat_epoch=NOW)
+    base.storage = {"free_bytes": 810 * 10**9, "level": "ok"}
+    p002 = make_alert("P-002", Severity.NOTICE)
+    apply_alerts(base, [make_alert("T-002", Severity.WARNING), make_alert("A-001", Severity.WARNING), p002])
+    v = build_dashboard(fresh(asdict(base)), tz=TZ, now=NOW)
+    assert v.headline == "Not recording: camera not added yet"
+    assert v.banner is not None and v.banner.code == "T-002"
+    assert v.supporting == p002.message
+    assert [a.code for a in v.other_alerts] == ["A-001"]
+    assert "Recording continues" not in v.other_alerts[0].message
+    assert v.storage.detail == "Recording time left is measured once recording starts."

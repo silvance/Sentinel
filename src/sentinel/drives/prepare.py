@@ -48,6 +48,7 @@ from .classify import ERASE_DISABLED_MESSAGE, Classification, Inspector, classif
 from .commands import (
     EXIT_ELEVATION_CANCELLED,
     EXIT_IDENTITY_MISMATCH,
+    EXIT_IN_USE,
     EXIT_OK,
     EXIT_PROTECTED,
     NON_DESTRUCTIVE_STEPS,
@@ -291,6 +292,10 @@ def prepare_drive(ctx: PrepareContext, disk_id: str, confirmation: Confirmation 
                                   detail)
         if not erased and hr.exit_code == EXIT_PROTECTED:
             raise PrepareRefused("protected", "This drive is used by the computer itself. Nothing was erased.", detail)
+        if not erased and hr.exit_code == EXIT_IN_USE:   # review 2026-11-10 (Linux: still mounted)
+            raise PrepareRefused("in_use", "This drive is still in use (a program has files open on it, or it "
+                                 "could not be unmounted). Close those programs and try again. Nothing was erased.",
+                                 detail)
         if not erased:
             raise PrepareFailed("helper_failed", "Drive setup could not start. Nothing was erased.", detail)
         raise PrepareFailed("prepare_incomplete", "Drive setup did not finish. The drive may be partly erased "

@@ -25,7 +25,11 @@ Mechanism (design choice, see docs/branches/design-archive-drive.md):
   (its ``.partial`` is discarded, never claimed) → index written and read back → flush → eject via
   the :class:`~sentinel.export.target.SafeRemover` (fallback: operator uses the OS "safely remove")
   → SAFE_TO_REMOVE / REMOVE_MANUALLY. The swapped drive is not written again until it has been
-  removed (or the operator resumes); another archive drive inserted meanwhile is used.
+  removed (or the operator resumes); another archive drive inserted meanwhile is used. The swapped
+  drive is remembered in ``archive_control/swapped_drive.json`` across a restart of this process, the
+  request file is also looked for while a copy is in progress, and a request older than 15 minutes is
+  ignored. Operators (the window) ask through ``<status_dir>/requests/`` (untrusted, see
+  :meth:`ArchiveWorker._take_operator`).
 
 Runs as its own process in production (``python -m sentinel.archive run``) — see
 :mod:`sentinel.archive.__main__` for why — and as a thread in tests (:meth:`start`).
@@ -34,8 +38,10 @@ Runs as its own process in production (``python -m sentinel.archive run``) — s
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
+import stat
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -70,6 +76,12 @@ log = logging.getLogger(__name__)
 CONTROL_DIR = "archive_control"
 SWAP_REQUEST = "swap.request"
 RESUME_REQUEST = "resume.request"
+SWAPPED_STATE = "swapped_drive.json"   # the drive made safe to remove, kept across a restart of the worker
+REQUEST_MAX_AGE_S = 900.0        # a swap/resume request older than this is stale and not acted on
+CONTROL_POLL_S = 1.0             # how often a copy in progress looks for a swap request
+OPERATOR_REQUESTS = "requests"   # sub-folder of [storage] status_dir writable by operators (the window)
+OPERATOR_REQUEST_MAX_BYTES = 1024
+UNCERTAIN_MISSES = 10            # scans to wait for the attached drive while the volume list is unreadable
 PROBE = ".sentinel_archive_probe" + PARTIAL
 SOURCE_RETRY_S = 3600.0          # retry a local recording that could not be read after this long
 REVIEW_LAYOUT = ("README_FIRST.txt", "Recordings", "Manifests", "Originals")
@@ -135,6 +147,9 @@ class ArchiveWorker:
         self.camera_id = cfg.camera.id
         self.index_names = layout.index_files(self.camera_id)
         self.control_dir = cfg.data_path / CONTROL_DIR
+        # Operators' request folder (window): only when a separate status folder exists, else the
+        # requests go to control_dir and are read once, from there.
+        self.operator_dir = operator_request_dir(cfg) if cfg.storage.status_dir else None
         self.chunk = self.acfg.chunk_mib * MIB
         self.fsync_bytes = self.acfg.fsync_every_mib * MIB
         self.reserve = int(self.acfg.reserve_free_mb * 1e6)
@@ -164,10 +179,14 @@ class ArchiveWorker:
         self._swapped_drive: str | None = None
         self._swapped_absent_polls = 0
         self._swap_result: tuple[bool, str] | None = None
+        self._last_swapped: str | None = None       # drive last prepared for removal (session gone_how)
+        self._att_missed = 0                        # consecutive scans that did not see the attached drive
+        self._last_control_poll = float("-inf")
         self._thread: threading.Thread | None = None
         self._last_publish = 0.0
         self._instance: str | None = None
         self._last_scan: tuple[DriveScan | None, bool] = (None, False)
+        self._load_swapped()
 
     # ================================================================== public control
     def request_swap(self) -> None:
@@ -182,7 +201,8 @@ class ArchiveWorker:
         """Cancel a pending swap, or continue on a drive that was made safe to remove but not removed."""
         self._swap.clear()
         self._swap_deadline = None
-        self._swapped_drive = None
+        self._set_swapped(None)
+        self._last_swapped = None
         self._wake.set()
 
     def stop(self, timeout: float = 60.0) -> None:
@@ -289,7 +309,7 @@ class ArchiveWorker:
             else:
                 self._swapped_absent_polls += 1
                 if self._swapped_absent_polls >= 2:     # gone for two scans in a row: really removed
-                    self._swapped_drive = None
+                    self._set_swapped(None)
                 else:
                     swapped_present = True
         usable = {k: t for k, t in by_key.items() if k != self._swapped_drive}
@@ -303,7 +323,9 @@ class ArchiveWorker:
 
     def step(self) -> str:
         """One unit of work: look at the drive(s), then copy+verify at most one segment. Returns
-        'absent' | 'unusable' | 'waiting_for_removal' | 'swapped' | 'full' | 'idle' | 'copied'.
+        'absent' | 'unusable' | 'waiting_for_removal' | 'swapped' | 'full' | 'idle' | 'copied' | 'rescan'
+        ('rescan': the attached drive was not seen by this scan; it counts as removed only when the next
+        scan does not see it either).
         Afterwards the drive presence sessions are updated (used by the retention rule)."""
         result = self._step()
         try:
@@ -324,7 +346,13 @@ class ArchiveWorker:
                 continue
         if swapped_present and self._swapped_drive:
             present.add(self._swapped_drive)
-        self.al.sync_sessions(present, keep_open=bool(scan.unusable), swapped=self._swapped_drive)
+        if self.att is not None:            # attached drive missed by one scan: not yet proven removed
+            present.add(self.att.drive_id)
+        # (review 2026-11-10) the swapped drive is cleared from _swapped_drive on the scan that proves its
+        # removal, before this runs: pass the drive last prepared for removal so that a proper swap is
+        # recorded as 'swapped', not 'removed'.
+        self.al.sync_sessions(present, keep_open=bool(scan.unusable) or bool(scan.uncertain),
+                              swapped=self._swapped_drive or self._last_swapped)
 
     def _step(self) -> str:
         self._open()
@@ -334,12 +362,22 @@ class ArchiveWorker:
         self._last_scan = (scan, swapped_present)
         if target is None:
             if self.att is not None:
+                # (review 2026-11-10) one scan that does not see the attached drive (drive not ready,
+                # volume list or marker momentarily unreadable) is not proof that it was removed: no
+                # A-003, presence session kept open. Gone for two scans in a row: removed.
+                # While the volume list itself cannot be read, wait longer before concluding.
+                self._att_missed += 1
+                if self._att_missed < (UNCERTAIN_MISSES if scan.uncertain else 2):
+                    log.info("attached archive drive not seen by this scan (%d)%s", self._att_missed,
+                             f"; {scan.uncertain}" if scan.uncertain else "")
+                    return "rescan"
                 self._detached(unexpected=True)
             if swapped_present:
                 self._waiting_for_removal()
                 return "waiting_for_removal"
             return self._no_drive(scan)
         key = target.drive_key
+        self._att_missed = 0
         if self.att is None or self.att.drive_id != key:
             if self.att is not None:
                 self._detached(unexpected=True)
@@ -396,6 +434,7 @@ class ArchiveWorker:
     def _detached(self, unexpected: bool) -> None:
         att = self.att
         self.att = None
+        self._att_missed = 0
         self.full = False
         self._skip.clear()
         if att is None:
@@ -451,6 +490,8 @@ class ArchiveWorker:
         with normal_priority():
             drive_id = ExportLedger(self.ledger).upsert_drive(target)  # type: ignore[arg-type]
         self.att = Attached(target=target, drive_id=drive_id, last_index_mono=self.mono())
+        if self._last_swapped == drive_id:      # in use again: a later removal is not that swap
+            self._last_swapped = None
         self.removed_unexpectedly = self.after_swap = False
         self.unusable_reason = None
         self.full = full
@@ -537,15 +578,134 @@ class ArchiveWorker:
     # ================================================================== swap
     def _poll_control(self) -> None:
         for name, action in ((SWAP_REQUEST, self.request_swap), (RESUME_REQUEST, self.resume)):
-            p = self.control_dir / name
-            if p.exists():
-                try:
-                    p.unlink()
-                except OSError:
-                    continue
-                self._event("audit", "archive_" + name.split(".")[0] + "_requested",
-                            f"Archive {name.split('.')[0]} requested", None)
+            if self._take_request(name):
                 action()
+
+    def _take_request(self, name: str) -> bool:
+        """Consume a swap / resume request: from the service's own control folder (technician CLI) and,
+        when a separate status folder is configured, from the operators' request folder (the window)."""
+        got = self._take_trusted(name)
+        if self.operator_dir is not None:
+            got = self._take_operator(name) or got
+        return got
+
+    def _take_operator(self, name: str) -> bool:
+        """A request in the operators' folder (writable by standard users) is untrusted input. It is acted
+        on only if it is a regular file (not a link, junction or folder), at most OPERATOR_REQUEST_MAX_BYTES,
+        and holds an ISO UTC time no older than REQUEST_MAX_AGE_S (and not in the future by more than
+        that). It is deleted once read, whatever it held. It can only ever ask for a swap or a resume."""
+        assert self.operator_dir is not None
+        p = self.operator_dir / name
+        kind = name.split(".")[0]
+        try:
+            st = os.lstat(p)
+        except FileNotFoundError:
+            return False
+        except OSError as exc:
+            log.warning("operator %s request unreadable: %s", kind, type(exc).__name__)
+            return False
+        reparse = bool(getattr(st, "st_file_attributes", 0) & 0x400)     # FILE_ATTRIBUTE_REPARSE_POINT
+        why = None
+        data = b""
+        if stat.S_ISLNK(st.st_mode) or reparse or not stat.S_ISREG(st.st_mode):
+            why = "not a regular file"
+        elif st.st_size > OPERATOR_REQUEST_MAX_BYTES:
+            why = "too large"
+        else:
+            try:
+                with open(p, "rb") as fh:
+                    data = fh.read(OPERATOR_REQUEST_MAX_BYTES + 1)
+            except OSError as exc:
+                why = f"unreadable ({type(exc).__name__})"
+        if not stat.S_ISDIR(st.st_mode):   # a folder / junction is left alone (ignored), anything else deleted
+            try:
+                os.unlink(p)               # removes a link itself, never what it points to
+            except OSError:
+                if why is None:
+                    return False           # could not consume it: do not act on it twice
+        if why is None:
+            try:
+                written = parse_iso_utc(data.decode("ascii").strip())
+                age = time.time() - written
+                if not -REQUEST_MAX_AGE_S <= age <= REQUEST_MAX_AGE_S:
+                    why = f"not recent ({round(age)} s old)"
+            except (UnicodeDecodeError, ValueError):
+                why = "content is not a time"
+        if why is not None:
+            self._event("warning", f"archive_{kind}_request_ignored",
+                        f"An archive {kind} request in the operator folder was ignored", {"why": why,
+                                                                                         "source": "operator_folder"})
+            log.warning("ignored an operator %s request: %s", kind, why)
+            return False
+        self._event("audit", f"archive_{kind}_requested", f"Archive {kind} requested from the window",
+                    {"source": "operator_folder"})
+        log.info("archive %s requested from the operator folder", kind)
+        return True
+
+    def _take_trusted(self, name: str) -> bool:
+        """Consume a request file in the service's control folder. A request older than REQUEST_MAX_AGE_S
+        (for example pressed while the archive process was not running) is removed and NOT acted on, so a
+        drive inserted hours later is never swapped by it (review 2026-11-10)."""
+        p = self.control_dir / name
+        if not p.exists():
+            return False
+        written = None
+        try:
+            written = parse_iso_utc(p.read_text("utf-8").strip())
+        except (OSError, ValueError):
+            try:
+                written = p.stat().st_mtime
+            except OSError:
+                pass
+        try:
+            p.unlink()
+        except OSError:
+            return False
+        kind = name.split(".")[0]
+        age = time.time() - written if written is not None else 0.0
+        if age > REQUEST_MAX_AGE_S:
+            self._event("warning", f"archive_{kind}_request_expired", f"An old archive {kind} request was ignored",
+                        {"age_s": round(age, 1)})
+            log.warning("ignored a %s request written %.0f s ago", kind, age)
+            return False
+        self._event("audit", f"archive_{kind}_requested", f"Archive {kind} requested", None)
+        return True
+
+    # ------------------------------------------------------------------ swapped drive (persistent)
+    def _set_swapped(self, drive_id: str | None) -> None:
+        """The drive made safe to remove is kept in a small file so that a restart of the archive process
+        before it is unplugged does not start writing to it again (review 2026-11-10)."""
+        self._swapped_drive = drive_id
+        p = self.control_dir / SWAPPED_STATE
+        try:
+            if drive_id is None:
+                p.unlink(missing_ok=True)
+            else:
+                self.control_dir.mkdir(parents=True, exist_ok=True)
+                tmp = p.with_name(p.name + PARTIAL)
+                tmp.write_text(json.dumps({"drive_id": drive_id, "swapped_utc": iso_utc(time.time()),
+                                           "ejected": bool(self._swap_result and self._swap_result[0])}), "utf-8")
+                os.replace(tmp, p)
+        except OSError:
+            log.exception("could not record the swapped archive drive")
+
+    def _load_swapped(self) -> None:
+        p = self.control_dir / SWAPPED_STATE
+        try:
+            doc = json.loads(p.read_text("utf-8"))
+        except FileNotFoundError:
+            return
+        except (OSError, ValueError):
+            log.warning("swapped-drive record unreadable; ignored")
+            return
+        drive_id = doc.get("drive_id") if isinstance(doc, dict) else None
+        if not isinstance(drive_id, str) or not drive_id:
+            return
+        self._swapped_drive = self._last_swapped = drive_id
+        self._swapped_absent_polls = 0
+        self._swap_result = (bool(doc.get("ejected")), "prepared for removal before the archive process restarted")
+        self.after_swap = True
+        log.info("archive drive %s was prepared for removal before this start; not writing to it", drive_id)
 
     def _clear_swap(self) -> None:
         self._swap.clear()
@@ -567,11 +727,12 @@ class ArchiveWorker:
         self.remover.flush(att.target)
         res = self.remover.eject(att.target)
         self._clear_swap()
-        self._swapped_drive = att.drive_id
+        self._swap_result = (res.ejected, res.detail)
+        self._set_swapped(att.drive_id)
+        self._last_swapped = att.drive_id
         self._swapped_absent_polls = 0
         self.after_swap = True
         self.att = None
-        self._swap_result = (res.ejected, res.detail)
         self._event("audit", "archive_swap_ready", "Archive drive prepared for removal",
                     {"drive_id": att.drive_id, "ejected": res.ejected, "detail": res.detail})
         self._waiting_for_removal()
@@ -684,7 +845,21 @@ class ArchiveWorker:
     def _should_abort(self) -> bool:
         if self._stop.is_set():
             return True
+        if not self._swap.is_set():
+            self._poll_swap_in_flight()
         return self._swap.is_set() and self._swap_deadline is not None and self.mono() > self._swap_deadline
+
+    def _poll_swap_in_flight(self) -> None:
+        """(review 2026-11-10) In production the swap request arrives as a file; look for it while a copy
+        is in progress too, so that swap_max_wait_s applies and the status shows the swap at once."""
+        now = self.mono()
+        if now - self._last_control_poll < CONTROL_POLL_S:
+            return
+        self._last_control_poll = now
+        if self._take_request(SWAP_REQUEST):
+            self.request_swap()
+            self._set(ST_SWAP_PENDING, "Preparing the archive drive for removal. Do not unplug it yet. "
+                                       "Recording continues.")
 
     def _read_hash(self, path: Path) -> tuple[str, int, str]:
         h = hashlib.sha256()
@@ -927,7 +1102,8 @@ class ArchiveWorker:
                         "throttle_mb_s": self.acfg.max_rate_mb_s},
             problems={"open": [{"problem_id": p["problem_id"], "drive_id": p["drive_id"], "kind": p["kind"],
                                 "path": p["path"], "created_utc": p["created_utc"]} for p in problems[:20]],
-                      "source_unreadable": sorted(self.source_failed)[:20], "unusable_reason": self.unusable_reason},
+                      "source_unreadable": sorted(self.source_failed)[:20], "unusable_reason": self.unusable_reason,
+                      "other_drives": [r for _root, r in (self._last_scan[0].ignored if self._last_scan[0] else [])][:10]},
             priority=self.priority, cpu_process_s=round(time.process_time(), 2))
 
     def _event(self, severity: str, code: str, message: str, detail: dict[str, Any] | None) -> None:
@@ -937,18 +1113,28 @@ class ArchiveWorker:
             log.exception("could not record archive event %s", code)
 
 
-def request_swap_file(cfg: AppConfig) -> Path:
-    """Used by the CLI / GUI in another process: ask the running archive worker to swap."""
-    d = cfg.data_path / CONTROL_DIR
+def operator_request_dir(cfg: AppConfig) -> Path:
+    """Folder where the operator window (standard user, "Sentinel Operators") asks for a swap / resume:
+    ``<[storage] status_dir>/requests``; without a separate status folder, the service control folder."""
+    if cfg.storage.status_dir:
+        return Path(cfg.storage.status_dir) / OPERATOR_REQUESTS
+    return cfg.data_path / CONTROL_DIR
+
+
+def _write_request(cfg: AppConfig, name: str, operator: bool) -> Path:
+    d = operator_request_dir(cfg) if operator else cfg.data_path / CONTROL_DIR
     d.mkdir(parents=True, exist_ok=True)
-    p = d / SWAP_REQUEST
+    p = d / name
     p.write_text(iso_utc(time.time()), "utf-8")
     return p
 
 
-def request_resume_file(cfg: AppConfig) -> Path:
-    d = cfg.data_path / CONTROL_DIR
-    d.mkdir(parents=True, exist_ok=True)
-    p = d / RESUME_REQUEST
-    p.write_text(iso_utc(time.time()), "utf-8")
-    return p
+def request_swap_file(cfg: AppConfig, operator: bool = False) -> Path:
+    """Used by the CLI / GUI in another process: ask the running archive worker to swap.
+    ``operator=True``: the window, written to :func:`operator_request_dir`."""
+    return _write_request(cfg, SWAP_REQUEST, operator)
+
+
+def request_resume_file(cfg: AppConfig, operator: bool = False) -> Path:
+    """Cancel a swap / keep using the same drive (see :func:`request_swap_file`)."""
+    return _write_request(cfg, RESUME_REQUEST, operator)

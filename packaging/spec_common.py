@@ -28,9 +28,38 @@ HIDDEN_IMPORTS = ["sentinel.platform.windows", "sentinel.platform.posix", "senti
                   "sentinel.service",
                   # Operator screen (launcher view, imported lazily); PyInstaller's PySide6 hooks then
                   # collect QtCore/QtGui/QtWidgets and the Qt platform plugins.
-                  "sentinel.gui", "sentinel.gui.__main__", "sentinel.gui.window", "sentinel.power",
+                  "sentinel.gui", "sentinel.gui.__main__", "sentinel.gui.app.window",
+                  "sentinel.gui.app.status_pages", "sentinel.gui.app.settings_pages",
+                  "sentinel.gui.app.drive_pages", "sentinel.gui.app.setup_page", "sentinel.power",
                   "sentinel.archive.__main__", "sentinel.export.__main__",
-                  "sentinel.drives.cli"]
+                  "sentinel.drives.cli",
+                  # "Sentinel.exe ledger head|verify" (review 2026-11-10: the deployed build has no Python)
+                  "sentinel.ledgerchain"]
+
+# LGPL-3.0 section 4(d)(1) (review 2026-11-10): the PySide6/shiboken6 Python packages are collected
+# as .py files in _internal\ (not sealed in the PYZ inside Sentinel.exe), so a recipient can
+# replace them together with the Qt DLLs, as SOURCE-OFFER.txt says. Passed to Analysis().
+MODULE_COLLECTION_MODE = {"PySide6": "py", "shiboken6": "py"}
+
+# Collected by PyInstaller's Qt hooks but never used by Sentinel (Widgets, raster painting, SVG
+# and PNG icons only). Leaving them out keeps the licence set to what the source offer covers
+# (review 2026-11-10): opengl32sw.dll is Mesa llvmpipe (MIT + LLVM) and the image-format plugins
+# below come from the qtimageformats module (bundled libtiff/libwebp).
+EXCLUDE_BINARIES = ("opengl32sw.dll", "qicns", "qtga", "qtiff", "qwbmp", "qwebp", "qjp2", "qmng", "qheif")
+
+
+def _excluded(dest: str) -> bool:
+    p = dest.replace("\\", "/").lower()
+    name = p.rsplit("/", 1)[-1]
+    if name == "opengl32sw.dll":
+        return True
+    stem = name.split(".", 1)[0].removeprefix("lib")
+    return "/plugins/imageformats/" in f"/{p}" and stem in EXCLUDE_BINARIES
+
+
+def filter_binaries(toc: list) -> list:
+    """PyInstaller TOC (dest_name, src_name, typecode) without the EXCLUDE_BINARIES entries."""
+    return [entry for entry in toc if not _excluded(entry[0])]
 # The service executable (and the launcher's service control) import these lazily.
 SERVICE_HIDDEN_IMPORTS = ["sentinel.winsvc", "sentinel.winsvc.__main__", "sentinel.winsvc.scm",
                           "sentinel.winsvc.commands", "sentinel.winsvc.control", "sentinel.winsvc.credstore",

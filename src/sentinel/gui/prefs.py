@@ -66,3 +66,33 @@ def save_appearance(value: str, path: Path | None = None) -> bool:
         return True
     except OSError:
         return False
+
+
+def load_pref(key: str, default: object = None, path: Path | None = None) -> object:
+    """Any other remembered window setting (size, last section); ``default`` when unknown."""
+    path = path or default_prefs_path()
+    try:
+        doc = json.loads(path.read_text("utf-8"))
+    except (OSError, ValueError):
+        return default
+    return doc.get(key, default) if isinstance(doc, dict) else default
+
+
+def save_pref(key: str, value: object, path: Path | None = None) -> bool:
+    """Best-effort, like :func:`save_appearance`."""
+    path = path or default_prefs_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            doc = json.loads(path.read_text("utf-8"))
+            if not isinstance(doc, dict):
+                doc = {}
+        except (OSError, ValueError):
+            doc = {}
+        doc[key] = value
+        tmp = path.with_name(path.name + ".partial")
+        tmp.write_text(json.dumps(doc, indent=2), "utf-8")
+        os.replace(tmp, path)
+        return True
+    except OSError:
+        return False

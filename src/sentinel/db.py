@@ -355,6 +355,14 @@ def _now_iso() -> str:
     return iso_utc(time.time())
 
 
+# Gap reasons that mean "not recording on purpose" (the schedule or motion-triggered recording).
+PLANNED_GAP_REASONS = frozenset({"scheduled_pause", "motion_idle"})
+# Open between a planned period's end and the first new footage (or the first failure's reason).
+RESUMING_REASON = "resuming"
+# The recorder was not running (stopped or restarted during a planned period).
+NOT_RUNNING_REASON = "recorder_not_running"
+
+
 def _j(d: Any) -> str | None:
     return json.dumps(d, sort_keys=True) if d else None
 
@@ -848,6 +856,16 @@ class Ledger:
                           "ORDER BY rowid DESC LIMIT 1", (camera_id,))
         return rows[0] if rows else None
 
+    def first_footage_after_run(self, camera_id: str, run_id: str, not_before_utc: str) -> sqlite3.Row | None:
+        """Earliest recorded segment of a run launched after ``run_id`` that starts at or after
+        ``not_before_utc`` (the gap's start; footage dated earlier cannot end the gap)."""
+        rows = self.query("SELECT s.* FROM segments s JOIN recording_runs r ON r.run_id = s.run_id "
+                          "WHERE s.camera_id=? AND s.start_utc IS NOT NULL AND s.end_utc IS NOT NULL "
+                          "AND r.rowid > (SELECT rowid FROM recording_runs WHERE run_id=?) "
+                          "ORDER BY r.rowid, s.seq LIMIT 50", (camera_id, run_id))
+        floor = parse_iso_utc(not_before_utc)
+        return next((r for r in rows if parse_iso_utc(r["start_utc"]) >= floor), None)
+
     def latest_sealed_segment(self, camera_id: str) -> sqlite3.Row | None:
         rows = self.query("SELECT * FROM segments WHERE camera_id=? AND state IN ('FINALIZED','INTERRUPTED') "
                           "AND end_utc IS NOT NULL ORDER BY rowid DESC LIMIT 1", (camera_id,))
@@ -882,12 +900,28 @@ class Ledger:
         original start and reason; the latest failed run becomes ``ended_run_id``.
         """
         with self.tx() as c:
-            row = c.execute("SELECT gap_id FROM recording_gaps WHERE camera_id=? AND kind=? AND end_utc IS NULL",
-                            (camera_id, str(GapKind.BETWEEN_RUNS))).fetchone()
+            row = c.execute("SELECT gap_id, reason, start_utc, detail FROM recording_gaps WHERE camera_id=? AND kind=? "
+                            "AND end_utc IS NULL", (camera_id, str(GapKind.BETWEEN_RUNS))).fetchone()
+            if row is not None and row["reason"] in PLANNED_GAP_REASONS and reason not in PLANNED_GAP_REASONS:
+                # Recording was attempted after the planned period and failed: the planned gap ends
+                # when that attempt started; the rest is this failure's own gap (review 2026-11-10).
+                run = c.execute("SELECT launched_utc FROM recording_runs WHERE run_id=?", (ended_run_id,)).fetchone()
+                split = run["launched_utc"] if run is not None and run["launched_utc"] else None
+                if split and row["start_utc"] and parse_iso_utc(split) >= parse_iso_utc(row["start_utc"]):
+                    detail_old = dict(json.loads(row["detail"])) if row["detail"] else {}
+                    detail_old["planned_period_ended_by"] = "recording_attempt"
+                    with self._chained(c, "recording_gaps", [row["gap_id"]]):
+                        c.execute("UPDATE recording_gaps SET end_utc=?, duration_s=?, closed_utc=?, detail=? "
+                                  "WHERE gap_id=?", (split, parse_iso_utc(split) - parse_iso_utc(row["start_utc"]),
+                                                     _now_iso(), _j(detail_old), row["gap_id"]))
+                    start_utc, start_basis, row = split, "planned_period_end", None
             if row is not None:
+                # "resuming" only says a planned period ended and recording was being started;
+                # the first failure gives the gap its real reason (review 2026-11-10).
+                new = reason if row["reason"] == RESUMING_REASON else row["reason"]
                 with self._chained(c, "recording_gaps", [row["gap_id"]]):
-                    c.execute("UPDATE recording_gaps SET attempts=attempts+1, ended_run_id=? WHERE gap_id=?",
-                              (ended_run_id, row["gap_id"]))
+                    c.execute("UPDATE recording_gaps SET attempts=attempts+1, ended_run_id=?, reason=? WHERE gap_id=?",
+                              (ended_run_id, new, row["gap_id"]))
                 c.execute("UPDATE recording_runs SET gap_recorded=1 WHERE run_id=?", (ended_run_id,))
                 return int(row["gap_id"])
             cur = c.execute(
@@ -898,6 +932,64 @@ class Ledger:
             self._chain_insert(c, "recording_gaps", cur.lastrowid)
             c.execute("UPDATE recording_runs SET gap_recorded=1 WHERE run_id=?", (ended_run_id,))
             return int(cur.lastrowid or 0)
+
+    def switch_open_gap(self, camera_id: str, at_utc: str, new_reason: str | None, basis: str,
+                        from_reasons: frozenset[str] = frozenset()) -> int | None:
+        """End the open gap at ``at_utc`` and, with ``new_reason``, open the next one there.
+
+        Used where the reason for not recording changes while no footage is made (review
+        2026-11-10): a schedule pause becomes motion standby, a pause ends and recording is being
+        started ("resuming"), the recorder was stopped during a pause. Only a gap whose reason is in
+        ``from_reasons`` (default: the planned reasons) is switched. Returns the new gap id."""
+        allowed = from_reasons or PLANNED_GAP_REASONS
+        with self.tx() as c:
+            row = c.execute("SELECT * FROM recording_gaps WHERE camera_id=? AND kind=? AND end_utc IS NULL",
+                            (camera_id, str(GapKind.BETWEEN_RUNS))).fetchone()
+            if row is None or row["reason"] not in allowed or row["reason"] == new_reason:
+                return None
+            at = at_utc
+            if row["start_utc"] and parse_iso_utc(at) < parse_iso_utc(row["start_utc"]):
+                at = row["start_utc"]
+            duration = parse_iso_utc(at) - parse_iso_utc(row["start_utc"]) if row["start_utc"] else None
+            detail = dict(json.loads(row["detail"])) if row["detail"] else {}
+            detail["ended_by"] = basis
+            with self._chained(c, "recording_gaps", [row["gap_id"]]):
+                c.execute("UPDATE recording_gaps SET end_utc=?, duration_s=?, closed_utc=?, detail=? WHERE gap_id=?",
+                          (at, duration, _now_iso(), _j(detail), row["gap_id"]))
+            if new_reason is None:
+                return None
+            cur = c.execute(
+                "INSERT INTO recording_gaps(camera_id, kind, start_utc, reason, prev_segment_id, ended_run_id, "
+                "start_basis, detail, opened_utc) VALUES (?,?,?,?,?,?,?,?,?)",
+                (camera_id, str(GapKind.BETWEEN_RUNS), at, new_reason, row["prev_segment_id"], row["ended_run_id"],
+                 basis, _j({"after_gap_id": row["gap_id"]}), _now_iso()))
+            self._chain_insert(c, "recording_gaps", cur.lastrowid)
+            return int(cur.lastrowid or 0)
+
+    def previous_instance_last_event(self) -> str | None:
+        """Time of the last ledger event before the latest ``service_start``: when the previous
+        recorder instance was last known to be running (None if unknown)."""
+        start = self.query("SELECT event_id, ts_utc FROM events WHERE code='service_start' "
+                           "ORDER BY event_id DESC LIMIT 1")
+        if not start:
+            return None
+        ev = self.query("SELECT ts_utc FROM events WHERE event_id < ? ORDER BY event_id DESC LIMIT 1",
+                        (start[0]["event_id"],))
+        times = [ev[0]["ts_utc"]] if ev else []
+        try:   # the recorder samples the clock every few minutes, also during long pauses
+            obs = self.query("SELECT MAX(observed_utc) t FROM clock_observations WHERE observed_utc < ?",
+                             (start[0]["ts_utc"],))
+            if obs and obs[0]["t"]:
+                times.append(obs[0]["t"])
+        except sqlite3.Error:
+            pass
+        return max(times, key=parse_iso_utc) if times else None
+
+    def latest_gap_end(self, camera_id: str) -> str | None:
+        """End of the most recently closed gap (where a following unplanned gap must start)."""
+        rows = self.query("SELECT end_utc FROM recording_gaps WHERE camera_id=? AND end_utc IS NOT NULL "
+                          "ORDER BY gap_id DESC LIMIT 1", (camera_id,))
+        return rows[0]["end_utc"] if rows else None
 
     def _close_gap_in(self, c: sqlite3.Connection, camera_id: str, end_utc: str, next_segment_id: str,
                       next_run_id: str) -> sqlite3.Row | None:

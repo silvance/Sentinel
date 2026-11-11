@@ -15,7 +15,11 @@ Drives without the role — blank drives, review drives, anything else — are n
 * ``extra_roots`` (``[archive] drive_path``, optional) are scanned too, e.g. a sub-folder.
 
 The scan reports usable candidates and drives that are present but unusable (marker unreadable,
-wrong role) separately, so the worker can tell "absent" from "present but not readable".
+no drive identity) separately, so the worker can tell "absent" from "present but not readable".
+Sentinel drives with another role (review drives, prepared drives never designated as archive) are
+listed as ``ignored``: they are simply not archive drives, so inserting one to run a review export
+does not raise the archive alert A-005 (review 2026-11-10). If the volume list itself cannot be read,
+``uncertain`` says so: absence of the archive drive is then not proven.
 """
 
 from __future__ import annotations
@@ -41,6 +45,8 @@ ROLE_ARCHIVE = "archive"
 class DriveScan:
     candidates: list[ExportTarget] = field(default_factory=list)
     unusable: list[tuple[str, str]] = field(default_factory=list)     # (root, reason): present, not usable
+    ignored: list[tuple[str, str]] = field(default_factory=list)      # (root, reason): not an archive drive
+    uncertain: str | None = None                                      # the volume list could not be read
 
 
 class DriveLocator(Protocol):
@@ -77,7 +83,9 @@ def windows_volume_roots() -> list[str]:
     buf = ctypes.create_unicode_buffer(1024)
     h = k32.FindFirstVolumeW(buf, len(buf))
     if h is None or h == ctypes.c_void_p(-1).value:
-        return []
+        # (review 2026-11-10) a failed enumeration is not "no drives": the caller must not conclude that
+        # an attached archive drive was removed.
+        raise OSError(ctypes.get_last_error(), "the list of volumes could not be read (FindFirstVolumeW)")
     out = []
     try:
         while True:
@@ -115,7 +123,13 @@ class VolumeScanLocator:
     def scan(self) -> DriveScan:
         res = DriveScan()
         seen: set[str] = set()
-        for r in [*self.roots(), *map(str, self.extra_roots)]:
+        try:
+            roots = list(self.roots())
+        except OSError as exc:
+            roots = []
+            res.uncertain = f"volume list unavailable: {type(exc).__name__}"
+            log.warning("archive drive scan: %s", exc)
+        for r in [*roots, *map(str, self.extra_roots)]:
             root = Path(r)
             try:
                 marker = read_marker(root)
@@ -128,7 +142,8 @@ class VolumeScanLocator:
             if marker is None:
                 continue
             if self.require_role and marker.get("role") != ROLE_ARCHIVE:
-                res.unusable.append((str(root), f"drive role is {marker.get('role')!r}, not 'archive'"))
+                # Not an archive drive (e.g. a review drive): never written, and not an archive problem.
+                res.ignored.append((str(root), f"drive role is {marker.get('role')!r}, not 'archive'"))
                 continue
             try:
                 ident = identify_target(root).identity

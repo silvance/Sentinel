@@ -52,7 +52,7 @@ from .media.videohash import parse_version
 from .models import SegmentState, StorageLevel
 from .platform import InstanceLockError, Platform, get_platform
 from .power import KeepAwake, read_power_settings, sleep_risks
-from .recorder.finalizer import MAX_FINALIZE_ATTEMPTS, Finalizer, SegmentJob
+from .recorder.finalizer import MAX_FINALIZE_ATTEMPTS, Finalizer, GapJob, SegmentJob
 from .recorder.integrity import IntegrityWorker
 from .recorder.recovery import Recovery
 from .ledger_timing import insert_clock_observation
@@ -97,6 +97,12 @@ def _bounded(name: str, fn: Callable[[], object], timeout_s: float) -> bool:
     return done.wait(timeout_s)
 
 
+
+def seal_age(now_mono: float, last_good_seal_mono: float, media_since_mono: float | None) -> float:
+    """Seconds the recorder has been owing a sealed file: since the last good seal, or since the
+    current run's media started if that is later (a new run's first file is not due earlier)."""
+    return now_mono - max(last_good_seal_mono, media_since_mono or last_good_seal_mono)
+
 class RecorderService:
     def __init__(self, cfg: AppConfig, platform: Platform | None = None, clock: Clock | None = None,
                  disk_usage: Callable[[Path], DiskUsage] | None = None,
@@ -127,6 +133,7 @@ class RecorderService:
         self._last_anchor: ChainHead | None = None
         self._next_ntp = 0.0
         self._ntp: bool | None = None
+        self._ntp_thread: threading.Thread | None = None
         self._clock_offset: float | None = None      # wall - mono at last tick
         self._clock_anomaly_until: float = 0.0
         self._critical_codes: set[str] = set()
@@ -195,8 +202,9 @@ class RecorderService:
                 if perm:  # POSIX mode bits / Windows DACL (both implemented and enforced)
                     problems.append("camera credentials file is accessible by other accounts")
                 if self.platform.name == "windows" and creds.protection != "dpapi":
-                    log.warning("camera credentials are stored as plain text; protect them with "
-                                "'python -m sentinel.winsvc set-camera-credentials'")
+                    log.warning("camera credentials are stored as plain text; protect them by saving the "
+                                "camera account again in the Sentinel window (Camera page), or with "
+                                "'SentinelService.exe set-camera-credentials --config <file>'")
                     self.ledger.add_event("warning", "config", "secret_plaintext",
                                           "Camera credentials file is not DPAPI-protected")
             except CredentialError as exc:
@@ -389,11 +397,27 @@ class RecorderService:
             w_pair, m_pair, spread = read_clock_pair(self.clock)   # tight pair, not ``now``
             self._host_clock.update(w_pair, m_pair, spread)
         if now >= self._next_ntp:
+            # In the background, and with [service] max_sync_age_s, the same rule as the clock
+            # observations (review 2026-11-10: T-002 ignored the setting, and w32tm could hold
+            # the recording loop for up to ~20 s).
             self._next_ntp = now + 300.0
-            self._ntp = self.platform.clock_synchronized()
+            if self._ntp_thread is None or not self._ntp_thread.is_alive():
+                self._ntp_thread = threading.Thread(target=self._check_time_sync, name="time-sync-check", daemon=True)
+                self._ntp_thread.start()
         if now >= self._next_clock_obs:
             self._next_clock_obs = now + self.cfg.service.clock_observation_interval_s
             self._sample_clock("periodic")
+
+    def time_sync_check(self) -> bool | None:
+        """Is the OS clock synchronised? (Tests replace this: the host's state is not under test.)"""
+        return query_os_time_sync(max_sync_age_s=self.cfg.service.max_sync_age_s or None).synchronized
+
+    def _check_time_sync(self) -> None:
+        try:
+            self._ntp = self.time_sync_check()
+        except Exception:
+            log.exception("time synchronisation check failed")
+            self._ntp = None
 
     # ------------------------------------------------------------------ clock observations (E1)
     def _sample_clock(self, reason: str) -> None:
@@ -472,6 +496,14 @@ class RecorderService:
             kind = "closed" if seg["state"] == str(SegmentState.CLOSED) else "interrupted"
             log.warning("janitor: retrying unsealed segment %s (%s)", seg["rel_path"], kind)
             self.finalizer.submit(SegmentJob(seg["segment_id"], kind))
+        # A gap record that failed (e.g. the ledger was busy) is retried now, not only at the next
+        # start (review 2026-11-10: the outage was otherwise missing until then).
+        for run in self.ledger.runs_needing_gap():
+            if run["run_id"] == current or self.finalizer.gap_queued(run["run_id"]):
+                continue
+            log.warning("janitor: retrying the gap record after run %s", run["run_id"])
+            self.finalizer.submit(GapJob(run["run_id"], run["end_reason"] or "internal_error",
+                                         {"retried_by": "janitor", "exit_code": run["exit_code"]}))
         if now >= self._next_checkpoint:
             self._next_checkpoint = now + 3600.0
             self.ledger.checkpoint()
@@ -537,11 +569,15 @@ class RecorderService:
         clock_anomaly = now < self._clock_anomaly_until
         paused, resume_epoch, resumed_mono, pause_since = False, None, None, None
         motion_idle = False
+        media_since = None
+        motion_failures = 0
         if sup is not None:
             with sup.live.lock:
                 lv = sup.live
                 paused, resume_epoch, resumed_mono = lv.scheduled_pause, lv.resume_epoch, lv.resumed_mono
                 motion_idle = lv.motion_idle
+                media_since = lv.media_since_mono if lv.media_seen else None
+                motion_failures = lv.motion_record_failures
                 pause_since = lv.pause_since_epoch
                 ffmpeg_running, media_seen, in_backoff = lv.ffmpeg_running, lv.media_seen, lv.in_backoff
                 since_adv = (now - lv.last_advance_mono) if lv.last_advance_mono is not None else None
@@ -566,7 +602,10 @@ class RecorderService:
             if fin.has_recent_errors():
                 verify_problem = True
             if fin.last_good_seal_mono is not None:
-                since_seal = now - fin.last_good_seal_mono
+                # Counted from this run's first media when that is later: after a long outage,
+                # pause or motion standby the new run's first file is not due yet (review
+                # 2026-11-10: false critical R-005 on every reconnect / resume / motion wake).
+                since_seal = seal_age(now, fin.last_good_seal_mono, media_since)
             corrupt_recent = fin.last_corrupt_mono is not None and now - fin.last_corrupt_mono < 3600
             integrity_d["verification_queue"] = fin.pending()
         if integ is not None:
@@ -659,7 +698,7 @@ class RecorderService:
             ledger_altered=ledger_altered, ledger_unprotected=ledger_unprotected, simulated=cfg.camera.development_source,
             scheduled_pause=paused, resumed_s=(now - resumed_mono) if resumed_mono is not None else None,
             camera_pending=cfg.camera.pending, motion_idle=motion_idle,
-            motion_broken=self._motion_broken())
+            motion_broken=self._motion_broken(), motion_record_failures=motion_failures)
         d = evaluate(m, rec.stall_timeout_s, rec.segment_seconds, rec.connect_timeout_s, rec.escalate_after_s)
         if self.schedule is not None:
             for a in d.alerts:
@@ -687,7 +726,8 @@ class RecorderService:
             doc.schedule = {"enabled": True, "paused": paused, "timezone": cfg.schedule.timezone,
                             "next_change_utc": iso_utc(nxt) if nxt else None,
                             "next_change_text": self.schedule.format_local(nxt) if nxt else None,
-                            "next_change_is": ("record" if paused else "pause") if nxt else None}
+                            # three modes: ask the schedule (review 2026-11-10: was "pause"/"record" only)
+                            "next_change_is": self.schedule.mode_at(nxt) if nxt else None}
         if self.motion is not None and self.schedule is not None:
             doc.motion = {**self.motion.snapshot(), "mode_now": self.schedule.mode_at(self.clock.wall()),
                           "waiting": motion_idle,

@@ -8,8 +8,9 @@ Print this page, tick each box, write results in the right-hand column, and file
 deployment record. Any **FAIL** stops deployment until it is understood. This is an engineering
 acceptance test; it does not make the system forensically validated.
 
-Conventions: run technician commands in a Command Prompt **opened with "Run as administrator"** in
-`C:\Program Files\Sentinel`. `CFG` means `C:\ProgramData\Sentinel\config\sentinel.toml`.
+Conventions: technician tasks are done in the Sentinel window after **Unlock settings…** (Windows
+administrator prompt). Where a command is given, run it in a Command Prompt **opened with "Run as
+administrator"** in `C:\Program Files\Sentinel`. `CFG` means `C:\ProgramData\Sentinel\config\sentinel.toml`.
 
 ## 0. Record what is being tested
 
@@ -29,21 +30,21 @@ Conventions: run technician commands in a Command Prompt **opened with "Run as a
 | # | Step | Expected | Result |
 |---|---|---|---|
 | 1.1 | Copy the whole `Sentinel` folder to `C:\Program Files\Sentinel`. Run `Sentinel.exe about --verify`. | "installed files match the build manifest"; FFmpeg licence "OK: LGPL-3.0-or-later …". | |
-| 1.2 | Check `licences\` exists with `SOURCE-OFFER.txt`, `LGPL-3.0.txt`, `GPL-3.0.txt`. | Present. | |
-| 1.3 | **Camera-later path** (if testing advance setup): `Sentinel.exe setup --camera-later`, answer the questions. Then `Sentinel.exe check-config --config CFG`. | "NOTE: no camera added yet"; "configuration OK". | |
-| 1.4 | Otherwise: double-click `Sentinel.exe`, type `SETUP`, answer the questions (camera IP, stream path from the camera's documentation, view-only camera account). | "Configuration written". | |
-| 1.5 | `SentinelService.exe install --config CFG --dry-run`, read the plan, then run it without `--dry-run` (add `--time-server <host>` if a local time server exists). | Every step OK; both services (recorder, archive) started. | |
-| 1.6 | `net localgroup "Sentinel Operators" <operator account> /add` for each operator account. | Command completed successfully. | |
-| 1.7 | `Sentinel.exe admin-pin` and set the screen's administrator PIN. | PIN saved. | |
-| 1.8 | If 1.3 was used: `Sentinel.exe set-camera` and answer the camera questions. | "The camera answered: h264 video, …"; "The recorder is running with the camera". | |
-| 1.9 | `SentinelService.exe status --config CFG`. | Service RUNNING; folders OK; credentials "DPAPI-protected; permissions: OK"; time synchronisation "yes" (or noted why not). | |
+| 1.2 | Check `licences\` exists with `SOURCE-OFFER.txt`, `LGPL-3.0.txt`, `GPL-3.0.txt`, `THIRD-PARTY-NOTICES.txt` and the `third-party\` folder. | Present; `about` shows no "Licence notices incomplete" warning (otherwise the folder must not leave the organisation, docs/08 §8.7). | |
+| 1.3 | Double-click `Sentinel.exe`. The window opens on "Set up this computer"; press **Continue as administrator…** and approve the Windows prompt. | Window reopens with the setup form editable. | |
+| 1.4 | Fill in the camera (IP, stream path from the camera documentation, view-only account) and press **Test connection**; or tick **Add the camera later** (camera-later path). Choose the time zone; press **Set up this computer**. | "The camera answered: h264 video, …" (if tested); "This computer is set up"; the full window (Status … System) appears. | |
+| 1.5 | System › Service: enter the time server if one exists, press **Install / repair service…**, read the plan in the output, confirm. | Every step OK; both services (recorder, archive) started. | |
+| 1.6 | `net localgroup "Sentinel Operators" <operator account> /add` for each operator account (Command Prompt as administrator). | Command completed successfully. | |
+| 1.7 | Sign in as an operator and open Sentinel. | Window title ends "[read-only]"; settings fields greyed; **Unlock settings…** shown. | |
+| 1.8 | If the camera was added later: Camera page, fill in the camera, **Test connection**, **Save and restart recorder**. | "The camera answered: …"; "Saved. The recorder was restarted with the new settings." | |
+| 1.9 | System › Service › **Check service** (or `SentinelService.exe status --config CFG`). | Service RUNNING; folders OK; credentials "DPAPI-protected; permissions: OK"; time synchronisation "yes" (or noted why not). | |
 
 ## 2. The operator screen
 
 | # | Step | Expected | Result |
 |---|---|---|---|
 | 2.1 | Sign in as an **operator** (standard user) and double-click `Sentinel.exe`. | The Sentinel screen opens maximised; the black console window disappears. "Recording normally" within about a minute. | |
-| 2.2 | Before step 1.8 (camera-later only): screen headline. | "Not recording: camera not added yet" (amber), P-002; no alarm. | |
+| 2.2 | Before step 1.8 (camera-later only): Status headline. | "Not recording: camera not added yet" (amber), P-002; no alarm. | |
 | 2.3 | Switch dark/light appearance. | Readable in both. | |
 | 2.4 | Close the screen; wait 2 minutes; open it again. | Recording continued (no gap in the timeline). | |
 | 2.5 | Press **Lock this computer**. Wait 10 minutes. Sign back in. | Windows lock screen appeared; status still "Recording normally"; no gap in those 10 minutes. | |
@@ -86,13 +87,21 @@ length and reason, and nothing else.
 
 ## 5. Archive drive and retention
 
+Prerequisite for 5.2–5.6: erasing drives is **off by default** (`[drives] erase_enabled = false`,
+owner decision) and is switched on only by the supervised dock test in
+docs/branches/design-drive-prepare.md §9, which an administrator runs on scratch drives first. If
+that test has not been passed on this laptop and dock, do it now (it ends with `erase_enabled`
+left on, or set back to `false` on any failure), or mark 5.2–5.6 "not run: erase disabled" — that
+is not a FAIL, but the laptop cannot be deployed with archive drives until it is done. Never switch
+`erase_enabled` on just for this checklist.
+
 | # | Step | Expected | Result |
 |---|---|---|---|
-| 5.1 | `Sentinel.exe drives list --config CFG`; identify the archive drive **by serial number**. | Only the external drive is offered; internal drives UNSUITABLE. | |
-| 5.2 | `Sentinel.exe drives prepare --config CFG --disk <n> --who <name> --admin` and confirm with the serial's last characters. | Drive prepared; audit entry. | |
-| 5.3 | `Sentinel.exe archive designate --config CFG --drive <letter>:\ --admin-id <name>`. | Designated. | |
-| 5.4 | Wait 30 minutes; `Sentinel.exe archive status --config CFG`. | Copying, then up to date; copies verified. | |
-| 5.5 | Swap as an agent would (screen / `archive swap`), insert drive 2. | "SAFE TO REMOVE" before removal; drive 2 starts copying. | |
+| 5.1 | Drives page › **Refresh list**; identify the archive drive **by serial number**. | Only the external drive is offered; internal drives UNSUITABLE. | |
+| 5.2 | Select it › **Erase and set up…**, enter your name and the serial's last characters. | With the dock test passed (`erase_enabled = true`): drive prepared; audit entry. Otherwise: refused with M-010 "Nothing was erased" — record it and skip to section 6. | |
+| 5.3 | Select it › **Use as archive drive…** (needs the drive prepared in 5.2). | Designated. | |
+| 5.4 | Wait 30 minutes; Drives › **Archive details**. | Copying, then up to date; copies verified. | |
+| 5.5 | Swap as an agent would (screen / `archive swap`), insert drive 2. Then `Sentinel.exe ledger head` (docs/07 checklist). | "SAFE TO REMOVE" before removal; drive 2 starts copying; chain head written on the custody form. | |
 | 5.6 | On another PC, open recordings from drive 1. | Files play; the drive's manifest verifies. | |
 | 5.7 | Retention (optional, long): run with a small recording disk until it is low. | Only recordings verified on a **removed** drive and older than 24 h are deleted; ledger records each deletion. | |
 
@@ -100,10 +109,10 @@ length and reason, and nothing else.
 
 | # | Step | Expected | Result |
 |---|---|---|---|
-| 6.1 | Insert the review drive; `Sentinel.exe export run --config CFG --target <letter>:\ --operator-id <name>`. | Export completes and verifies. | |
+| 6.1 | Insert the review drive; Export page › pick the drive, enter your name › **Export new recordings**. | Export completes and verifies. | |
 | 6.2 | On a **different** computer, check the drive's hashes against its manifest. | All match. | |
 | 6.3 | Pick 3 moments; compare the time shown in the video with a known clock photographed in view of the camera. | Within ±1 s (record the actual difference). | |
-| 6.4 | `Sentinel.exe diagnostics`. | Report written; recording-log chain check OK. | |
+| 6.4 | File › **Save diagnostic report…** (or `Sentinel.exe diagnostics`). | Report written; recording-log chain check OK. | |
 
 ## 7. Unattended soak (stage 3)
 
@@ -114,7 +123,7 @@ one archive-drive swap.
 |---|---|---|---|
 | 7.1 | Status | "Recording normally"; no unexplained alerts in the history. | |
 | 7.2 | Gaps | Every gap has a reason you can explain (drills, swaps, planned pauses). | |
-| 7.3 | Recording-log chain (`Sentinel.exe diagnostics`) | Chain check OK; head written on the custody form. | |
+| 7.3 | Recording-log chain: `Sentinel.exe ledger verify --expect-head <head from the custody form>`, then `Sentinel.exe ledger head` | Exit status 0, "intact"; the new head written on the custody form. | |
 | 7.4 | Disk space and temperature | Within limits; no S- or H-alerts. | |
 | 7.5 | Time drift (6.3 again) | Within ±1 s. | |
 

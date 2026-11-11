@@ -215,7 +215,7 @@ def test_sessions_record_swap_and_removal_and_unreadable_keeps_open(env: Env) ->
     env.segments(1)
     archive_then_remove_drive(env)
     s = env.ledger.query("SELECT * FROM archive_drive_sessions")
-    assert len(s) == 1 and s[0]["gone_utc"] and s[0]["gone_how"] in ("swapped", "removed")
+    assert len(s) == 1 and s[0]["gone_utc"] and s[0]["gone_how"] == "swapped"   # review 2026-11-10
     al = ArchiveLedger(env.ledger, env.cfg.camera.id)
     did = s[0]["drive_id"]
     al.sync_sessions({did}, keep_open=False)                            # back again

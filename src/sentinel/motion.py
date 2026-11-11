@@ -44,6 +44,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -304,10 +305,34 @@ class MotionDetector:
         except OSError as exc:
             self.last_error = f"FFmpeg could not be started: {exc}"
             return False
-        err: list[bytes] = []
-        t = threading.Thread(target=lambda: err.append(proc.stderr.read() if proc.stderr else b""),
-                             name="motion-stderr", daemon=True)
+        # Only the last lines are kept (review 2026-11-10: the whole stderr of a days-long FFmpeg
+        # was held in memory).
+        err: deque[bytes] = deque(maxlen=40)
+
+        def read_err() -> None:
+            for line in iter(proc.stderr.readline, b"") if proc.stderr else ():
+                err.append(line)
+
+        t = threading.Thread(target=read_err, name="motion-stderr", daemon=True)
         t.start()
+        # An FFmpeg that stays connected but delivers no frames is restarted (review 2026-11-10:
+        # it blocked the reader for good, so motion stayed broken until the service restarted).
+        started = self.mono()
+        stall_s = max(30.0, 2 * self.m.unhealthy_after_s)
+        stalled: list[bool] = []
+
+        def watchdog() -> None:
+            while proc.poll() is None and not self._stop.is_set():
+                with self._lock:
+                    last = self.last_frame_mono
+                if self.mono() - max(started, last or started) > stall_s:
+                    stalled.append(True)
+                    log.warning("motion detector: no pictures for %.0f s; restarting it", stall_s)
+                    self._kill()
+                    return
+                self._stop.wait(1.0)
+
+        threading.Thread(target=watchdog, name="motion-watchdog", daemon=True).start()
         try:
             assert proc.stdout is not None
             while not self._stop.is_set():
@@ -340,8 +365,9 @@ class MotionDetector:
             t.join(2)
             from .credentials import redact
 
-            tail = (err[0] if err else b"").decode("utf-8", "replace").strip().splitlines()
-            self.last_error = redact(tail[-1]) if tail else f"exit code {proc.returncode}"
+            tail = b"".join(err).decode("utf-8", "replace").strip().splitlines()
+            self.last_error = (f"no pictures for {stall_s:.0f} s" if stalled else
+                               redact(tail[-1].strip()) if tail else f"exit code {proc.returncode}")
         return got
 
 

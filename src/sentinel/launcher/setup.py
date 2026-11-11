@@ -180,36 +180,102 @@ def _is_own(name: str) -> bool:
     return name in _OWN_NAMES or name.startswith(("sentinel.toml.", "camera.secret."))
 
 
-def prepare_private_dir(path: Path) -> None:
-    """Create ``path`` private to this account (+ SYSTEM/Administrators on Windows, 0750 on Linux),
-    or make an existing one private. An existing folder is only re-protected when it is empty or
-    holds nothing but Sentinel's own files; otherwise setup stops (we never re-permission a
-    folder full of someone else's data). Any failure raises SetupError."""
-    path = Path(path)
+# What setup does with a folder (review 2026-11-10: decided for EVERY folder before any is changed).
+CREATE, KEEP, REPROTECT, SERVICE = "create", "keep", "reprotect", "service"
+
+
+def _sentinel_service_sids() -> tuple[str, ...]:
+    """SIDs of the recorder and archive-copy services (computed, no SCM call)."""
+    from ..platform import winacl
+    from ..platform.windows import SENTINEL_SERVICE_NAME
+
+    return winacl.service_sid(SENTINEL_SERVICE_NAME), winacl.service_sid("SentinelArchive")
+
+
+def service_managed_sddl(sddl: str, user_sid: str) -> bool:
+    """True when a folder's DACL is the one ``winsvc install`` gives it: protected, granting the
+    recorder service, and nobody but this account, SYSTEM, Administrators and the Sentinel
+    services may change anything (read-only grants such as Users on the configuration folder or
+    the operators on the status folder are fine). Such a folder is left exactly as it is: replacing
+    its DACL would lock the installed service out of its own configuration or storage
+    (review 2026-11-10, H1)."""
+    from ..platform import winacl
+
+    if not sddl.startswith("D:P"):
+        return False
+    recorder_sid, archive_sid = _sentinel_service_sids()
+    services = {recorder_sid, archive_sid}
+    aces = [a for a in winacl.dacl_aces(sddl) if a[0] == "A"]
+    if not any(t == recorder_sid for _ty, _f, _m, t in aces):
+        return False
+    writers_ok = winacl.PRIVILEGED_TRUSTEES | {user_sid} | services
+    return not any(mask & winacl.WRITE_BITS for _ty, _f, mask, t in aces if t not in writers_ok)
+
+
+def _plan_private_dir(path: Path) -> str:
+    """Decide (without changing anything) what :func:`prepare_private_dir` will do with ``path``.
+    Raises SetupError when the folder must not be touched."""
     try:
         if sys.platform == "win32":
             from ..platform import winacl
 
-            sid = winacl.current_user_sid()
             if not path.exists():
-                winacl.create_private_dir(path, sid)
-            elif winacl.foreign_trustees(winacl.get_sddl(path), sid) or not winacl.get_sddl(path).startswith("D:P"):
+                return CREATE
+            sid = winacl.current_user_sid()
+            sddl = winacl.get_sddl(path)
+            if service_managed_sddl(sddl, sid):
+                return SERVICE
+            if winacl.foreign_trustees(sddl, sid) or not sddl.startswith("D:P"):
                 _check_reprotectable(path)
+                return REPROTECT
+            return KEEP
+        if not path.exists():
+            return CREATE
+        st = path.stat()
+        if st.st_uid != os.geteuid():
+            raise SetupError(f"{path} belongs to another account; choose another folder.")
+        if st.st_mode & 0o027:
+            _check_reprotectable(path)
+            return REPROTECT
+        return KEEP
+    except OSError as exc:
+        raise SetupError(f"Could not check the folder {path}: {exc}") from None
+
+
+def _apply_private_dir(path: Path, action: str) -> None:
+    try:
+        if sys.platform == "win32":
+            from ..platform import winacl
+
+            if action == SERVICE:
+                return                      # keep the installed service's permissions untouched
+            sid = winacl.current_user_sid()
+            if action == CREATE:
+                winacl.create_private_dir(path, sid)
+            elif action == REPROTECT:
                 winacl.protect_existing(path, sid)
             sddl = winacl.get_sddl(path)
             if winacl.foreign_trustees(sddl, sid) or not sddl.startswith("D:P"):
                 raise SetupError(f"Could not make {path} private (permissions now {sddl}).")
         else:
-            if not path.exists():
+            if action == CREATE:
                 path.mkdir(parents=True, mode=0o750)
-            st = path.stat()
-            if st.st_uid != os.geteuid():
-                raise SetupError(f"{path} belongs to another account; choose another folder.")
-            if st.st_mode & 0o027:
-                _check_reprotectable(path)
             os.chmod(path, 0o750)
     except OSError as exc:
         raise SetupError(f"Could not create or protect the folder {path}: {exc}") from None
+
+
+def prepare_private_dir(path: Path) -> str:
+    """Create ``path`` private to this account (+ SYSTEM/Administrators on Windows, 0750 on Linux),
+    or make an existing one private. An existing folder is only re-protected when it is empty or
+    holds nothing but Sentinel's own files; otherwise setup stops (we never re-permission a
+    folder full of someone else's data). A folder already set up for the installed Windows service
+    (:func:`service_managed_sddl`) is left as it is. Any failure raises SetupError. Returns the
+    action taken (CREATE, KEEP, REPROTECT or SERVICE)."""
+    path = Path(path)
+    action = _plan_private_dir(path)
+    _apply_private_dir(path, action)
+    return action
 
 
 def _check_reprotectable(path: Path) -> None:
@@ -219,13 +285,17 @@ def _check_reprotectable(path: Path) -> None:
                          "and other accounts can access it. Choose an empty or new folder.")
 
 
-def secret_problems(path: Path) -> list[str]:
-    """Why the credentials file is not private (empty = only this account/SYSTEM/Administrators)."""
+def secret_problems(path: Path, readers: tuple[str, ...] = ()) -> list[str]:
+    """Why the credentials file is not private (empty = only this account/SYSTEM/Administrators,
+    plus read-only access for the SIDs in ``readers`` (the installed service, on Windows))."""
     if sys.platform == "win32":
         from ..platform import winacl
 
         sddl = winacl.get_sddl(path)
-        problems = [f"also accessible to {t}" for t in winacl.foreign_trustees(sddl, winacl.current_user_sid())]
+        problems = [f"also accessible to {t}" for t in winacl.foreign_trustees(sddl, winacl.current_user_sid())
+                    if t not in readers]
+        problems += [f"{t} may change it" for _ty, _f, mask, t in winacl.dacl_aces(sddl)
+                     if _ty == "A" and t in readers and mask & winacl.WRITE_BITS]
         if not sddl.startswith("D:P"):
             problems.append("inherits permissions from its folder")
         return problems
@@ -233,8 +303,12 @@ def secret_problems(path: Path) -> list[str]:
     return [] if mode == 0o600 else [f"mode {oct(mode)} instead of 0600"]
 
 
-def write_secret(path: Path, username: str, password: str) -> None:
+def write_secret(path: Path, username: str, password: str, readers: tuple[str, ...] = ()) -> None:
     """Write the credentials file so that it is private from the moment it exists.
+
+    ``readers`` (Windows only): SIDs that also get read access from creation — the recorder
+    service's SID when the service is installed (review 2026-11-10, H1), so it can still read
+    the camera login after ``setup --force``.
 
     Windows: created with CreateFileW and an explicit protected DACL (this account, SYSTEM,
     Administrators) under a temporary name, verified, then renamed over the target (a rename
@@ -258,7 +332,10 @@ def write_secret(path: Path, username: str, password: str) -> None:
                 data = protected_file_bytes(username, password, scope="machine")
             except (CredentialError, OSError) as exc:
                 raise SetupError(f"The camera password could not be protected with Windows DPAPI: {exc}") from None
-            winacl.write_private_file(tmp, data)
+            if readers:
+                winacl.write_private_file(tmp, data, extra_read_sids=readers)
+            else:
+                winacl.write_private_file(tmp, data)
             try:
                 back = load_credentials(tmp)
             except CredentialError as exc:
@@ -273,12 +350,12 @@ def write_secret(path: Path, username: str, password: str) -> None:
                 os.fsync(fd)
             finally:
                 os.close(fd)
-        problems = secret_problems(tmp)
+        problems = secret_problems(tmp, readers) if readers else secret_problems(tmp)
         if problems:
             raise SetupError("The credentials file could not be made private: " + "; ".join(problems))
         os.replace(tmp, path)
         replaced = True
-        problems = secret_problems(path)
+        problems = secret_problems(path, readers) if readers else secret_problems(path)
         if problems:
             raise SetupError("The credentials file could not be made private: " + "; ".join(problems))
     except BaseException as exc:
@@ -302,7 +379,10 @@ def write_setup(ans: SetupAnswers, layout: Layout, config_path: Path | None = No
 
     Order: validate everything; make the configuration folder and the storage folders private;
     write the credentials file (private from creation); only then back up any previous
-    configuration and write the new one (inheriting the private folder's permissions)."""
+    configuration and write the new one (inheriting the private folder's permissions).
+    Every folder is checked before any is changed. Folders already set up for the installed
+    Windows service keep their permissions, and the credentials file then also grants the
+    service read access, so ``setup --force`` never locks the service out (review 2026-11-10)."""
     config_path = Path(config_path or layout.config_file)
     d = build_config(ans, layout, config_path.parent / SECRET_NAME)
     try:
@@ -311,16 +391,26 @@ def write_setup(ans: SetupAnswers, layout: Layout, config_path: Path | None = No
         raise SetupError(f"The answers do not form a valid configuration: {exc}") from None
     if config_path.exists() and not force:
         raise SetupError("Sentinel is already set up on this computer (use setup --force to replace it).")
-    for folder in dict.fromkeys([config_path.parent, *(Path(d["storage"][k]) for k in
-                                                       ("spool_dir", "data_dir", "log_dir", "status_dir")
-                                                       if k in d["storage"])]):
-        prepare_private_dir(folder)
+    folders = list(dict.fromkeys([config_path.parent, *(Path(d["storage"][k]) for k in
+                                                        ("spool_dir", "data_dir", "log_dir", "status_dir")
+                                                        if k in d["storage"])]))
+    # Review 2026-11-10 (H1): decide for every folder first, so a refusal (e.g. a folder full of
+    # recordings) changes nothing; folders set up by 'winsvc install' keep the service's access.
+    plan = [(f, _plan_private_dir(f)) for f in folders]
+    for folder, action in plan:
+        _apply_private_dir(folder, action)
+    warnings: list[str] = []
+    service_cfg = plan[0][1] == SERVICE
+    if service_cfg:
+        warnings += [f"The recorder service is installed, but {f} is not set up for it: run the service "
+                     "installation again as administrator (uninstall, then install) so it may use this folder."
+                     for f, action in plan[1:] if action != SERVICE]
     if ans.username:
-        write_secret(Path(d["camera"]["credentials_file"]), ans.username, ans.password)
-    if config_path.exists():
-        backup = config_path.with_name(f"{config_path.name}.{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime(clock()))}.bak")
-        config_path.replace(backup)
-        log.info("previous configuration kept as %s", backup)
+        readers = (_sentinel_service_sids()[0],) if service_cfg else ()
+        if readers:
+            write_secret(Path(d["camera"]["credentials_file"]), ans.username, ans.password, readers)
+        else:
+            write_secret(Path(d["camera"]["credentials_file"]), ans.username, ans.password)
     header = ("Sentinel configuration written by first-run setup.\n"
               "Settings not listed here use the tested defaults (docs/08_PACKAGING.md).\n"
               "[archive] and [retention] are ON by owner decision (2026-11-10): recordings already\n"
@@ -332,9 +422,23 @@ def write_setup(ans: SetupAnswers, layout: Layout, config_path: Path | None = No
         header += ("\nNO CAMERA ADDED YET ([camera] pending = true): nothing is recorded until the\n"
                    "technician runs 'Sentinel set-camera' on site.")
     tmp = config_path.with_name(config_path.name + ".partial")
-    tmp.write_text(to_toml(d, header), encoding="utf-8")
-    tmp.replace(config_path)
-    return config_path, []
+    try:
+        tmp.write_text(to_toml(d, header), encoding="utf-8")
+        if config_path.exists():
+            backup = config_path.with_name(
+                f"{config_path.name}.{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime(clock()))}.bak")
+            config_path.replace(backup)
+            log.info("previous configuration kept as %s", backup)
+        tmp.replace(config_path)
+    except OSError as exc:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        hint = (" Changing the configuration of an installed service needs 'Run as administrator'."
+                if service_cfg else "")
+        raise SetupError(f"Could not write the configuration {config_path}: {exc}.{hint}") from None
+    return config_path, warnings
 
 # ------------------------------------------------------------------ interactive questions
 TECHNICIAN_INTRO = """\

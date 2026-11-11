@@ -22,6 +22,7 @@ a = Analysis(
     runtime_hooks=[],
     excludes=common.EXCLUDES,
     noarchive=False,
+    module_collection_mode=common.MODULE_COLLECTION_MODE,   # PySide6 as replaceable .py files (LGPL)
     optimize=0,
 )
 pyz = PYZ(a.pure)
@@ -39,4 +40,4 @@ exe = EXE(
     console=True,
 )
 
-coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, upx_exclude=[], name="Sentinel")
+coll = COLLECT(exe, common.filter_binaries(a.binaries), a.datas, strip=False, upx=False, upx_exclude=[], name="Sentinel")

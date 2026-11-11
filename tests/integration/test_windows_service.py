@@ -115,7 +115,9 @@ def test_service_host_preshutdown_stops_recorder_gracefully(tmp_path: Path) -> N
     def factory(cfg: AppConfig) -> RecorderService:
         p = get_platform()
         p.clock_synchronized = lambda: None  # type: ignore[method-assign]  # host NTP not under test
-        return RecorderService(cfg, platform=p)
+        svc = RecorderService(cfg, platform=p)
+        svc.time_sync_check = lambda: None  # type: ignore[method-assign]
+        return svc
 
     try:
         with SimulatedCamera(fps=15) as cam:

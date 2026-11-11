@@ -50,6 +50,7 @@ EXIT_OK = 0
 EXIT_FAILED = 2              # failure; check "step" to know whether anything was erased
 EXIT_IDENTITY_MISMATCH = 3   # the disk is not the confirmed one
 EXIT_PROTECTED = 4           # the disk is (now) a protected disk
+EXIT_IN_USE = 5              # Linux: a filesystem on the disk is still mounted / in use (review 2026-11-10)
 EXIT_ELEVATION_CANCELLED = 1223  # ERROR_CANCELLED: the person declined the UAC prompt
 NON_DESTRUCTIVE_STEPS = ("start", "verify")
 
@@ -226,7 +227,13 @@ def build_windows_plan(disk: DiskInfo, *, filesystem: str, label: str, drive_uui
 
 
 def build_linux_script(disk: DiskInfo, *, filesystem: str, label: str, protected_devices: tuple[str, ...]) -> str:
-    """POSIX sh script for ``pkexec /bin/sh -c``. NOT EXECUTED. Prints one RESULT line."""
+    """POSIX sh script for ``pkexec /bin/sh -c``. NOT EXECUTED. Prints one RESULT line.
+
+    Review 2026-11-10: on Linux a drive can only be classified while mounted, and desktops automount
+    USB drives, so a mounted filesystem is normal here. After every identity and protection check
+    has passed (nothing erased yet) the script unmounts the drive's own filesystems; a system mount
+    point refuses (code 4) and a filesystem that cannot be unmounted (busy, swap) refuses with
+    code 5 "in use" instead of the misleading "used by the computer itself"."""
     if disk.platform != "linux":
         raise PrepareRefused("wrong_platform", "not a Linux disk")
     if filesystem not in LINUX_MKFS:
@@ -249,19 +256,34 @@ check() {{
   [ "$(lsblk -dno SERIAL "$DEV" | tr -d '[:space:]')" = {q(ident.serial or '')} ] || fail 3 IDENTITY_MISMATCH_serial
   [ "$(lsblk -dno WWN "$DEV" | tr -d '[:space:]')" = {q(ident.unique_id or '')} ] || fail 3 IDENTITY_MISMATCH_wwn
   [ "$(blockdev --getsize64 "$DEV")" = {q(str(ident.size_bytes))} ] || fail 3 IDENTITY_MISMATCH_size
-  if [ -n "$(lsblk -no MOUNTPOINTS "$DEV" | tr -d '[:space:]')" ]; then fail 4 PROTECTED_mounted; fi
+  if lsblk -nlo MOUNTPOINTS "$DEV" | tr -d '[:blank:]' | grep -qxE '/|/boot|/boot/efi|/efi|/usr|/var|/home|/etc|/opt|/srv|/root'; then
+    fail 4 PROTECTED_mounted
+  fi
   for p in {prot or "''"}; do
     if [ -n "$p" ] && lsblk -no MAJ:MIN "$DEV" | tr -d ' ' | grep -qx "$p"; then fail 4 PROTECTED_device; fi
   done
+}}
+notmounted() {{
+  if [ -n "$(lsblk -no MOUNTPOINTS "$DEV" | tr -d '[:space:]')" ]; then fail 5 IN_USE_mounted; fi
 }}
 check
 [ "$(lsblk -dno PTUUID "$DEV" | tr -d '[:space:]')" = {q(ident.disk_guid or '')} ] || fail 3 IDENTITY_MISMATCH_ptuuid
 [ "$(lsblk -nro PARTUUID "$DEV" | grep . | tr 'A-Z' 'a-z' | LC_ALL=C sort | tr '\\n' ' ')" = {q(pg)} ] || fail 3 IDENTITY_MISMATCH_partuuid
 [ "$(lsblk -nro UUID "$DEV" | grep . | tr 'A-Z' 'a-z' | LC_ALL=C sort | tr '\\n' ' ')" = {q(fsu)} ] || fail 3 IDENTITY_MISMATCH_fsuuid
+for part in $(lsblk -nlpo PATH "$DEV"); do
+  n=0
+  while findmnt -rn -S "$part" >/dev/null 2>&1; do
+    n=$((n + 1))
+    [ "$n" -le 8 ] || fail 5 IN_USE_mounted
+    umount -- "$part" >/dev/null 2>&1 || fail 5 IN_USE_mounted
+  done
+done
+notmounted
 step=clear
 wipefs --all "$DEV" >/dev/null || fail 2 wipefs_failed
 step=partition
 check
+notmounted
 printf 'label: gpt\\n,,%s\\n' {q(parttype)} | sfdisk --quiet --lock --wipe always --wipe-partitions always "$DEV" || fail 2 sfdisk_failed
 udevadm settle
 PART=$(lsblk -nlpo PATH,TYPE "$DEV" | awk '$2=="part" {{ print $1; exit }}')

@@ -90,6 +90,7 @@ class Harness:
         # produce a false "log altered" finding. Tests that tamper on purpose pass False.
         self.check_chain = check_chain
         self.svc = RecorderService(self.cfg, platform=platform, clock=clock, disk_usage=disk)
+        self.svc.time_sync_check = lambda: None  # type: ignore[method-assign]
         if not power_check:
             self.svc._check_power = lambda: None  # type: ignore[method-assign]
         self._thread: threading.Thread | None = None

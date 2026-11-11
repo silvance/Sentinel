@@ -99,8 +99,9 @@ CATALOG: dict[str, AlertDef] = {d.code: d for d in [
     AlertDef("M-010", "Setting up drives is not enabled on this system yet",
              "Contact technical support.", False),
     # Archive drive (separate low-priority process; never stops recording). docs/04 §2-3, S1.
+    # Not "Recording continues": also shown while nothing is recorded (camera not added, paused).
     AlertDef("A-001", "No archive drive is connected",
-             "Recording continues on this system. Insert the archive drive.", False),
+             "Recordings are kept on this computer until one is inserted. Insert the archive drive.", False),
     AlertDef("A-002", "The archive drive is full",
              "Recording continues on this system. Do not unplug the archive drive yet: press Swap Archive "
              "Drive, wait for SAFE TO REMOVE, then insert an empty archive drive.", False),
@@ -131,6 +132,9 @@ CATALOG: dict[str, AlertDef] = {d.code: d for d in [
              "No action is needed.", False),
     AlertDef("W-001", "Motion detection is not working, so the recorder records all the time",
              "Recording continues. " + SUPPORT, False),
+    # Motion was seen but the recording that should follow failed (review 2026-11-10: this was
+    # shown as "Waiting for motion ... No action is needed").
+    AlertDef("W-002", "Motion was detected but could not be recorded", SUPPORT, True),
     # Set up in advance ("setup --camera-later"); the technician adds the camera on site (set-camera).
     AlertDef("P-002", "Not recording: the camera has not been added yet",
              "Recording starts once the installing technician adds the camera. If the camera should "

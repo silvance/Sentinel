@@ -56,6 +56,7 @@ class RetentionReport:
     completed_interrupted: int = 0
     blocked: bool = False            # below the floor and nothing (more) could be removed
     skipped: dict[str, int] = field(default_factory=dict)
+    delete_failed: int = 0           # files of decided removals that could not be deleted yet (retried)
     error: str | None = None
 
 
@@ -147,7 +148,7 @@ class RetentionManager:
     def run_once(self) -> RetentionReport:
         rep = RetentionReport(iso_utc(self.now()), self.rcfg.enabled, floor_bytes=self.floor_bytes,
                               target_bytes=self.target_bytes)
-        rep.completed_interrupted = self._finish_interrupted()
+        rep.completed_interrupted = self._finish_interrupted(rep)
         if not self.rcfg.enabled:
             self.last = rep
             return rep
@@ -202,19 +203,33 @@ class RetentionManager:
             with self.ledger.chained(c, "segments", [cur["segment_id"]]):
                 c.execute("UPDATE segments SET local_deleted_utc=?, updated_utc=? WHERE segment_id=?",
                           (decided, decided, cur["segment_id"]))
-        freed = self._delete_files(cur["rel_path"], cur["framehash_rel_path"])
+        freed, failed = self._delete_files(cur["rel_path"], cur["framehash_rel_path"])
+        rep.freed_bytes += freed
+        if failed:
+            self._note_delete_failed(rep, failed)
+            return True                                    # decided; completed by a later pass
         self._mark_done(cur["segment_id"], freed)
         rep.deleted += 1
-        rep.freed_bytes += freed
         return True
+
+    @staticmethod
+    def _note_delete_failed(rep: RetentionReport, failed: list[str]) -> None:
+        rep.delete_failed += len(failed)
+        rep.error = (f"{rep.delete_failed} local recording file(s) could not be removed (in use or access "
+                     f"denied); they will be tried again")
 
     def _removed_in(self, c: Any) -> set[str]:
         rows = c.execute("SELECT drive_id FROM archive_drive_sessions GROUP BY drive_id "
                          "HAVING SUM(CASE WHEN gone_utc IS NULL THEN 1 ELSE 0 END)=0").fetchall()
         return {r["drive_id"] for r in rows}
 
-    def _delete_files(self, rel_path: str, framehash_rel: str | None) -> int:
+    def _delete_files(self, rel_path: str, framehash_rel: str | None) -> tuple[int, list[str]]:
+        """Delete the local files of a decided removal. Returns (bytes freed, files that could not be
+        deleted). Never raises for a single file (review 2026-11-10): a file locked by another program
+        or with wrong permissions must not stop retention for every other segment; its row stays
+        DELETING and is tried again on the next pass."""
         freed = 0
+        failed: list[str] = []
         for rel in (rel_path, framehash_rel):
             if not rel:
                 continue
@@ -226,7 +241,11 @@ class RetentionManager:
                 freed += size
             except FileNotFoundError:
                 continue
-        return freed
+            except OSError as exc:
+                log.warning("retention: could not delete %s (%s); will retry on the next pass", rel,
+                            type(exc).__name__)
+                failed.append(rel)
+        return freed, failed
 
     def _mark_done(self, segment_id: str, freed: int) -> None:
         free_after = self._free()
@@ -246,12 +265,17 @@ class RetentionManager:
                                            "archive_copies": json.loads(row["archive_copies"]),
                                            "deletion_id": row["deletion_id"]}))
 
-    def _finish_interrupted(self) -> int:
+    def _finish_interrupted(self, rep: RetentionReport | None = None) -> int:
         """Complete removals decided before a crash (row DELETING): the decision and the segment mark are
-        committed, so the files are removed and the row closed."""
+        committed, so the files are removed and the row closed. A row whose files cannot be deleted yet
+        is left DELETING and skipped, so it never blocks the other rows or new removals (review 2026-11-10)."""
         n = 0
         for row in self.ledger.query("SELECT * FROM retention_deletions WHERE state='DELETING' ORDER BY deletion_id"):
-            freed = self._delete_files(row["rel_path"], row["framehash_rel_path"])
+            freed, failed = self._delete_files(row["rel_path"], row["framehash_rel_path"])
+            if failed:
+                if rep is not None:
+                    self._note_delete_failed(rep, failed)
+                continue
             self._mark_done(row["segment_id"], freed)
             n += 1
         return n

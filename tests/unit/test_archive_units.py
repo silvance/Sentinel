@@ -317,8 +317,10 @@ def test_unprepared_or_non_archive_drive_is_never_written(env: Env, tmp_path: Pa
     norole = make_drive(tmp_path, "N", marker=True, role=None)
     review = make_drive(tmp_path, "R", marker=True, role="review")
     w = env.worker(VolumeScanLocator(roots=lambda: [str(norole.root), str(review.root)]))
-    assert w.step() == "unusable"
-    assert env.status()["state"] == "UNUSABLE" and "A-005" in env.codes()
+    # (review 2026-11-10) not archive drives: ignored (never written), and no archive alert A-005
+    assert w.step() == "absent"
+    assert env.status()["state"] == "ABSENT" and "A-005" not in env.codes()
+    assert len(env.status()["problems"]["other_drives"]) == 2
     assert sorted(p.name for p in norole.root.iterdir()) == ["SENTINEL_DRIVE.json"]   # nothing written
     assert sorted(p.name for p in review.root.iterdir()) == ["SENTINEL_DRIVE.json"]
     marked = make_drive(tmp_path, "M", marker=True)

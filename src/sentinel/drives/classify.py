@@ -110,7 +110,18 @@ class Classification:
             "description": d.describe(), "bus_type": d.bus_type, "identity": d.identity.to_dict(),
             "fingerprint": d.identity.fingerprint(), "drive_uuid": (self.marker or {}).get("drive_uuid"),
             "label": (self.marker or {}).get("label"), "notes": list(self.notes),
+            # For the window's drive list (where a prepared drive can be opened).
+            "size_bytes": d.size_bytes, "model": d.model, "serial": d.serial,
+            "mount_paths": [p for v in d.volumes for p in v.mount_paths],
+            # The marker's role: "archive" for the archive drive (sentinel.archive.locator adds it),
+            # None for a prepared drive without one (review drives), so the window can tell them apart.
+            "role": _marker_role(self.marker),
         }
+
+
+def _marker_role(marker: dict[str, Any] | None) -> str | None:
+    role = (marker or {}).get("role")
+    return role if isinstance(role, str) and role else None
 
 
 def _unsuitable_reasons(disk: DiskInfo, policy: DrivePolicy, protected: ProtectedStorage,

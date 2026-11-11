@@ -1,0 +1,456 @@
+"""The Sentinel window (owner request 2026-11-10: everything doable in one compact window).
+
+Carried over from the old operator screen: the exact alert text is shown, the test camera is
+always flagged, a status that stops updating is X-001, opening the window writes nothing.
+New: settings are read-only without administrator rights; saving rewrites only the edited
+section (comments kept, .bak written); erasing a drive needs the person's name and the serial
+characters and goes through the same command as the command line; setup works in the window.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+import time
+import tomllib
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+pytest.importorskip("PySide6")
+
+from gui_support import base_measurements, status_doc, write_doc  # noqa: E402
+from sentinel.alerts import Severity, make_alert  # noqa: E402
+from sentinel.config import load_config  # noqa: E402
+from sentinel.gui.__main__ import prepare_qt_environment  # noqa: E402
+from sentinel.launcher import setup  # noqa: E402
+from sentinel.paths import Layout  # noqa: E402
+
+prepare_qt_environment()
+
+from PySide6.QtWidgets import QApplication, QDialog, QLineEdit, QPushButton  # noqa: E402
+from PySide6.QtWidgets import QMessageBox as QMessageBox_  # noqa: E402
+
+from sentinel.gui.app import base, configedit, drive_pages, settings_pages  # noqa: E402
+from sentinel.gui.app.window import AppWindow, page_for_code  # noqa: E402
+from sentinel.gui.ledger_view import Span, SpanKind, Timeline  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _config_is_admin_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test configurations live in a user-writable temp folder; the window would (rightly) refuse
+    administrator actions on them. Tests of that refusal undo this."""
+    from sentinel.gui.app import window as winmod
+
+    monkeypatch.setattr(winmod, "admin_config_problem", lambda _p, _c: "")
+
+
+@pytest.fixture(scope="module")
+def app() -> QApplication:
+    a = QApplication.instance() or QApplication([])
+    from sentinel.gui.app import style
+
+    style.apply(a, "light")  # type: ignore[arg-type]
+    return a  # type: ignore[return-value]
+
+
+def _layout(tmp: Path) -> Layout:
+    root = tmp / "machine"
+    return Layout("machine", root / "config" / "sentinel.toml", root / "config" / "camera.secret", root / "spool",
+                  root / "data", root / "logs", root / "status")
+
+
+def _setup(tmp: Path, **kw: Any) -> Path:
+    ans = setup.SetupAnswers(kw.pop("host", "192.0.2.64"), kw.pop("path", "Streaming/Channels/101"),
+                             camera_name="Front door", timezone="America/New_York", **kw)
+    path, _ = setup.write_setup(ans, _layout(tmp))
+    return path
+
+
+def _window(app: QApplication, tmp: Path, *, admin: bool, doc: dict | None = None, **kw: Any) -> AppWindow:
+    path = _setup(tmp, **kw)
+    cfg = load_config(path)
+    if doc is not False:
+        write_doc(cfg.status_path, doc or status_doc(base_measurements(), time.time(), last_segment_end=time.time()))
+    w = AppWindow(cfg, path, admin=admin, appearance="light", auto_refresh=False, prefs_path=tmp / "prefs.json")
+    w.resize(1280, 800)
+    w.show()
+    app.processEvents()
+    return w
+
+
+def _drain(app: QApplication, seconds: float = 0.2) -> None:
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        app.processEvents()
+        time.sleep(0.01)
+
+
+# ---------------------------------------------------------------------- layout and status
+def test_every_section_opens(app: QApplication, tmp_path: Path) -> None:
+    w = _window(app, tmp_path, admin=True)
+    names = w.section_names()
+    assert names == ["Status", "Recordings", "Camera", "Schedule", "Motion", "Storage", "Drives", "Export", "System"]
+    for key in ("recordings", "camera", "schedule", "motion", "storage", "export", "system", "status"):
+        w.navigate(key)
+        app.processEvents()
+        assert w.current_page().key == key
+    assert w.view is not None and w.view.headline == "Recording normally"
+    w.close()
+
+
+def test_alert_text_is_shown_exactly_and_links_to_its_page(app: QApplication, tmp_path: Path) -> None:
+    doc = status_doc(base_measurements(), time.time())
+    a = make_alert("T-002", Severity.WARNING).to_dict()
+    doc.update(alert=a, alerts=[a], banner=True)
+    w = _window(app, tmp_path, admin=False, doc=doc)
+    t = w.pages["status"].alerts
+    assert t.topLevelItem(0).text(0) == "T-002" and t.topLevelItem(0).text(1) == a["message"]
+    assert "1 alert: T-002" in w.sb_alerts.text()
+    assert page_for_code("T-002") == "system" and page_for_code("P-002") == "camera"
+    assert page_for_code("A-001") == "drives" and page_for_code("W-001") == "motion"
+    w.pages["status"]._open_alert(0, 0)
+    assert w.current_page().key == "system"
+    w.close()
+
+
+def test_test_camera_is_always_flagged(app: QApplication, tmp_path: Path) -> None:
+    doc = status_doc(base_measurements(), time.time())
+    z = make_alert("Z-001", Severity.WARNING).to_dict()
+    doc.update(alerts=[z], alert=z)
+    w = _window(app, tmp_path, admin=False, doc=doc)
+    assert "TEST CAMERA" in w.state_label.text() and "TEST CAMERA" in w.sb_state.text()
+    w.close()
+
+
+def test_missing_status_is_x001_and_opening_writes_nothing(app: QApplication, tmp_path: Path) -> None:
+    path = _setup(tmp_path)
+    cfg = load_config(path)
+    before = sorted(p.relative_to(tmp_path) for p in tmp_path.rglob("*"))
+    w = AppWindow(cfg, path, admin=False, appearance="light", auto_refresh=False, prefs_path=None)
+    w.show()
+    for key in ("recordings", "camera", "schedule", "motion", "system", "status"):
+        w.navigate(key)
+        app.processEvents()
+    assert "X-001" in w.sb_alerts.text()
+    assert w.pages["status"].alerts.topLevelItem(0).text(0) == "X-001"
+    w.close()
+    assert sorted(p.relative_to(tmp_path) for p in tmp_path.rglob("*")) == before
+
+
+def test_timeline_marks_gaps_and_motion(app: QApplication) -> None:
+    from zoneinfo import ZoneInfo
+
+    from sentinel.gui.app.timeline import MOTION_MIN_W, TimelineBar, tick_hours
+    from sentinel.gui.theme import pick_palette
+
+    now = 1_800_000_000.0
+    tl = Timeline(now - 86400, now, (Span(now - 86400, now - 3600, SpanKind.RECORDED),
+                                     Span(now - 3600, now - 3000, SpanKind.GAP, "camera unreachable"),
+                                     Span(now - 3000, now, SpanKind.RECORDED)), motion=((now - 600, now - 590),))
+    bar = TimelineBar(pick_palette("light"))
+    bar.resize(1000, 60)
+    bar.set_timeline(tl, ZoneInfo("UTC"))
+    img = bar.grab().toImage()
+    assert bar.ticks and len(bar.ticks) == 8                         # every 3 hours over 24 hours
+    assert tick_hours(7 * 86400) == 24 and tick_hours(6 * 3600) == 1
+    x = int(1 + (600 - 10) / 86400 * 998 * -1 + 998 * (1 - 600 / 86400))   # motion marker position
+    blue = img.pixelColor(x, 4)
+    assert blue.blue() > blue.red()                                  # motion strip drawn over recorded time
+    assert MOTION_MIN_W >= 6
+
+
+# ---------------------------------------------------------------------- read-only without administrator
+def test_settings_are_read_only_without_administrator(app: QApplication, tmp_path: Path) -> None:
+    w = _window(app, tmp_path, admin=False)
+    assert "(read-only)" in w.windowTitle() and w.unlock_btn.isVisible()
+    for key in ("camera", "schedule", "motion", "storage"):
+        page = w.pages[key]
+        assert not page.save_btn.isEnabled()
+        assert all(not e.isEnabled() for e in page.editors)
+    assert not w.pages["drives"].erase_btn.isEnabled()
+    assert not w.pages["system"].b_install.isEnabled()
+    w.close()
+
+
+def test_unlock_asks_windows_and_closes_only_if_approved(app: QApplication, tmp_path: Path,
+                                                         monkeypatch: pytest.MonkeyPatch) -> None:
+    from sentinel.gui.app import window as winmod
+
+    w = _window(app, tmp_path, admin=False)
+    asked: list[list[str]] = []
+    monkeypatch.setattr(winmod, "relaunch_elevated", lambda extra: asked.append(extra) or False)
+    monkeypatch.setattr(winmod.QMessageBox, "information", lambda *a, **k: None)
+    w.unlock()
+    assert asked == [["--config", str(w.ctx.cfg_path), "--no-start"]] and w.isVisible()
+    monkeypatch.setattr(winmod, "relaunch_elevated", lambda extra: True)
+    w.unlock()
+    assert not w.isVisible()
+
+
+# ---------------------------------------------------------------------- saving settings
+def test_replace_sections_keeps_comments_and_other_sections() -> None:
+    text = ("# top\n[camera]\nid = \"CAM01\"\n\n# about the schedule\n[schedule]\nenabled = false\n\n"
+            "# example\n[[schedule.weekly]]\naction = \"pause\"\ndays = [\"weekend\"]\nstart = \"00:00\"\n"
+            "end = \"24:00\"\n\n# motion here\n[motion]\nmarkers = true\n")
+    out = configedit.replace_sections(text, {"schedule": {"enabled": True, "default": "motion", "weekly": [
+        {"action": "record", "days": ["weekdays"], "start": "07:00", "end": "18:00"}]}})
+    d = tomllib.loads(out)
+    assert d["schedule"] == {"enabled": True, "default": "motion",
+                             "weekly": [{"action": "record", "days": ["weekdays"], "start": "07:00", "end": "18:00"}]}
+    assert d["camera"] == {"id": "CAM01"} and d["motion"] == {"markers": True}
+    assert "# top" in out and "# about the schedule" in out and "# motion here" in out
+    assert "pause" not in out
+    added = configedit.replace_sections("[camera]\nid = \"C\"\n", {"motion": {"markers": False}})
+    assert tomllib.loads(added)["motion"] == {"markers": False}
+
+
+def test_schedule_page_saves_work_hours_and_motion(app: QApplication, tmp_path: Path,
+                                                   monkeypatch: pytest.MonkeyPatch) -> None:
+    restarts: list[Any] = []
+    monkeypatch.setattr(base, "restart_recorder", lambda p, c: restarts.append(p) or "Restarted.")
+    w = _window(app, tmp_path, admin=True)
+    w.navigate("schedule")
+    page = w.pages["schedule"]
+    page._preset()
+    assert "motion" in page.plan.toPlainText().lower()
+    page.save()
+    _drain(app, 0.5)
+    cfg = load_config(w.ctx.cfg_path)
+    assert cfg.schedule.enabled and cfg.schedule.default == "motion"
+    assert [(p.action, p.start_s, p.end_s) for p in cfg.schedule.weekly] == [("record", 7 * 3600, 18 * 3600)]
+    assert list(Path(w.ctx.cfg_path).parent.glob("sentinel.toml.*.bak"))
+    assert restarts == [w.ctx.cfg_path] and w.ctx.cfg.schedule.enabled
+    w.close()
+
+
+def test_invalid_schedule_is_refused_and_nothing_changes(app: QApplication, tmp_path: Path,
+                                                         monkeypatch: pytest.MonkeyPatch) -> None:
+    said: list[str] = []
+    monkeypatch.setattr(base.QMessageBox, "warning", lambda _p, _t, text: said.append(text))
+    w = _window(app, tmp_path, admin=True)
+    page = w.pages["schedule"]
+    before = Path(w.ctx.cfg_path).read_text(encoding="utf-8")
+    page.enabled.setChecked(True)
+    page.weekly.add("pause", ["someday", "07:00", "18:00"])
+    page.save()
+    assert said and "Nothing was changed" in said[0]
+    assert Path(w.ctx.cfg_path).read_text(encoding="utf-8") == before
+    w.close()
+
+
+def test_motion_page_saves_settings(app: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(base, "restart_recorder", lambda p, c: "Restarted.")
+    w = _window(app, tmp_path, admin=True)
+    page = w.pages["motion"]
+    page.keep.setValue(300)
+    page.percent.setValue(2.5)
+    page.stream.setText("Streaming/Channels/102")
+    page.save()
+    _drain(app, 0.3)
+    m = load_config(w.ctx.cfg_path).motion
+    assert m.keep_recording_s == 300 and m.changed_percent == 2.5 and m.stream_path == "Streaming/Channels/102"
+    w.close()
+
+
+def test_camera_page_saves_address_and_account(app: QApplication, tmp_path: Path,
+                                               monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(base, "restart_recorder", lambda p, c: "Restarted.")
+    monkeypatch.setattr(settings_pages.QMessageBox, "question",
+                        lambda *a, **k: settings_pages.QMessageBox.StandardButton.Yes)   # untested camera: save
+    w = _window(app, tmp_path, admin=True, camera_later=True, host="", path="")
+    page = w.pages["camera"]
+    assert page.pending.isChecked() and not page.host.isEnabled()
+    page.pending.setChecked(False)
+    page.host.setText("192.0.2.80")
+    page.path.setText("Streaming/Channels/101")
+    page.user.setText("viewer")
+    page.password.setText("s3cret!")
+    page.save()
+    _drain(app, 0.3)
+    cfg = load_config(w.ctx.cfg_path)
+    assert not cfg.camera.pending and cfg.camera.url == "rtsp://192.0.2.80:554/Streaming/Channels/101"
+    assert cfg.camera.credentials_file and Path(cfg.camera.credentials_file).exists()
+    assert "s3cret!" not in Path(w.ctx.cfg_path).read_text(encoding="utf-8") and page.password.text() == ""
+    w.close()
+
+
+# ---------------------------------------------------------------------- drives
+def test_erasing_needs_name_and_serial_and_uses_the_checked_command(app: QApplication, tmp_path: Path,
+                                                                     monkeypatch: pytest.MonkeyPatch) -> None:
+    w = _window(app, tmp_path, admin=True)
+    page = w.pages["drives"]
+    runs: list[list[str]] = []
+    monkeypatch.setattr(page.log, "run", lambda argv, *a, **k: runs.append(argv))
+    disk = {"disk_id": "3", "class": "FOREIGN_DATA", "can_prepare": True, "serial": "ABCD1234WXYZ",
+            "description": "USB disk", "size_bytes": 10**12, "mount_paths": ["E:\\"]}
+    page.list.drives = [disk]
+    page._show_drives()
+    page.table.selectRow(0)
+
+    def fake_exec(dlg: QDialog, who: str, tail: str, accept: bool = True) -> int:
+        dlg.who.setText(who)
+        dlg.tail.setText(tail)
+        return QDialog.DialogCode.Accepted if accept else QDialog.DialogCode.Rejected
+
+    said: list[str] = []
+    monkeypatch.setattr(base.QMessageBox, "warning", lambda _p, _t, text: said.append(text))
+    monkeypatch.setattr(drive_pages.EraseDialog, "exec", lambda dlg: fake_exec(dlg, "Tech 7", "wx"))
+    page._erase()
+    assert runs == [] and "exactly 4 characters" in said[-1]                   # too short: nothing run
+    monkeypatch.setattr(drive_pages.EraseDialog, "exec", lambda dlg: fake_exec(dlg, "Tech 7", "wxyz"))
+    page._erase()
+    argv = runs[-1]
+    assert argv[argv.index("drives"):argv.index("drives") + 2] == ["drives", "prepare"]
+    for flag, value in (("--disk", "3"), ("--who", "Tech 7"), ("--serial-tail", "WXYZ")):
+        assert argv[argv.index(flag) + 1] == value
+    assert "--admin" in argv and "--yes" in argv
+    page.list.drives = [dict(disk, can_prepare=False, refusal="system disk")]
+    page._show_drives()
+    page.table.selectRow(0)
+    n = len(runs)
+    page._erase()
+    assert len(runs) == n and "cannot be erased" in said[-1]
+    w.close()
+
+
+# ---------------------------------------------------------------------- first-run setup
+def test_setup_in_the_window_without_a_camera(app: QApplication, tmp_path: Path,
+                                              monkeypatch: pytest.MonkeyPatch) -> None:
+    from sentinel.gui.app import setup_page
+
+    monkeypatch.setattr(setup_page, "default_layout", lambda: _layout(tmp_path))
+    monkeypatch.setattr(base.QMessageBox, "information", lambda *a, **k: None)
+    configured: list[Path] = []
+    w = AppWindow(None, None, admin=True, appearance="light", auto_refresh=False,
+                  on_configured=lambda cfg, p: configured.append(p))
+    w.show()
+    assert w.section_names() == ["Set up this computer"]
+    page = w.pages["setup"]
+    page.later.setChecked(True)
+    assert not page.host.isEnabled()
+    page.name.setText("Gate")
+    page.tz.setEditText("America/Chicago")
+    page._setup()
+    _drain(app, 0.5)
+    assert configured == [_layout(tmp_path).config_file]
+    cfg = load_config(configured[0])
+    assert cfg.camera.pending and cfg.camera.name == "Gate"
+    assert len(w.section_names()) == 9 and w.ctx.cfg is not None                    # the full window now
+    w.close()
+
+
+def test_setup_needs_administrator(app: QApplication) -> None:
+    w = AppWindow(None, None, admin=False, appearance="light", auto_refresh=False)
+    page = w.pages["setup"]
+    assert not page.go.isEnabled()
+    assert any(b.text() == "Continue as administrator…" for b in page.findChildren(QPushButton))
+    assert all(not e.isEnabled() for e in page.findChildren(QLineEdit))
+    w.close()
+
+
+def test_appearance_is_remembered(app: QApplication, tmp_path: Path) -> None:
+    from sentinel.gui.prefs import load_appearance
+
+    w = _window(app, tmp_path, admin=False)
+    w.set_appearance("dark")
+    assert load_appearance(tmp_path / "prefs.json") == "dark" and w.ctx.palette.dark
+    w.set_appearance("light")
+    w.close()
+
+
+# ---------------------------------------------------------------------- window review fixes (2026-11-10)
+def test_administrator_actions_refused_on_a_file_others_can_change(app: QApplication, tmp_path: Path,
+                                                                   monkeypatch: pytest.MonkeyPatch) -> None:
+    from sentinel.gui.app import window as winmod
+
+    monkeypatch.setattr(winmod, "admin_config_problem", lambda _p, _c: "can be changed by non-administrators")
+    w = _window(app, tmp_path, admin=True)
+    assert not w.ctx.admin and not w.pages["camera"].save_btn.isEnabled()
+    assert "non-administrators" in w.access_label.text() and not w.unlock_btn.isVisible()
+    w.close()
+
+
+def test_window_does_not_close_while_the_recorder_restarts(app: QApplication, tmp_path: Path,
+                                                           monkeypatch: pytest.MonkeyPatch) -> None:
+    import threading
+
+    release = threading.Event()
+    monkeypatch.setattr(base, "restart_recorder", lambda p, c: release.wait(5) and "Restarted.")
+    monkeypatch.setattr(QMessageBox_, "information", lambda *a, **k: None)
+    w = _window(app, tmp_path, admin=True)
+    w.restart_recorder()
+    w.restart_recorder()                                  # merged, not a second overlapping restart
+    assert w.busy_work() == ["restarting the recorder"]
+    w.close()
+    assert w.isVisible()                                  # refused
+    release.set()
+    _drain(app, 0.5)
+    w.close()
+    assert not w.isVisible()
+
+
+def test_save_keeps_a_backup_and_never_moves_the_live_file(tmp_path: Path) -> None:
+    TEXT = '[camera]' + chr(10) + 'id = "C"' + chr(10)
+    p = tmp_path / "sentinel.toml"
+    p.write_text(TEXT, encoding="utf-8")
+    from sentinel.gui.app.configedit import ConfigEditError, save_sections
+
+    with pytest.raises(ConfigEditError):                  # invalid: nothing written, original intact
+        save_sections(p, {"motion": {"keep_recording_s": 1}})
+    assert p.read_text(encoding="utf-8") == TEXT and not list(tmp_path.glob("*.bak"))
+
+
+def test_rtsps_camera_stays_rtsps(app: QApplication, tmp_path: Path) -> None:
+    w = _window(app, tmp_path, admin=True)
+    page = w.pages["camera"]
+    page.secure.setChecked(True)
+    assert page.tables()["camera"]["url"].startswith("rtsps://")
+    w.close()
+
+
+def test_status_buttons_are_restored_not_enabled(app: QApplication, tmp_path: Path) -> None:
+    w = _window(app, tmp_path, admin=False)
+    page = w.pages["drives"]
+    assert not page.erase_btn.isEnabled()
+    page.log.run([sys.executable, "-c", "print('ok')"], "test", busy=[page.erase_btn])
+    _drain(app, 3.0)
+    assert not page.erase_btn.isEnabled()                 # stays disabled for an operator
+    w.close()
+
+
+def test_refreshing_a_table_clears_the_selection(app: QApplication) -> None:
+    t = base.table(["A"])
+    base.fill(t, [["1"], ["2"]], ["d1", "d2"])
+    t.selectRow(1)
+    base.fill(t, [["1"], ["3"]], ["d1", "d3"])
+    assert base.selected_data(t) is None
+
+
+def test_storage_page_saves_erase_policy(app: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(base, "restart_recorder", lambda p, c: "Restarted.")
+    w = _window(app, tmp_path, admin=True)
+    page = w.pages["storage"]
+    page.erase_on.setChecked(True)
+    page.serial_chars.setValue(6)
+    page.save()
+    _drain(app, 0.3)
+    cfg = load_config(w.ctx.cfg_path)
+    assert cfg.drives.erase_enabled and cfg.drives.serial_confirm_chars == 6 and cfg.archive.enabled
+    w.close()
+
+
+def test_operator_can_request_an_archive_swap(app: QApplication, tmp_path: Path) -> None:
+    """Swapping the archive drive is an operator task: it works without administrator rights."""
+    w = _window(app, tmp_path, admin=False)
+    page = w.pages["drives"]
+    assert page.swap_btn.isEnabled() and page.resume_btn.isEnabled()
+    assert not page.erase_btn.isEnabled() and not page.eject_btn.isEnabled()
+    page._swap()
+    from sentinel.archive.worker import operator_request_dir
+
+    assert (operator_request_dir(w.ctx.cfg) / "swap.request").is_file()
+    assert "SAFE TO REMOVE" in page.log.toPlainText()
+    w.close()

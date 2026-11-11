@@ -179,6 +179,32 @@ class ExportLedger:
             return last[0]
         return None
 
+    def removed_sources(self, batch_id: str) -> list[str]:
+        """Segments that an unfinished item of this batch still has to read from this computer but that the
+        retention rule has removed since the batch was planned (review 2026-11-10). Such a batch can
+        never complete as planned; the engine plans the export again instead of failing with E-006."""
+        need: set[str] = set()
+        for it in self.query("SELECT kind, segment_id, sources FROM export_items WHERE batch_id=? AND state!=? "
+                             "AND kind!='document'", (batch_id, I_VERIFIED)):
+            if it["segment_id"]:
+                need.add(it["segment_id"])
+            if it["sources"]:
+                try:
+                    need.update(str(x) for x in json.loads(it["sources"]) or [])
+                except ValueError:
+                    continue
+        if not need:
+            return []
+        ids = sorted(need)
+        out: list[str] = []
+        for i in range(0, len(ids), 500):
+            chunk = ids[i:i + 500]
+            marks = ",".join("?" for _ in chunk)
+            out += [r["segment_id"] for r in self.query(
+                f"SELECT segment_id FROM segments WHERE segment_id IN ({marks}) AND local_deleted_utc IS NOT NULL "
+                f"ORDER BY rowid", tuple(chunk))]
+        return out
+
     def latest_complete_end(self, camera_id: str) -> str | None:
         rows = self.query("SELECT MAX(interval_end_utc) e FROM export_batches WHERE camera_id=? "
                           "AND purpose='review' AND state=?", (camera_id, B_COMPLETE))

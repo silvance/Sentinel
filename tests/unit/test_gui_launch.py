@@ -83,15 +83,3 @@ def test_opens_the_screen_after_the_first_heartbeat(tmp_path: Path, monkeypatch:
 def test_hide_own_console_leaves_a_shared_console_alone() -> None:
     # The test runner shares its console with its parent shell (or has none): never hidden.
     assert view.hide_own_console() is False
-
-
-def test_admin_pin_command_forwards_to_the_screen(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    import sentinel.gui.__main__ as gui_main
-
-    cfgfile = tmp_path / "sentinel.toml"
-    cfgfile.write_text("", encoding="utf-8")
-    seen: list[list[str]] = []
-    monkeypatch.setattr(gui_main, "main", lambda argv: seen.append(argv) or 0)
-    assert cli.main(["admin-pin", "--config", str(cfgfile)]) == 0
-    assert seen == [["--config", str(cfgfile.resolve()), "--set-admin-pin"]] or seen == [
-        ["--config", str(cfgfile), "--set-admin-pin"]]

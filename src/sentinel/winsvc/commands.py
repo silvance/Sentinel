@@ -15,7 +15,9 @@ ACLs use language-neutral ``*S-1-...`` SIDs so the same commands work on any Win
   secret; the operator GUI needs to find the status folder);
 * the local group "Sentinel Operators" (default; or Users if the owner chooses
   ``--status-readers users``): read on the status folder only (status.json + read-only ledger
-  snapshot). Nothing else.
+  snapshot), plus creating/deleting request files in its ``requests`` subfolder (operator
+  archive swap/resume requests; the folder itself cannot be deleted or renamed by them).
+  Nothing else.
 """
 
 from __future__ import annotations
@@ -196,6 +198,23 @@ def restrict_dir_steps(directory: Path, svc_sid: str, service_rights: str = "M",
     ]
 
 
+# Operator requests to the archive worker (swap.request / resume.request), inside the status folder.
+REQUESTS_SUBDIR = "requests"
+# The folder itself: list, traverse, read attributes/permissions, create files. No delete or rename of
+# the folder and no subfolders, so operators cannot remove it or plant anything but request files.
+REQUESTS_DIR_RIGHTS = "(RD,X,RA,REA,RC,S,WD)"
+
+
+def requests_dir_steps(requests: PureWindowsPath | Path, reader: str) -> list[Step]:
+    """Operators (the status readers) may create and delete request files in ``<status>\\requests``
+    (Modify, inherited by the files only). Must run AFTER the status folder restriction, whose
+    ``/reset`` makes every child inherit only. The status folder itself stays read-only for them;
+    SYSTEM, Administrators and the service keep the access inherited from the status folder."""
+    d = str(requests)
+    return [Step(f"Operators may leave archive swap requests in {d} (create/delete files there only)",
+                 ("icacls", d, "/grant", f"{reader}:{REQUESTS_DIR_RIGHTS}", f"{reader}:(OI)(IO)M", "/Q"))]
+
+
 def secret_file_acl_argv(path: Path, svc_sid: str, extra_read_sids: tuple[str, ...] = ()) -> tuple[str, ...]:
     """SYSTEM + Administrators full control, the service account read-only, nothing inherited."""
     grants = [f"{_sid(SID_SYSTEM)}:F", f"{_sid(SID_ADMINISTRATORS)}:F", f"{_sid(svc_sid)}:R"]
@@ -271,11 +290,13 @@ def install_plan(inp: InstallInputs, forbidden: Iterable[str] | None = None) -> 
         reader = OPERATORS_GROUP          # custom group names are not localised
     else:
         reader = _sid(SID_USERS)
+    requests = PureWindowsPath(inp.status_dir) / REQUESTS_SUBDIR
     steps.append(Step("Create the data, spool, log and status folders", action="make_dirs",
-                      params={"paths": [str(d) for d in (*inp.data_dirs, inp.status_dir)]}))
+                      params={"paths": [str(d) for d in (*inp.data_dirs, inp.status_dir, requests)]}))
     for d in inp.data_dirs:
         steps += restrict_dir_steps(d, sid, "M")
     steps += restrict_dir_steps(inp.status_dir, sid, "M", extra_grants=(f"{reader}:(OI)(CI)RX",))
+    steps += requests_dir_steps(requests, reader)
     steps.append(Step(f"Configuration folder {cfg_dir}: Administrators change, service and Users read",
                       ("icacls", str(cfg_dir), "/inheritance:r", "/grant:r",
                        f"{_sid(SID_SYSTEM)}:(OI)(CI)F", f"{_sid(SID_ADMINISTRATORS)}:(OI)(CI)F",

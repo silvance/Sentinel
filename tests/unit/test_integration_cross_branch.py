@@ -342,6 +342,7 @@ def test_archive_service_body_runs_worker_until_stopped_and_stops_cleanly_when_d
 
         def run(self, whole_process: bool) -> None:
             self.ran = whole_process
+            host.stop_cb()       # the SCM stops it (returning on its own is a failure, review 2026-11-10)
 
     events: list[str] = []
     d = base_config_dict(tmp_path)

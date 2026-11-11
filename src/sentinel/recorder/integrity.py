@@ -161,6 +161,9 @@ class IntegrityWorker:
             path = self.cfg.spool_path / seg["rel_path"]
             status = "ok"
             if not path.exists():
+                now_row = self.ledger.get_segment(seg["segment_id"])
+                if now_row is not None and now_row["local_deleted_utc"]:
+                    continue       # removed by retention after this batch was read: not missing
                 status = "missing"
             elif not self.platform.is_read_only(path):
                 status = "not_read_only"
@@ -215,8 +218,10 @@ class IntegrityWorker:
         return self.chain_report is not None and bool(self.chain_report.faults)
 
     def outstanding_audit_failures(self) -> int:
+        # Originals removed by retention are on archive drives: not an outstanding local failure
+        # (review 2026-11-10: a removal during an audit otherwise left V-001 on for good).
         rows = self.ledger.query("SELECT COUNT(*) n FROM segments WHERE audit_status IS NOT NULL "
-                                 "AND audit_status != 'ok'")
+                                 "AND audit_status != 'ok' AND local_deleted_utc IS NULL")
         return int(rows[0]["n"])
 
 

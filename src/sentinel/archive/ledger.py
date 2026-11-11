@@ -80,7 +80,12 @@ class ArchiveLedger:
     def _pending_where(self, drive_id: str | None) -> tuple[str, tuple[Any, ...]]:
         dc, dp = self._drive_clause(drive_id)
         kinds = ",".join(f"'{k}'" for k in MEDIA_KINDS)
-        sql = (f"s.camera_id=? AND s.state IN ('FINALIZED','INTERRUPTED','CORRUPT') AND s.sha256 IS NOT NULL AND ("
+        # A segment removed from this computer by the retention rule cannot be copied again, whatever
+        # happened to its archive copies (review 2026-11-10): it is never queued, so it can never turn
+        # into a permanent "local recording could not be read" alert (A-008). A lost last copy is
+        # reported by mark_lost (persistent A-006) instead.
+        sql = (f"s.camera_id=? AND s.state IN ('FINALIZED','INTERRUPTED','CORRUPT') AND s.sha256 IS NOT NULL "
+               f"AND s.local_deleted_utc IS NULL AND ("
                f"NOT EXISTS (SELECT 1 FROM archive_copies a WHERE a.segment_id=s.segment_id AND a.kind IN ({kinds}){dc})"
                f" OR (s.framehash_rel_path IS NOT NULL AND s.framehash_sha256 IS NOT NULL AND NOT EXISTS ("
                f"SELECT 1 FROM archive_copies a WHERE a.segment_id=s.segment_id AND a.kind='{KIND_FRAMEHASH}'{dc})))")
@@ -128,13 +133,15 @@ class ArchiveLedger:
     def backlog(self, drive_id: str | None = None) -> Backlog:
         """``drive_id`` None: what is not verified on ANY archive drive (the operator's "Not yet
         archived" — footage that exists only on this system). With a drive: the work queue for that
-        drive under the resume policy. LOST copies do not count."""
+        drive under the resume policy. LOST copies do not count. Segments already removed from this
+        computer are not counted: they are not on this system and cannot be copied."""
         dc, dp = self._drive_clause(drive_id)
         kinds = ",".join(f"'{k}'" for k in MEDIA_KINDS)
         media = self.ledger.query(
             f"SELECT COUNT(*) n, COALESCE(SUM(s.duration_s),0) d, COALESCE(SUM(s.size_bytes),0) b, MIN(s.rowid) r "
             f"FROM segments s WHERE s.camera_id=? AND s.state IN ('FINALIZED','INTERRUPTED','CORRUPT') "
-            f"AND s.sha256 IS NOT NULL AND NOT EXISTS (SELECT 1 FROM archive_copies a WHERE a.segment_id=s.segment_id "
+            f"AND s.sha256 IS NOT NULL AND s.local_deleted_utc IS NULL "
+            f"AND NOT EXISTS (SELECT 1 FROM archive_copies a WHERE a.segment_id=s.segment_id "
             f"AND a.kind IN ({kinds}){dc})", (self.camera_id, *dp))[0]
         oldest = None
         if media["r"] is not None:
@@ -142,7 +149,7 @@ class ArchiveLedger:
             oldest = o[0]["start_utc"] if o else None
         side = self.ledger.query(
             f"SELECT COUNT(*) n FROM segments s WHERE s.camera_id=? AND s.framehash_rel_path IS NOT NULL "
-            f"AND s.framehash_sha256 IS NOT NULL AND NOT EXISTS (SELECT 1 FROM archive_copies a "
+            f"AND s.framehash_sha256 IS NOT NULL AND s.local_deleted_utc IS NULL AND NOT EXISTS (SELECT 1 FROM archive_copies a "
             f"WHERE a.segment_id=s.segment_id AND a.kind='{KIND_FRAMEHASH}'{dc})", (self.camera_id, *dp))[0]
         return Backlog(int(media["n"]), float(media["d"] or 0.0), int(media["b"] or 0), oldest, int(side["n"]))
 
@@ -264,10 +271,23 @@ class ArchiveLedger:
                             "VALUES (?,?,?,?,?,?)", (row["drive_id"], "lost", row["segment_id"], row["path"],
                                                      reason[:1000], now))
             self.ledger.chain_insert(c, "archive_problems", int(cur.lastrowid or 0))
-            self.ledger._event_in(c, _spec("error", "archive_copy_lost", "An archived copy is missing or damaged on its "
-                                      "archive drive; it will be copied again",
+            seg = c.execute("SELECT local_deleted_utc FROM segments WHERE segment_id=?", (row["segment_id"],)).fetchone()
+            if seg is not None and seg["local_deleted_utc"]:
+                # (review 2026-11-10) the local original was already removed by the retention rule, so
+                # the copy cannot be made again from this computer: say so instead of "copied again".
+                others = c.execute("SELECT COUNT(*) n FROM archive_copies WHERE segment_id=? AND kind=? AND "
+                                   "state='VERIFIED' AND copy_id!=?", (row["segment_id"], row["kind"], copy_id)
+                                   ).fetchone()["n"]
+                msg = ("An archived copy is missing or damaged on its archive drive. The recording was already "
+                       "removed from this computer, so it cannot be copied again" +
+                       ("; another archive drive still holds a checked copy" if others else
+                        "; no other checked copy is recorded"))
+            else:
+                msg = "An archived copy is missing or damaged on its archive drive; it will be copied again"
+            self.ledger._event_in(c, _spec("error", "archive_copy_lost", msg,
                                       {"copy_id": copy_id, "drive_id": row["drive_id"], "path": row["path"],
-                                       "reason": reason}))
+                                       "reason": reason, "segment_id": row["segment_id"],
+                                       "removed_from_this_computer": bool(seg is not None and seg["local_deleted_utc"])}))
 
     @retry_locked
     def sync_sessions(self, present: set[str], keep_open: bool, swapped: str | None = None) -> None:

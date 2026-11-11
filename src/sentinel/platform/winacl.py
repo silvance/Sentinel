@@ -526,12 +526,20 @@ def set_dacl(path: Path, sddl: str) -> None:
             raise AclError(rc, f"SetNamedSecurityInfo({path}) failed (Windows error {rc})")
 
 
-def write_private_file(path: Path, data: bytes, user_sid: str | None = None) -> None:
+def write_private_file(path: Path, data: bytes, user_sid: str | None = None,
+                       extra_read_sids: tuple[str, ...] = ()) -> None:
     """Create a NEW file readable only by this account/SYSTEM/Administrators and write ``data``.
+    ``extra_read_sids`` (e.g. the recorder service) also get read-only access, from creation.
+    The handle is not shared (share mode 0), so nobody else can open the file while it is written.
 
     Fails if the file exists (CREATE_NEW): callers write a temporary name and rename it."""
     ctypes, wintypes, adv, k32 = _api()
-    with _SecurityAttributes(private_sddl(user_sid or current_user_sid(), inheritable=False)) as sa:
+    sddl = private_sddl(user_sid or current_user_sid(), inheritable=False)
+    for s in extra_read_sids:
+        if not re.fullmatch(r"S-1-[0-9-]+", s):
+            raise AclError(f"not a SID: {s!r}")
+        sddl += f"(A;;FR;;;{s})"
+    with _SecurityAttributes(sddl) as sa:
         handle = k32.CreateFileW(str(path), GENERIC_WRITE, 0, ctypes.byref(sa.sa), CREATE_NEW,
                                  FILE_ATTRIBUTE_NORMAL, None)
         if handle in (None, wintypes.HANDLE(-1).value):

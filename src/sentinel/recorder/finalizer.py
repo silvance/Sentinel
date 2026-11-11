@@ -22,7 +22,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from ..clock import iso_utc
+from ..clock import iso_utc, parse_iso_utc
 from ..config import AppConfig
 from ..db import EventSpec, InternalGap, Ledger
 from ..hashing import sha256_file
@@ -73,13 +73,20 @@ class Finalizer:
         self.sealed_count = 0
 
     # ------------------------------------------------------------------ queue
+    @staticmethod
+    def _key(job: SegmentJob | GapJob) -> str:
+        return job.segment_id if isinstance(job, SegmentJob) else f"gap:{job.run_id}"
+
     def submit(self, job: SegmentJob | GapJob) -> None:
-        if isinstance(job, SegmentJob):
-            with self._qlock:
-                if job.segment_id in self._queued:
-                    return
-                self._queued.add(job.segment_id)
+        with self._qlock:
+            if self._key(job) in self._queued:
+                return
+            self._queued.add(self._key(job))
         self._q.put(job)
+
+    def gap_queued(self, run_id: str) -> bool:
+        with self._qlock:
+            return f"gap:{run_id}" in self._queued
 
     def is_queued(self, segment_id: str) -> bool:
         with self._qlock:
@@ -138,9 +145,9 @@ class Finalizer:
             except Exception:
                 log.exception("could not record finalize failure")
         finally:
-            if isinstance(job, SegmentJob):
+            if isinstance(job, (SegmentJob, GapJob)):
                 with self._qlock:
-                    self._queued.discard(job.segment_id)
+                    self._queued.discard(self._key(job))
 
     def has_recent_errors(self, window_s: float = 300.0) -> bool:
         cutoff = time.monotonic() - window_s
@@ -386,5 +393,17 @@ class Finalizer:
                 start, basis, prev = latest["end_utc"], "segment_end", latest["segment_id"]
             else:
                 start, basis, prev = run["launched_utc"], "run_launch", None
+            # A gap closed after that footage (a planned pause that ended) already covers the time
+            # up to its end: this failure's gap starts there (review 2026-11-10).
+            gap_end = self.ledger.latest_gap_end(cam)
+            if gap_end is not None and start is not None and parse_iso_utc(gap_end) > parse_iso_utc(start):
+                start, basis = gap_end, "previous_gap_end"
         gap_id = self.ledger.begin_gap(cam, start, job.reason, prev, job.run_id, basis, job.detail)
         log.warning("recording gap open (gap %d) from %s, reason %s", gap_id, start, job.reason)
+        # Recorded late (a retry after a failed attempt, or startup recovery): footage from a later
+        # run may already exist; the gap ends there, it must not span that footage (review 2026-11-10).
+        later = self.ledger.first_footage_after_run(cam, job.run_id, start) if start else None
+        if later is not None:
+            closed = self.ledger.close_gap(cam, later["start_utc"], later["segment_id"], later["run_id"])
+            if closed is not None:
+                log.warning("recording gap %d closed at existing later footage %s", gap_id, later["start_utc"])

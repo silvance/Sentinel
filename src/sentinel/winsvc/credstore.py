@@ -1,7 +1,10 @@
 """Write the DPAPI-protected camera credentials file (``set-camera-credentials``).
 
 Order of operations, so the secret is never on disk with a wide ACL and never half-written:
-1. create an empty temporary file next to the target;
+1. create an empty temporary file next to the target, already private (this account, SYSTEM,
+   Administrators; nothing inherited; not shared while open), never with the folder's ACL,
+   which on an installed service grants Users read (review 2026-11-10: a local user could
+   otherwise open the empty file before step 2 and later read the secret through that handle);
 2. restrict its ACL (SYSTEM, Administrators, service account) with ``icacls``;
 3. write the protected blob into it and flush it to disk;
 4. read it back through :func:`sentinel.credentials.load_credentials` and compare;
@@ -14,6 +17,7 @@ from __future__ import annotations
 import base64
 import os
 import subprocess
+import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
@@ -40,12 +44,18 @@ def write_protected_credentials(path: Path, username: str, password: str, *, sco
                                 acl_argv: Callable[[Path], Sequence[str]] | None = None,
                                 run: Runner = _default_runner) -> None:
     """``acl_argv(tmp_path)`` returns the icacls command restricting the file (None = keep the
-    inherited ACL, for development only)."""
+    inherited ACL, for development only). With ``acl_argv`` on Windows the temporary file is
+    created private, so no other account can open it before ``icacls`` runs."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     tmp.unlink(missing_ok=True)
-    tmp.touch()
+    if acl_argv is not None and sys.platform == "win32":
+        from ..platform import winacl
+
+        winacl.write_private_file(tmp, b"")     # private from creation (review 2026-11-10)
+    else:
+        tmp.touch()                             # development only (--no-acl): keeps the folder's ACL
     try:
         if acl_argv is not None:
             argv = list(acl_argv(tmp))

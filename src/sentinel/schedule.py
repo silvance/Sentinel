@@ -137,7 +137,11 @@ def _datetime(value: Any, where: str, is_end: bool) -> datetime:
     except ValueError:
         raise ScheduleError(f"{where}: {value!r} is not a real date") from None
     if m[4] is None:                          # date alone: start of the day, or (end) the end of that day
-        return datetime.combine(d + timedelta(days=1) if is_end else d, datetime.min.time())
+        try:
+            return datetime.combine(d + timedelta(days=1) if is_end else d, datetime.min.time())
+        except OverflowError:                 # review 2026-11-10: 9999-12-31 crashed config loading
+            raise ScheduleError(f"{where}: {value!r} is too far in the future; use a date before 9999-12-31, "
+                                "or a weekly period for 'always'") from None
     secs = _seconds(f"{m[4]}:{m[5]}:{m[6] or '00'}", where, allow_24=is_end)
     return datetime.combine(d, datetime.min.time()) + timedelta(seconds=secs)
 
@@ -242,8 +246,11 @@ def _check_conflicts(cfg: ScheduleConfig) -> None:
                                     f"({p.action} / {q.action})")
     if not cfg.enabled:
         return
-    # Would it ever record? (weekly coverage, ignoring dates that can only add "record" time)
-    if any(d.action != PAUSE for d in cfg.dates):
+    # Would it ever record? (weekly coverage, ignoring dates that can only add "record" time).
+    # Only date periods that have not ended yet count (review 2026-11-10: a long-expired
+    # holiday "record" date made a never-recording schedule pass).
+    today = datetime.now()
+    if any(d.action != PAUSE and d.end > today for d in cfg.dates):
         return
     pause = _merge([(s, e) for s, e, a, _ in flat if a == PAUSE])
     record = [(s, e) for s, e, a, _ in flat if a != PAUSE]
@@ -315,6 +322,29 @@ class RecordingSchedule:
     def _local_epoch(self, naive: datetime) -> float:
         return naive.replace(tzinfo=self.tz).timestamp()
 
+    def _local_epochs(self, naive: datetime) -> set[float]:
+        """Both instants of a wall-clock time (an autumn repeated hour has two)."""
+        return {naive.replace(tzinfo=self.tz, fold=f).timestamp() for f in (0, 1)}
+
+    def _offset_changes(self, start: float, end: float) -> set[float]:
+        """Instants in [start, end] where the time zone's UTC offset changes (DST switches)."""
+        out: set[float] = set()
+
+        def off(t: float) -> Any:
+            return datetime.fromtimestamp(t, self.tz).utcoffset()
+
+        t = start
+        while t < end:
+            nxt = min(t + DAY, end)
+            if off(t) != off(nxt):
+                lo, hi = t, nxt
+                while hi - lo > 1.0:
+                    mid = (lo + hi) / 2
+                    lo, hi = (mid, hi) if off(mid) == off(lo) else (lo, mid)
+                out.add(float(int(hi)))
+            t = nxt
+        return out
+
     def _candidates(self, epoch: float, horizon_days: int) -> list[float]:
         """Moments the decision may change: date period edges, and weekly edges for the next
         8 days from now and from the end of every date period (weekly plans repeat each week)."""
@@ -338,9 +368,12 @@ class RecordingSchedule:
                 day = day0 + timedelta(days=k)
                 monday = day - timedelta(days=day.weekday())
                 for b in self._week_bounds:
-                    t = self._local_epoch(monday + timedelta(seconds=b))
-                    if t > epoch:
-                        out.add(t)
+                    # both instants of a repeated autumn hour (review 2026-11-10)
+                    for t in self._local_epochs(monday + timedelta(seconds=b)):
+                        if t > epoch:
+                            out.add(t)
+            # a DST switch can itself change the decision (the clock jumps into or out of a period)
+            out.update(t for t in self._offset_changes(base, base + 9 * DAY) if t > epoch)
         return sorted(out)
 
     def next_change(self, epoch: float, horizon_days: int = 400) -> float | None:

@@ -257,6 +257,24 @@ class Planner:
                 warnings.append({"code": "footage_only_on_archive_drive", "segment_ids": [g["segment_id"] for g in gone],
                                  "message": "Some recordings in this period are kept only on archive drives and are "
                                             "not on this review drive.", "seconds": None})
+        if prev_end is not None:
+            # (review 2026-11-10) Late segments (completed after an earlier export had passed their time)
+            # that the retention rule removed before any export took them: lie before this interval, so
+            # the warning above misses them. Named once, in the first export after their removal.
+            late_gone = self._rows(f"SELECT segment_id, start_utc, end_utc FROM segments s WHERE s.camera_id=? AND "
+                                   f"s.state IN ({marks}) AND (s.start_utc IS NULL OR s.start_utc < ?) AND "
+                                   f"s.local_deleted_utc IS NOT NULL AND {not_anywhere} ORDER BY s.rowid",
+                                   (cam, *TERMINAL, prev_end, I_VERIFIED, B_COMPLETE))
+            named = self._named_as_archive_only()
+            late_gone = [g for g in late_gone if g["segment_id"] not in named]
+            if late_gone:
+                warnings.append({"code": "late_footage_only_on_archive_drive",
+                                 "segment_ids": [g["segment_id"] for g in late_gone],
+                                 "periods": [{"start_utc": g["start_utc"], "end_utc": g["end_utc"]} for g in late_gone],
+                                 "message": "Some recordings that were completed after an earlier export (for example "
+                                            "after a restart) were removed from this computer before they could be "
+                                            "exported. They are kept only on archive drives and are not on this "
+                                            "review drive.", "seconds": None})
         all_gaps = self._rows("SELECT * FROM recording_gaps WHERE camera_id=? ORDER BY gap_id", (cam,))
         late_ids = {s["segment_id"] for s in late}
 
@@ -364,6 +382,21 @@ class Planner:
         return Plan(cam, start, end, items_out, group_meta, gaps, coverage, warnings,
                     planned_bytes=sum(i.planned_bytes for i in items_out), segments=snap,
                     motion=self._motion(cam, group_meta))
+
+    def _named_as_archive_only(self) -> set[str]:
+        """Segment ids already named as 'kept only on archive drives' by a COMPLETE export."""
+        out: set[str] = set()
+        for r in self._rows("SELECT plan FROM export_batches WHERE camera_id=? AND purpose='review' AND state=?",
+                            (self.camera_id, B_COMPLETE)):
+            try:
+                plan = json.loads(r["plan"] or "{}")
+            except ValueError:
+                continue
+            for w in plan.get("warnings") or []:
+                if isinstance(w, dict) and w.get("code") in ("footage_only_on_archive_drive",
+                                                             "late_footage_only_on_archive_drive"):
+                    out.update(str(x) for x in w.get("segment_ids") or [])
+        return out
 
     def _motion(self, cam: str, groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Motion periods (recording-log events ``motion_period``) overlapping the exported videos,

@@ -38,7 +38,9 @@ recording outside set hours and motion markers for reviewers in the export summa
 Anything on the real camera, real removable drives, an administrator service install, Linux
 (except a WSL build), or Python 3.12; the operator screen cannot yet start
 an export (needs a request interface to the service; a technician can run `Sentinel.exe export run`).
-The repository has no LICENSE file yet (pyproject.toml says Apache-2.0; the owner must confirm). The operator screen is bundled in the build
+The repository has no LICENSE file yet (pyproject.toml says Apache-2.0; the owner must confirm).
+The sources and notices of the libraries linked into the bundled FFmpeg are not archived yet, so a
+build must not leave the organisation until docs/08 §8.7 is done (review 2026-11-10). The operator screen is bundled in the build
 (2026-11-10) but has not been looked at on a real display from the built program yet.
 
 ## Click-to-run program (branch design/single-executable)

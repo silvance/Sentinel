@@ -11,9 +11,10 @@ Technician / support commands (same executable):
     Sentinel.exe set-camera [--config FILE]            add or change the camera on site
     Sentinel.exe recorder run [--config FILE]          run the recorder in this window
     Sentinel.exe archive run|swap|resume|status|designate ... --config FILE   archive-drive copy
-    Sentinel.exe admin-pin [--config FILE]             set the operator screen's administrator PIN
     Sentinel.exe export run --config FILE --target DRIVE   export new recordings to a review drive
     Sentinel.exe drives list|classify|prepare|eject ...  identify and prepare drives (administrator)
+    Sentinel.exe ledger head|verify [--check-files] [--expect-head SEQ:HASH] [--config FILE]
+                                                       recording-log chain head / tamper check (administrator)
     Sentinel.exe motion-test [--seconds N]             show what counts as motion (tune [motion])
     Sentinel.exe stop [--timeout S] [--config FILE]    graceful stop of the background recorder
     Sentinel.exe status [--json] | check-config | diagnostics [--out DIR] | schedule [--days N]
@@ -45,7 +46,7 @@ from ..platform import InstanceLockError, get_platform
 from . import setcamera, stopsignal
 from .control import select_control
 from .setup import SetupError, interactive_setup, write_setup
-from .view import alert_banner, select_view, set_console_title
+from .view import alert_banner, gui_available, hide_own_console, select_view, set_console_title
 
 log = logging.getLogger("sentinel.launcher")
 
@@ -93,6 +94,14 @@ def cmd_launch(args: argparse.Namespace) -> int:
     layout = default_layout()
     cfg_path = _resolve(args.config)
     if cfg_path is None or not cfg_path.exists():
+        if not args.once and gui_available():
+            # Owner request 2026-11-10: set up in the window, not with console questions.
+            from ..gui.__main__ import run_setup_window
+
+            hide_own_console()
+            # No log folder yet: creating one now would make the data folder before setup can
+            # make it private. Problems are shown in the window instead.
+            return run_setup_window(on_configured=_start_after_setup, target=_setup_target(args.config))
         print(alert_banner("C-002"))
         if args.once or not _interactive():
             return EXIT_CONFIG
@@ -177,6 +186,25 @@ def cmd_launch(args: argparse.Namespace) -> int:
     view = select_view(cfg)
     return view.run(cfg.status_path, cfg.camera.name, started_after=started_after,
                     once=args.once, start_problem=start_problem)
+
+
+def _start_after_setup(cfg, cfg_path: Path) -> str | None:  # noqa: ANN001
+    """After setup in the window: start the recorder (as the console setup + launch would).
+    Returns why it was not started, for the window to show (None = started)."""
+    problems = location_problems(cfg_path, cfg) + check_tools(cfg)
+    if problems:
+        for p in problems:
+            log.error("not starting the recorder after setup: %s", p)
+        return "; ".join(problems)
+    control = select_control(cfg_path, cfg)
+    if not control.is_running():
+        result = control.start()
+        log.info("start after setup via %s: ok=%s %s", control.name, result.ok, result.detail)
+        if not result.ok:
+            return f"the recorder could not be started ({result.code}): {result.detail}"
+    if hasattr(control, "start_archive"):
+        control.start_archive()
+    return None
 
 
 def _setup_target(explicit: str | None) -> Path:
@@ -270,6 +298,23 @@ def cmd_forward(args: argparse.Namespace, extra: list[str]) -> int:
     return service_main([args.cmd, "--config", str(cfg_path), *extra])
 
 
+def cmd_ledger(rest: list[str]) -> int:
+    """``Sentinel ledger head|verify ...`` -> ``sentinel.ledgerchain`` (review 2026-11-10: the deployed
+    build has no Python, so the chain head for the custody form needs a Sentinel command).
+    ``--config`` defaults to the configuration ``about`` shows."""
+    from ..ledgerchain import main as ledger_main
+
+    has_config = any(a == "--config" or a.startswith("--config=") for a in rest)
+    sub_cmd = next((a for a in rest if not a.startswith("-")), None)
+    if sub_cmd in ("head", "verify") and not has_config:
+        cfg_path = _resolve(None)
+        if cfg_path is None or not cfg_path.exists():
+            print("No configuration file found (run 'setup' first, or pass --config FILE).")
+            return 2
+        rest = [*rest, "--config", str(cfg_path)]
+    return ledger_main(rest, prog="Sentinel ledger")
+
+
 def read_manifest(folder: Path | None) -> dict | None:
     if folder is None:
         return None
@@ -323,6 +368,12 @@ def cmd_about(args: argparse.Namespace) -> int:
             print("!" * 72)
         else:
             print(f"FFmpeg licence:  {status}")
+        lic = manifest.get("third_party_licences") or {}
+        if lic.get("notices_complete") is False:
+            # Review 2026-11-10: notices/sources of the libraries in FFmpeg or Qt were missing at build time.
+            print("!! Licence notices incomplete - do not give this folder to anyone outside the organisation:")
+            for problem in lic.get("notices_problems") or ["see licences/THIRD-PARTY-NOTICES.txt"]:
+                print(f"!!   {problem}")
         if args.verify and folder is not None:
             bad = verify_manifest(folder, manifest)
             print("installed files match the build manifest" if not bad else "FILES DIFFER FROM THE BUILD MANIFEST:")
@@ -355,13 +406,15 @@ def build_parser() -> argparse.ArgumentParser:
                    help="set up everything except the camera now; add it on site with 'set-camera'")
     p = add("set-camera", "add or change the camera on site (technician)")
     setcamera.add_arguments(p)
-    p = add("admin-pin", "set the administrator PIN of the operator screen (technician)")
     arc = sub.add_parser("archive", help="archive-drive copy commands (run, swap, resume, status, designate, ...)")
     arc.add_argument("archive_args", nargs=argparse.REMAINDER)
     exp = sub.add_parser("export", help="review-drive export commands (run, verify-content, status; technician)")
     exp.add_argument("export_args", nargs=argparse.REMAINDER)
     drv = sub.add_parser("drives", help="drive tools: list, classify, prepare, eject (administrator)")
     drv.add_argument("drives_args", nargs=argparse.REMAINDER)
+    led = sub.add_parser("ledger", help="recording-log chain: 'head' to write down, 'verify' before a hand-over "
+                                        "(administrator)")
+    led.add_argument("ledger_args", nargs=argparse.REMAINDER)
     rec = sub.add_parser("recorder", help="recorder process commands")
     rec_sub = rec.add_subparsers(dest="recorder_cmd", required=True)
     run = rec_sub.add_parser("run", help="run the recorder in the foreground")
@@ -384,6 +437,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:1] == ["ledger"]:   # forwarded whole, so "ledger --help" / "ledger --config X head" work too
+        return cmd_ledger(argv[1:])
     args = build_parser().parse_args(argv or ["launch"])
     if args.cmd == "launch":
         return cmd_launch(args)
@@ -400,14 +455,6 @@ def main(argv: list[str] | None = None) -> int:
             return setcamera.set_camera(cfg_path, test=not args.no_test, restart=not args.no_restart)
         finally:
             _pause()
-    if args.cmd == "admin-pin":
-        cfg_path = _resolve(args.config)
-        if cfg_path is None:
-            print("No configuration file found (run 'setup' first).")
-            return EXIT_CONFIG
-        from ..gui.__main__ import main as gui_main
-
-        return gui_main(["--config", str(cfg_path), "--set-admin-pin"])
     if args.cmd == "archive":
         from ..archive.__main__ import main as archive_main
 
@@ -420,6 +467,8 @@ def main(argv: list[str] | None = None) -> int:
         from ..drives.cli import main as drives_main
 
         return drives_main(list(args.drives_args))
+    if args.cmd == "ledger":
+        return cmd_ledger(list(args.ledger_args))
     if args.cmd == "stop":
         return cmd_stop(args)
     if args.cmd == "about":

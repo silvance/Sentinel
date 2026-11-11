@@ -1,7 +1,7 @@
 """The GUI next to a real recording (RecorderService + FFmpeg + SimulatedCamera).
 
 Requirement U6: closing or misusing the GUI cannot interrupt collection. Checked two ways:
-* in-process: open the real MainWindow on the running recorder's data, refresh, close it;
+* in-process: open the real Sentinel window on the running recorder's data, refresh, close it;
 * separate process (as deployed): start ``python -m sentinel.gui``, then close it hard (kill).
 In both cases segments keep being sealed, the status heartbeat stays fresh, and the run never ends.
 """
@@ -22,15 +22,14 @@ pytest.importorskip("PySide6")
 from conftest import base_config_dict, requires_ffmpeg  # noqa: E402
 from gui_support import write_toml  # noqa: E402
 from harness import Harness, wait_for  # noqa: E402
-from sentinel.gui.window import prepare_qt_environment  # noqa: E402
+from sentinel.gui.__main__ import prepare_qt_environment  # noqa: E402
 from sentinel.sim.camera import SimulatedCamera  # noqa: E402
 
 prepare_qt_environment()
 
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
-from sentinel.gui.theme import LIGHT  # noqa: E402
-from sentinel.gui.window import MainWindow  # noqa: E402
+from sentinel.gui.app.window import AppWindow  # noqa: E402
 
 pytestmark = [pytest.mark.integration, requires_ffmpeg]
 ROOT = Path(__file__).resolve().parents[2]
@@ -63,7 +62,7 @@ def test_closing_gui_window_leaves_recording_running(tmp_path: Path, cam: Simula
     try:
         h.wait_sealed(2, timeout=40)
         wait_for(lambda: h.status().get("overall") == "RECORDING", 15, what="RECORDING")
-        win = MainWindow(h.cfg, LIGHT, export_available=False)       # auto refresh on (2 s timer)
+        win = AppWindow(h.cfg, None, admin=False, appearance="light")     # auto refresh on
         win.resize(1366, 768)
         win.show()
         deadline = time.monotonic() + 5
@@ -74,8 +73,9 @@ def test_closing_gui_window_leaves_recording_running(tmp_path: Path, cam: Simula
         assert v is not None and not v.stale and v.headline == "Recording normally"
         assert v.test_camera is not None and v.test_camera.code == "Z-001"   # simulated camera is flagged
         assert v.camera.value == "Connected"
-        win.show_timeline()
-        win.show_exports()
+        for key in ("recordings", "export", "system", "status"):
+            win.navigate(key)
+            app.processEvents()
         win.close()
         win.deleteLater()
         app.processEvents()

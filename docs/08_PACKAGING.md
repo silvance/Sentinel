@@ -18,6 +18,7 @@ Sentinel\                      copy this whole folder (e.g. to C:\Program Files\
     ffmpeg\ffmpeg.exe          bundled FFmpeg / FFprobe, used before anything on PATH
     ffmpeg\ffprobe.exe
     ffmpeg\LICENSE.txt ...     FFmpeg licence text, build readme, FFMPEG-LICENCE-NOTE.txt
+    licences\                  LGPL/GPL texts, THIRD-PARTY-NOTICES.txt, SOURCE-OFFER.txt, third-party\ (§8.7)
     BUILD-MANIFEST.json        what was built, from which commit, with SHA-256 of every file
     SHA256SUMS.txt             the same hashes in `sha256sum -c` format
 ```
@@ -196,12 +197,16 @@ Qt and PySide6 are LGPL-3.0-only. The wheels carry only Qt's commercial licence 
 writes `dist/Sentinel/licences/` itself (`packaging/licences_bundle.py`): LGPL-3.0 and GPL-3.0 texts
 (verbatim from gnu.org, committed in `packaging/licences/`), Python's licence (which carries the
 OpenSSL/libffi/SQLite notices), the bundled packages' own licence files, `THIRD-PARTY-NOTICES.txt`,
-and `SOURCE-OFFER.txt` naming the exact source archives of FFmpeg (git commit + BtbN build scripts),
-PySide6 and Qt, plus a three-year written offer. `--source-offer-contact "<unit, phone>"` puts the
-organisation's contact in the offer (default: generic wording). The Qt DLLs stay replaceable
-(LGPL-3.0 §4(d)(1)); `about --verify` would then report the changed files, which is intended.
+and `SOURCE-OFFER.txt` naming the exact source archives of FFmpeg (git commit or release tag; for a
+BtbN build also the build scripts and the libraries linked in), PySide6 and the Qt modules actually
+in the folder, plus a three-year written offer. `--source-offer-contact "<unit, phone>"` puts the
+organisation's contact in the offer (default: generic wording). The Qt DLLs **and the
+PySide6/shiboken6 Python files** stay replaceable (LGPL-3.0 §4(d)(1); the spec collects those
+packages as `.py` files in `_internal\` instead of sealing them inside `Sentinel.exe`, review
+2026-11-10); `about --verify` would then report the changed files, which is intended.
 Keep the source archives with each release: `python packaging/fetch_sources.py` downloads exactly the
-versions named in the build manifest into `third_party/sources/` (git-ignored) with SHA-256s.
+versions named in the build manifest into `third_party/sources/` (git-ignored) with SHA-256s, and
+collects their licence files for the next build (§8.7).
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File packaging\windows\build.ps1 -FfmpegDir <folder with ffmpeg.exe and ffprobe.exe>
@@ -210,8 +215,8 @@ powershell -ExecutionPolicy Bypass -File packaging\windows\build.ps1 -FfmpegDir 
 * Creates `.venv-build` and installs `requirements/build.txt` with `--require-hashes --no-deps`
   (PyInstaller 6.22.3, hooks-contrib 2026.10, altgraph, packaging, setuptools, pefile,
   pywin32-ctypes, tzdata 2025.2). Nothing is installed system-wide.
-* `packaging/build.py` refuses an uncommitted source tree (unless `--allow-dirty`, which the
-  manifest records), inspects the given FFmpeg (`-version`: version and configure flags →
+* `packaging/build.py` refuses an uncommitted source tree, untracked files included, and a tree
+  whose git commit cannot be read (unless `--allow-dirty`, which the manifest records), inspects the given FFmpeg (`-version`: version and configure flags →
   licence class; `--enable-nonfree` builds are refused), runs PyInstaller with
   `packaging/windows/sentinel.spec` (`PYTHONHASHSEED=0`, `SOURCE_DATE_EPOCH` = commit time), copies
   FFmpeg/FFprobe unchanged (copy verified by SHA-256) plus licence/readme files, and writes
@@ -363,7 +368,49 @@ tested on 9.0.1 and requires ≥ 6.0), 64-bit, LGPL variant. Options, in order o
   `packaging/fetch_sources.py` into `third_party/sources/` (FFmpeg commit d4070a14ce, BtbN scripts at
   the release tag, PySide6 6.11.3, qtbase/qtsvg/qttranslations 6.11.3; the Qt archives matched Qt's
   published md5sums). Copy that folder to the organisation's release archive; it is not on GitHub.
+  **Not yet complete (review 2026-11-10, §8.7):** the sources and notices of the ~115 libraries
+  that BtbN links statically into `ffmpeg.exe` were not archived and their notices were not shipped;
+  the build of 2026-11-10 must not be handed outside the organisation until §8.7 is done.
 * Suite and build results with this FFmpeg: see docs/INTEGRATION.md ("LGPL FFmpeg").
+
+### 8.7 Libraries inside the static FFmpeg, Qt plugins and notices (review 2026-11-10)
+A static BtbN build is not "just FFmpeg": its `configuration:` line enables dozens of external
+libraries that are linked into `ffmpeg.exe`/`ffprobe.exe` (libxml2, dav1d, aom, mp3lame, opus,
+libssh, srt, zmq, twolame, libbluray, gmp, opencore-amr, soxr, libass, fribidi, …; LGPL, MPL-2.0,
+BSD, MIT, ISC, Apache-2.0), plus the GCC/mingw-w64 runtimes. Handing the folder to another agency
+therefore needs (a) the source of each of those libraries at the pinned version, available for the
+offer's three years, and (b) their copyright/licence notices in the folder.
+
+What the tooling now does:
+* `licences/THIRD-PARTY-NOTICES.txt` and `SOURCE-OFFER.txt` name the libraries (from the
+  configure line), the FFmpeg licence actually detected (a `--allow-gpl-internal-use` build is
+  labelled GPL, internal use only), the BtbN release only for a BtbN build, and the Qt modules
+  whose files are really in the folder (`qtimageformats` when its plugins are present).
+* `python packaging/fetch_sources.py` (needs network; **not run at review time**) reads every
+  `scripts.d/*.sh` of the archived BtbN scripts, and downloads each library pinned for the LGPL
+  variant at its commit (GitHub/GitLab/googlesource tarballs; `git`/`svn` for the rest; a
+  superset, since scripts for other targets are included). It copies every archive's licence
+  files (top level, `LICENSES/`, and Qt's `3rdparty/` + `qt_attribution.json`) into
+  `third_party/sources/notices/`. Anything it cannot fetch is listed in `SOURCES-MISSING.txt` and
+  it exits 1.
+* `build.py --notices-dir` (default `third_party/sources/notices`) copies those notices into
+  `licences/third-party/` when they were collected for the same FFmpeg and Qt. Otherwise the
+  build still completes, but prints "not ready to hand out", records
+  `third_party_licences.notices_complete = false` in the manifest, and `Sentinel about` prints
+  "Licence notices incomplete - do not give this folder to anyone outside the organisation".
+  The same happens if `opengl32sw.dll` or a sealed (non-replaceable) PySide6 is found.
+* The spec leaves out Qt files Sentinel never uses (`spec_common.EXCLUDE_BINARIES`):
+  `opengl32sw.dll` (Mesa llvmpipe, MIT + LLVM) and the `qtimageformats` plugins (TIFF, WebP, ICNS,
+  TGA, WBMP with bundled libtiff/libwebp). **Not yet built** with these spec changes: check after
+  the next build that `_internal\PySide6\__init__.py` exists, `opengl32sw.dll` and
+  `plugins\imageformats\qtiff.dll` do not, and the operator screen still opens.
+
+Release procedure: build → `fetch_sources.py` (all sources, exit 0) → build again (notices
+included, `about` without the warning) → copy `third_party/sources/` to the release archive.
+
+The simpler alternative remains §8.4 option 1: an FFmpeg we configure ourselves with no external
+libraries (Sentinel needs none of them, §8.2) has only FFmpeg's own LGPL source and notice to
+honour.
 
 Separately from copyright: H.264/HEVC are patent-encumbered formats; whether decoding them in
 this deployment needs a patent licence is outside engineering scope.
@@ -388,7 +435,13 @@ entry (`~/.local/share/applications/sentinel.desktop`, `Terminal=true`) and a de
   the bundled FFmpeg path changes per run (harmless: it is resolved at start). Prefer the folder
   until a target distribution is chosen.
 
-**Executed under WSL (Fedora 43, Python 3.14.5, glibc 2.42, no admin):** build from a clean clone
+**Not re-run since the licences bundle and the operator screen were added (review 2026-11-10).**
+Until then every Linux build failed after PyInstaller: Python's licence was looked for only in
+`sys.base_prefix`, while Linux Pythons install it with the standard library
+(`/usr/lib64/python3.X/LICENSE.txt`). Fixed (`licences_bundle.python_licence_candidates`, unit
+tested); a Linux build with the current tree has not been executed.
+
+**Executed under WSL (Fedora 43, Python 3.14.5, glibc 2.42, no admin), before those additions:** build from a clean clone
 in 9 s (66 files, 24.4 MB with Fedora's 0.6 MB dynamically linked FFmpeg 7.1.4, GPL-3.0 class);
 `about` 0.09–0.10 s; `about --verify` passed; with `PATH=/nonexistent` the frozen recorder used
 the bundled FFmpeg and sealed 15 segments in ~30 s from a local H.264 test source (Fedora's

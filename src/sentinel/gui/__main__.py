@@ -1,57 +1,32 @@
-"""Operator GUI entry point.
+"""Sentinel window entry point.
 
     python -m sentinel.gui --config <sentinel.toml> [--theme auto|light|dark] [--windowed]
-    python -m sentinel.gui --config <sentinel.toml> --set-admin-pin
 
-The GUI is a viewer only. Starting or closing it never starts, stops or signals the recorder.
+Opening or closing the window never starts or stops the recorder. Settings and actions in it need
+Windows administrator rights (see sentinel.gui.app).
 """
 
 from __future__ import annotations
 
 import argparse
-import getpass
+import os
 import sys
+from pathlib import Path
 
 from ..config import ConfigError, load_config
-from .admin_pin import PinError, admin_pin_dir, set_pin
 
 EXIT_OK, EXIT_CONFIG, EXIT_USAGE = 0, 2, 64
 
 
-def _set_pin(data_dir_cfg: str) -> int:
-    cfg = load_config(data_dir_cfg)
-    first = getpass.getpass("New administrator PIN (6-12 digits): ")
-    second = getpass.getpass("Repeat the PIN: ")
-    if first != second:
-        print("The two PINs do not match. Nothing was changed.", file=sys.stderr)
-        return EXIT_USAGE
-    try:
-        path = set_pin(admin_pin_dir(cfg), first)
-    except PinError as exc:
-        print(f"{exc} Nothing was changed.", file=sys.stderr)
-        return EXIT_USAGE
-    print(f"Administrator PIN set ({path}).")
-    return EXIT_OK
-
-
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(prog="sentinel-gui", description="Sentinel operator screen (read-only viewer)")
+    ap = argparse.ArgumentParser(prog="sentinel-gui", description="Sentinel window")
     ap.add_argument("--config", required=True, help="path to the recorder's TOML configuration")
     ap.add_argument("--theme", choices=("auto", "light", "dark"), default=None,
-                    help="display for this session only (default: the user's remembered choice, "
+                    help="appearance for this session only (default: the user's remembered choice, "
                          "else Follow Windows)")
     ap.add_argument("--windowed", action="store_true", help="start in a window instead of maximised")
-    ap.add_argument("--set-admin-pin", action="store_true", help="set the administrator PIN and exit")
     args = ap.parse_args(argv)
-
-    if args.set_admin_pin:
-        try:
-            return _set_pin(args.config)
-        except ConfigError as exc:
-            print(f"configuration error: {exc}", file=sys.stderr)
-            return EXIT_CONFIG
-
-    app = _app()
+    app = _app(args.theme)
     try:
         cfg = load_config(args.config)
     except ConfigError as exc:
@@ -59,34 +34,60 @@ def main(argv: list[str] | None = None) -> int:
 
         print(f"configuration error: {exc}", file=sys.stderr)
         QMessageBox.critical(None, "Sentinel",
-                             "The Sentinel screen cannot start because its settings could not be read.\n\n"
-                             "Recording is not affected by this screen. Contact technical support.")
+                             f"Sentinel cannot open because its settings could not be read:\n\n{exc}\n\n"
+                             "Recording is not affected by this window.")
         return EXIT_CONFIG
     return run_window(cfg, theme=args.theme, windowed=args.windowed, app=app)
 
 
-def _app():  # noqa: ANN202
-    from .window import prepare_qt_environment
+def prepare_qt_environment() -> None:
+    """Offscreen rendering on Windows has no font database unless pointed at the system fonts."""
+    if os.environ.get("QT_QPA_PLATFORM") == "offscreen" and sys.platform == "win32" \
+            and not os.environ.get("QT_QPA_FONTDIR"):
+        os.environ["QT_QPA_FONTDIR"] = str(Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts")
+
+
+def _app(appearance: str | None = None):  # noqa: ANN202
     prepare_qt_environment()
     from PySide6.QtWidgets import QApplication
 
-    from .window import apply_app_style
+    from .app import style
+    from .prefs import load_appearance
 
     app = QApplication.instance() or QApplication(sys.argv[:1])
     app.setApplicationName("Sentinel")
-    apply_app_style(app)  # type: ignore[arg-type]
+    style.apply(app, appearance or load_appearance())  # type: ignore[arg-type]
     return app
 
 
 def run_window(cfg, theme: str | None = None, windowed: bool = False, app=None) -> int:  # noqa: ANN001
-    """Open the operator screen for a loaded configuration and run until it is closed (also the
+    """Open the Sentinel window for a loaded configuration and run until it is closed (also the
     launcher's view: ``Sentinel.exe``)."""
-    app = app or _app()
-    from .window import MainWindow
+    app = app or _app(theme)
+    from pathlib import Path
 
-    win = MainWindow(cfg, appearance=theme)
-    if windowed:
-        win.resize(1366, 768)
+    from .app.window import AppWindow
+
+    win = AppWindow(cfg, Path(cfg.source_path) if cfg.source_path else None, appearance=theme)
+    return _show(app, win, windowed)
+
+
+def run_setup_window(on_configured=None, app=None, target=None) -> int:  # noqa: ANN001
+    """First run (no configuration yet): the window opens on "Set up this computer". ``target`` is
+    where the configuration is written (the launcher's --config / SENTINEL_CONFIG / default)."""
+    app = app or _app()
+    from .app.window import AppWindow
+
+    win = AppWindow(None, None, on_configured=on_configured, setup_target=target)
+    return _show(app, win, True)
+
+
+def _show(app, win, windowed: bool) -> int:  # noqa: ANN001
+    """The last size and position if remembered; otherwise maximised (or 1200x760 when windowed)."""
+    if win.restore_geometry():
+        win.show()
+    elif windowed:
+        win.resize(1200, 760)
         win.show()
     else:
         win.showMaximized()

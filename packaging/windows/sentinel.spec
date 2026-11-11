@@ -50,6 +50,7 @@ a = Analysis(
     runtime_hooks=[],
     excludes=common.EXCLUDES,
     noarchive=False,
+    module_collection_mode=common.MODULE_COLLECTION_MODE,   # PySide6 as replaceable .py files (LGPL)
     optimize=0,           # keep asserts and docstrings: the code relies on neither, but -O changes behaviour silently
 )
 pyz = PYZ(a.pure)
@@ -72,7 +73,8 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     version=version_info,
-    # icon=...               # no approved icon yet; add packaging/windows/sentinel.ico when one exists
+    # Neutral placeholder drawn by sentinel.gui.app.icons (write_ico); replace the file to rebrand.
+    icon=str(Path(SPECPATH) / "sentinel.ico") if (Path(SPECPATH) / "sentinel.ico").is_file() else None,
 )
 
 # Integration (design/windows-service recommendation (b), docs/INTEGRATION.md): the Windows
@@ -92,6 +94,7 @@ a_svc = Analysis(
     runtime_hooks=[],
     excludes=common.EXCLUDES,
     noarchive=False,
+    module_collection_mode=common.MODULE_COLLECTION_MODE,
     optimize=0,
 )
 pyz_svc = PYZ(a_svc.pure)
@@ -114,12 +117,13 @@ exe_svc = EXE(
     version=_version_info(common.SERVICE_EXE_NAME, "Sentinel recorder Windows service host"),
 )
 
+# Unused Qt binaries are left out (spec_common.EXCLUDE_BINARIES; licence set = source offer).
 coll = COLLECT(
     exe,
-    a.binaries,
+    common.filter_binaries(a.binaries),
     a.datas,
     exe_svc,
-    a_svc.binaries,
+    common.filter_binaries(a_svc.binaries),
     a_svc.datas,
     strip=False,
     upx=False,

@@ -13,7 +13,7 @@ network. Approval is the deploying organisation's decision.
 | Credentials redacted from every log line, traceback, ledger text, status file and diagnostic report | `credentials.redact`, `logging_setup` | `test_credentials_never_leak` (real FFmpeg error output) |
 | Credentials file must be 0600 and owned by the service account (Linux; startup refused otherwise) | `platform/posix.py`, `service.py` | **not executed** (Linux) |
 | Windows: credentials file DACL checked at startup — only SYSTEM, Administrators, the process's own account and `NT SERVICE\SentinelRecorder` may read/change/re-permission it; startup refused (C-001) otherwise. Read from the security descriptor as language-neutral SDDL, not localised `icacls` text | `platform/windows.py`, `platform/winacl.py`, `service.py` | `test_real_file_dacl_and_secret_file_problems` (real DACL, real `icacls` grant), SDDL parser tests on captured strings |
-| Windows: camera credentials protected with DPAPI (`CryptProtectData`, machine scope, application entropy) via ctypes; written by `python -m sentinel.winsvc set-camera-credentials` (getpass, never echoed or logged); ACL restricted *before* the secret is written; read back and compared before replacing the file. Plain TOML still accepted (Linux; Windows fallback with a logged warning) | `winsvc/dpapi.py`, `winsvc/credstore.py`, `credentials.py` | `tests/unit/test_dpapi_credentials.py` (real DPAPI round trips, user **and machine** scope, without admin) |
+| Windows: camera credentials protected with DPAPI (`CryptProtectData`, machine scope, application entropy) via ctypes; written by `SentinelService.exe set-camera-credentials` (built program; `python -m sentinel.winsvc set-camera-credentials` from source) (getpass, never echoed or logged); ACL restricted *before* the secret is written; read back and compared before replacing the file. Plain TOML still accepted (Linux; Windows fallback with a logged warning) | `winsvc/dpapi.py`, `winsvc/credstore.py`, `credentials.py` | `tests/unit/test_dpapi_credentials.py` (real DPAPI round trips, user **and machine** scope, without admin) |
 | Files created 0640 / directories 0750 (umask 027) | `platform/posix.py`, systemd `UMask=0027` | **not executed** (Linux) |
 | Windows equivalent of the umask: installer gives spool/data/log an inheritable ACL without inheritance from the parent — SYSTEM + Administrators full, service account modify, nobody else; the configuration folder: Administrators change, service + Users read; the credentials file: Administrators full, service read. Language-neutral `*S-1-…` SIDs. Refuses to re-permission drive roots and system/profile folders | `winsvc/commands.py` | generated commands unit-tested; `icacls` grants/reset **executed on a temp folder** (`test_generated_icacls_commands_execute_and_produce_the_intended_acl`); `/setowner` and the real install **not executed** (admin) |
 | Windows service runs as the virtual account `NT SERVICE\SentinelRecorder` (no password, no admin rights, own SID), with only `SeChangeNotifyPrivilege`; no network listener is added | `winsvc/commands.py` | **not executed** (admin) |
@@ -47,8 +47,11 @@ network. Approval is the deploying organisation's decision.
   hash-chained (next section): edits are detectable, not impossible. Someone who controls the
   machine can rebuild a self-consistent chain; that is exposed only by a chain head copied off
   the machine earlier. Signed export manifests remain recommended (docs/04).
-* **Supply chain.** Python dependencies are version-pinned but not yet hash-pinned; FFmpeg comes
-  from the distribution. Phase 6: `--require-hashes` requirements and a recorded FFmpeg build hash.
+* **Supply chain.** The build installs its Python dependencies hash-pinned (`requirements/build.txt`,
+  `--require-hashes`) and bundles a named LGPL FFmpeg (BtbN release, SHA-256 recorded in docs/08
+  §8.6 and of every shipped file in `BUILD-MANIFEST.json`). Remaining: the FFmpeg is a third-party
+  binary we did not build (docs/08 §8.4 option 1 is the auditable alternative), and the build
+  machine's Python and wheels are trusted as installed. (Updated at review 2026-11-10.)
 
 ## Ledger tamper evidence (hash chain)
 
@@ -95,7 +98,9 @@ The head `(sequence, hash, UTC)` is copied to:
 * every diagnostic report (`ledger_chain.json`, `summary.txt`, covered by the report's MANIFEST);
 * export manifests: `sentinel.ledgerchain.current_chain_head(ledger)` is the function the export
   branch should call and write into `Export_Manifest.json` (not done on this branch).
-* by hand: `python -m sentinel.ledgerchain head --config …` prints a head an administrator can
+* by hand: `Sentinel.exe ledger head` (Command Prompt **as administrator** in the program folder:
+  the data folder is service-only; `--config FILE` if not the installed one; from a source
+  checkout `python -m sentinel.ledgerchain head --config …`) prints a head an administrator can
   write down or photograph at each drive swap.
 
 What anchoring buys: once a head has been copied, any later rewrite of the log up to that entry
@@ -108,8 +113,8 @@ rewrite detectable. Rolling the database back to an older copy is exposed the sa
 head with a higher sequence number shows the end of the log was removed.
 
 ### Verification
-`python -m sentinel.ledgerchain verify --config sentinel.toml [--check-files] [--expect-head SEQ:HASH]`
-checks the log. It is read-only and safe while recording. Exit status: 0 = intact, 1 = altered,
+`Sentinel.exe ledger verify [--check-files] [--expect-head SEQ:HASH] [--config FILE]` (as administrator;
+from a source checkout `python -m sentinel.ledgerchain verify --config …`) checks the log. It is read-only and safe while recording. Exit status: 0 = intact, 1 = altered,
 2 = cannot check, 3 = intact with protection gaps. The integrity worker also runs it every
 `chain_verify_interval_s` (default 1 h; the first run is about 90 s after start):
 1. recompute every entry hash and link; first missing / reordered / edited entry is reported;
@@ -275,15 +280,15 @@ re-implements this with only `sqlite3`, `hashlib` and `json` and agrees with the
 - [ ] SSH disabled or restricted to administrators; no remote desktop.
 - [ ] Removable-drive filesystem approved (risk C1); drive preparation authority decided (docs/04 §4).
 - [ ] Acceptance tests (docs/06) and the bench test, soak and operator dry run (docs/09_BENCH_TEST.md) run on the deployment hardware with the real camera; results filed.
-- [ ] Recording-log chain head (`python -m sentinel.ledgerchain head`) recorded on the custody form at every drive swap; `ledgerchain verify` run before any evidence hand-over.
+- [ ] Recording-log chain head (`Sentinel.exe ledger head`, Command Prompt as administrator) recorded on the custody form at every drive swap; `Sentinel.exe ledger verify --check-files --expect-head <last head on the custody form>` run before any evidence hand-over (exit status 0 = intact).
 
 ### Windows deployment (draft; see docs/branches/design-windows-service.md)
 
 - [ ] Program (Python or the PyInstaller **one-folder** build, Sentinel, FFmpeg) under `C:\Program Files\Sentinel` — not in a personal user folder (the service account cannot read those; `install` refuses).
 - [ ] Configuration in `C:\ProgramData\Sentinel\config\` with full `[tools]` paths; data/spool/logs and a separate `status_dir` in dedicated folders (example: `config/sentinel.windows.example.toml`). Never under a folder created directly in `C:\` without fixing its permissions (Authenticated Users: Modify).
 - [ ] Status readers (owner decision: local group `Sentinel Operators`, the install default): add each operator account with `net localgroup "Sentinel Operators" <account> /add`. `--status-readers users` exists only as an explicit alternative.
-- [ ] Elevated Command Prompt: `python -m sentinel.winsvc set-camera-credentials --config …`, then `install --config … --dry-run`, review, then `install --config …`.
-- [ ] `python -m sentinel.winsvc status --config …` shows RUNNING, folders "OK", credentials "DPAPI-protected; permissions: OK", time synchronisation "yes".
+- [ ] Elevated Command Prompt in the program folder: `SentinelService.exe set-camera-credentials --config …`, then `SentinelService.exe install --config … --dry-run`, review, then `install --config …` (or the Sentinel window: System › Service › **Install / repair service…**; from a source checkout `python -m sentinel.winsvc …`).
+- [ ] `SentinelService.exe status --config …` shows RUNNING, folders "OK", credentials "DPAPI-protected; permissions: OK", time synchronisation "yes".
 - [ ] Time (owner decision): a small local time server on the camera network; `install --time-server <host>` sets the Windows Time service to start automatically, starts it, and points it at that server (`sc.exe config w32time start= auto`, `sc.exe start w32time`, `w32tm /config /manualpeerlist:<host>,0x8 /syncfromflags:manual /update`, `w32tm /resync /nowait`). Without `--time-server` the service is still set to automatic but keeps the Windows default source (no Internet on the appliance ⇒ T-002 until a server is configured). Afterwards `winsvc status` must show time synchronisation "yes".
 - [ ] Operators are standard users (not administrators); sleep/hibernate disabled (done by `install` unless `--keep-power-settings`); power-on after power loss set in the BIOS/UEFI.
 - [ ] **BitLocker on the recording laptop's system and recording drives** (Settings → Privacy & security → Device encryption / BitLocker; Windows Home offers Device encryption only on supported hardware). Recovery key stored per policy, never on the laptop. Without it, anyone who takes the laptop can read the recordings off its disk.
