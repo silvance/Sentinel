@@ -382,8 +382,10 @@ def record_event(cfg_path: str | None, code: str, message: str, detail: dict[str
 
 # ---------------------------------------------------------------------- the swap (Windows)
 def _ps(s: str | Path) -> str:
-    """A PowerShell single-quoted string literal."""
-    return "'" + str(s).replace("'", "''") + "'"
+    """A PowerShell single-quoted string literal. Paths are normalised (backslashes, no '..') so the
+    script's "is this process running from the program folder?" test cannot miss by spelling."""
+    text = os.path.normpath(str(s)) if isinstance(s, Path) else str(s)
+    return "'" + text.replace("'", "''") + "'"
 
 
 def finisher_script(p: Pending, folders: Folders, window_pid: int | None) -> str:
@@ -408,6 +410,8 @@ function Fail-Plain($m) {{
   $doc = @{{ outcome = 'failed'; message = $m; finished_utc = (Get-Date).ToUniversalTime().ToString('o'); shown = $false; watch = $false }}
   $doc | ConvertTo-Json | Set-Content -LiteralPath $result -Encoding UTF8
 }}
+# Every use is wrapped in @(): Windows PowerShell 5.1 unrolls a one-item result into a single CIM
+# object, which has no .Count, so one process would count as none (end-to-end test 2026-11-11).
 function From-App {{
   @(Get-CimInstance Win32_Process | Where-Object {{ $_.ExecutablePath -and $_.ExecutablePath.StartsWith($app + '\\', [StringComparison]::OrdinalIgnoreCase) }})
 }}
@@ -432,20 +436,20 @@ Say {_ps(what + ".")}
 Say 'Recording has been stopped for the update; it restarts by itself. Please do not close this window.'
 {f"try {{ Wait-Process -Id {int(window_pid)} -Timeout 30 -ErrorAction SilentlyContinue }} catch {{}}" if window_pid else ""}
 $deadline = (Get-Date).AddSeconds(60)
-while ((Recorders).Count -gt 0 -and (Get-Date) -lt $deadline) {{ Start-Sleep -Seconds 1 }}
-if ((Recorders).Count -gt 0) {{
+while (@(Recorders).Count -gt 0 -and (Get-Date) -lt $deadline) {{ Start-Sleep -Seconds 1 }}
+if (@(Recorders).Count -gt 0) {{
   Say 'The recorder is still running; this is cancelled and recording continues on the installed version.'
   & $exe update restart --state $state --outcome aborted --reason 'the recorder did not stop'
   {"Remove-Item -LiteralPath $staged -Recurse -Force -ErrorAction SilentlyContinue" if p.action == "update"
    else "# (going back: $staged is the kept previous version; it stays)"}
   Start-Sleep -Seconds 5; exit 1
 }}
-$others = From-App
+$others = @(From-App)
 if ($others.Count -gt 0) {{
   Say ('Closing ' + $others.Count + ' other Sentinel program(s): open windows and the archive copier (it starts again after the update).')
   $others | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}
   $gone = (Get-Date).AddSeconds(20)
-  while ((From-App).Count -gt 0 -and (Get-Date) -lt $gone) {{ Start-Sleep -Seconds 1 }}
+  while (@(From-App).Count -gt 0 -and (Get-Date) -lt $gone) {{ Start-Sleep -Seconds 1 }}
 }}
 try {{
   try {{ Get-Acl -LiteralPath $app | Set-Acl -LiteralPath $staged }} catch {{ Say ('Note: permissions not copied: ' + $_.Exception.Message) }}

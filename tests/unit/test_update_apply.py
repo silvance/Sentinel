@@ -227,7 +227,7 @@ def test_only_the_recorder_blocks_the_swap_and_a_click_cannot_pause_it(tmp_path:
     block = s[s.index("function Recorders"):s.index("function Recorders") + 200]
     assert r"recorder\s+run" in block and "archive" not in block
     assert "SetConsoleMode" in s and "0x40" in s and s.index("SetConsoleMode") < s.index("Say 'Recording has been")
-    assert s.index("(Recorders).Count -gt 0) {") < s.index("$others = From-App") < s.index("Move-Item")
+    assert s.index("@(Recorders).Count -gt 0) {") < s.index("$others = @(From-App)") < s.index("Move-Item")
     assert "Stop-Process -Id $_.ProcessId" in s
 
 
@@ -237,3 +237,17 @@ def test_the_window_can_tell_an_update_is_under_way(tmp_path: Path) -> None:
     _pending(folders.app, None)
     assert ap.in_progress(folders) == f"Updating to Sentinel {__version__}"
     assert ap.in_progress(folders, now=folders.state.stat().st_mtime + 7200) is None      # stale: ignored
+
+
+def test_process_counts_survive_windows_powershell_unrolling(tmp_path: Path) -> None:
+    """End-to-end test 2026-11-11: in Windows PowerShell 5.1 a function returning ONE process yields a
+    bare CIM object with no .Count, so a single recorder still running counted as none."""
+    import re
+
+    app = tmp_path / "Sentinel"
+    folders = ap.Folders(app)
+    p = ap.Pending("update", "0.3.4", "0.3.5", str(app), str(folders.staging("0.3.5")), str(folders.previous),
+                   None, asdict(ap.RecordingState()))
+    s = ap.finisher_script(p, folders, None)
+    assert not re.search(r"(?<!@)\((From-App|Recorders)\)\.Count", s)
+    assert "$others = @(From-App)" in s and s.count("@(Recorders).Count") == 2
