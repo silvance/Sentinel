@@ -56,15 +56,18 @@ class UpdatesTab(QWidget):
         c = ctx.palette.text
         row = QHBoxLayout()
         self.b_apply = icon_button("Apply update file…", "download", c)
-        self.b_apply.clicked.connect(self.apply_file)
+        # lambda: clicked(bool) would otherwise pass False as the file path / reason (field report
+        # 2026-11-11: the button did nothing).
+        self.b_apply.clicked.connect(lambda: self.apply_file())
         self.b_back = icon_button("Go back to the previous version…", "refresh", c)
-        self.b_back.clicked.connect(self.go_back)
+        self.b_back.clicked.connect(lambda: self.go_back())
         row.addWidget(self.b_apply)
         row.addWidget(self.b_back)
         row.addStretch(1)
         lay.addLayout(row)
         lay.addWidget(muted(
-            "An update file (Sentinel-update-<version>.sntu) carries only what changed. Sentinel checks its "
+            "Copy the update file (Sentinel-update-<version>.sntu) anywhere on this computer or a USB stick, "
+            "press Apply update file… and pick it. It carries only what changed. Sentinel checks its "
             "signature first, prepares the new version while recording continues, then stops recording for "
             "about a minute, swaps the program files and checks the new version. If the check fails, or the "
             "recorder does not work within 3 minutes, it goes back to the version that was installed before "
@@ -116,7 +119,7 @@ class UpdatesTab(QWidget):
 
         if not self._ready():
             return
-        if path is None:
+        if not isinstance(path, str) or not path:
             path, _ = QFileDialog.getOpenFileName(self, "Sentinel update file", "",
                                                   f"Sentinel update (*{EXTENSION});;All files (*)")
             if not path:

@@ -815,3 +815,25 @@ def test_highlighted_rows_keep_readable_text() -> None:
     for p in (LIGHT, DARK):
         a, b = sorted((lum(selection_colour(p)), lum(p.text)), reverse=True)
         assert (a + 0.05) / (b + 0.05) >= 7.0, p.dark                # WCAG AAA for normal text
+
+
+def test_the_apply_button_itself_opens_the_file_browser(app: QApplication, tmp_path: Path,
+                                                        monkeypatch: pytest.MonkeyPatch) -> None:
+    """Field report 2026-11-11: pressing 'Apply update file…' did nothing (clicked(bool) passed False
+    as the path, so no file browser opened). Press the real buttons."""
+    from sentinel.gui.app import update_page
+
+    w = _window(app, tmp_path, admin=True)
+    tab = w.pages["system"].updates
+    monkeypatch.setattr(update_page, "app_dir", lambda: tmp_path / "Sentinel")
+    asked: list[str] = []
+    monkeypatch.setattr(update_page.QFileDialog, "getOpenFileName",
+                        lambda *a, **k: (asked.append(a[3] if len(a) > 3 else k.get("filter", "")), ("", ""))[1])
+    tab.b_apply.click()
+    assert asked and ".sntu" in asked[0]                     # the browser opened, filtered on update files
+    went: list[str] = []
+    monkeypatch.setattr(tab, "go_back", lambda reason="", ask=True: went.append(reason))
+    tab.b_back.setEnabled(True)
+    tab.b_back.click()
+    assert went == [""]
+    w.close()
