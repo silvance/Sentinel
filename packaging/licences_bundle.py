@@ -226,6 +226,10 @@ def write_licences(app: Path, ffmpeg_version: str, ffmpeg_commit: str, btbn_rele
             raise LicenceError(f"{src} is missing; the build cannot ship Qt/PySide6/FFmpeg without it")
         shutil.copy2(src, dest / name)
     shutil.copy2(find_python_licence(), dest / "Python-LICENSE.txt")
+    own = Path(__file__).resolve().parents[1] / "LICENSE"   # Sentinel itself: Apache-2.0 (owner decision 2026-11-10)
+    if not own.is_file():
+        raise LicenceError(f"{own} is missing; the build cannot ship Sentinel without its own licence")
+    shutil.copy2(own, dest / "Sentinel-LICENSE.txt")
     copied = {}
     for name in BUNDLED_DISTS:
         files = _dist_licence_files(name)
@@ -283,7 +287,7 @@ def write_licences(app: Path, ffmpeg_version: str, ffmpeg_commit: str, btbn_rele
         files_s = ", ".join(copied[name]) or "no licence file in the package; licence named here"
         lines.append(f"{name} {_version(name)}: {licence}. Files: {files_s}.")
     lines += ["", "Source code of the LGPL components and of the libraries linked into FFmpeg: SOURCE-OFFER.txt.",
-              "Sentinel itself: see the project's licence (not covered by this file)."]
+              "Sentinel itself: Apache-2.0 (Sentinel-LICENSE.txt)."]
     if problems:
         lines += ["", "INCOMPLETE - this folder must not be given to anyone outside the organisation until "
                       "these are fixed:"] + [f"  * {p}" for p in problems]

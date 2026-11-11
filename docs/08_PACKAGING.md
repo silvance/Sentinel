@@ -373,9 +373,9 @@ tested on 9.0.1 and requires ≥ 6.0), 64-bit, LGPL variant. Options, in order o
   `packaging/fetch_sources.py` into `third_party/sources/` (FFmpeg commit d4070a14ce, BtbN scripts at
   the release tag, PySide6 6.11.3, qtbase/qtsvg/qttranslations 6.11.3; the Qt archives matched Qt's
   published md5sums). Copy that folder to the organisation's release archive; it is not on GitHub.
-  **Not yet complete (review 2026-11-10, §8.7):** the sources and notices of the ~115 libraries
-  that BtbN links statically into `ffmpeg.exe` were not archived and their notices were not shipped;
-  the build of 2026-11-10 must not be handed outside the organisation until §8.7 is done.
+  The sources and notices of the libraries that BtbN links statically into `ffmpeg.exe` were
+  archived on 2026-11-10 as well (all 119 archives, none missing; LAME needed `svn`, installed as
+  Slik Subversion 1.14.2), and builds from then on ship their notices in `licences/third-party/`.
 * Suite and build results with this FFmpeg: see docs/INTEGRATION.md ("LGPL FFmpeg").
 
 ### 8.7 Libraries inside the static FFmpeg, Qt plugins and notices (review 2026-11-10)
@@ -419,6 +419,45 @@ honour.
 
 Separately from copyright: H.264/HEVC are patent-encumbered formats; whether decoding them in
 this deployment needs a patent licence is outside engineering scope.
+### 8.8 Government use review (2026-11-10, owner request; not legal advice)
+
+Question: does anything in the program folder restrict use by a government organisation? Checked
+against the licence files of every source archive fetched for this build (`third_party/sources/
+notices/`, 119 archives), the shipped `ffmpeg.exe` itself, and the Python packages in the build.
+
+**No use restrictions found.** No component restricts who may use it or for what: no
+non-commercial, research-only, anti-military, anti-surveillance or "ethical use" licence, no
+Commons Clause, SSPL, BUSL or Elastic licence. Every hit for "noncommercial" is the GPL/LGPL
+source-offer option (about passing on source, not about use); every "shall not be used" is the
+X11-style "do not use the author's name in advertising" clause.
+
+**Licences in the program:** Sentinel itself Apache-2.0 (`LICENSE`, owner decision 2026-11-10);
+Python PSF; PySide6/Qt LGPL-3.0 (Core, Gui, Network, Svg, Widgets only); tzdata Apache-2.0;
+PyInstaller bootloader under its exception; FFmpeg LGPL-3.0 (verified on the shipped binary:
+`ffmpeg -L` LGPL, no `--enable-gpl`/`--enable-nonfree`, no GPL encoders or filters). The ~60
+libraries linked into FFmpeg are LGPL-2.1/3, MPL-2.0, Apache-2.0, BSD, MIT, ISC, zlib or FreeType.
+
+**Items a government legal office may ask about, and the answer:**
+
+| Item | Where | Assessment |
+|---|---|---|
+| GPL texts in some archives | FFTW, zstd, mbedtls, GMP, xz, libffi | FFTW is only used by Rubber Band, which this FFmpeg disables, and is not in `ffmpeg.exe`; the others are dual-licensed (BSD/Apache/LGPL option used) or GPL only for build tools that are not shipped. |
+| Indemnity clauses | Apache-2.0 §9, MPL | Apply only to someone who sells their own warranty or support on top. Using or copying the program creates no indemnity (no Anti-Deficiency Act issue). |
+| State governing law / venue | MPL-1.1 (cairo, GLib), AFL (GLib), IPL-1.0 and SPL-1.0 (Qt) | cairo and GLib are dual-licensed; the LGPL option applies. IPL/SPL cover only Qt's XML test files, which are not built into the program; AFL-2.1 covers one Qt D-Bus header, and Qt D-Bus is not shipped. |
+| WTFPL (not OSI-approved) | zimg | Permissive, no conditions; may need a one-line acceptance by a reviewer who works from an approved-licence list. |
+| No patent grant | BSD-3-Clause-Clear (SVT-AV1, vvenc, LCEVCdec); openh264 built from source | Copyright licences do not cover codec patents. H.264/H.265 patents are pooled (Via LA, Access Advance); Cisco's openh264 patent coverage applies only to Cisco's own binaries, not this build. For a US federal user, patent claims against the government go to the Court of Federal Claims (28 U.S.C. § 1498), not to the user. Sentinel records the camera's stream as it is (no re-encoding) and decodes it only for the live view and motion detection; it never encodes H.264/H.265. |
+| Credit required in documentation | FreeType, BSD-4-style advertising clauses | Met by `licences/third-party/` in the program folder. |
+| Encryption (export) | OpenSSL (Python), mbedtls, libssh, SRT | Publicly available open-source code. Domestic use needs nothing; ask the organisation's export-compliance office before the laptop leaves the country. |
+
+**Obligations that remain (they are about handing copies out, not about use):** keep
+`licences/` with every copy; keep `third_party/sources/` (with `SOURCES-SHA256.txt`) for at least
+three years after the last copy of a build is handed out, and honour `SOURCE-OFFER.txt`; leave
+the LGPL parts replaceable (they are: Qt DLLs and the FFmpeg programs are separate files).
+
+**Not covered by a licence review:** permission to install software on government computers or
+to connect it to a government network is the organisation's own approval process (for example an
+authority to operate); this review is one input to it.
+
 ## 9. Linux
 
 **Recipe (implemented):** PyInstaller one-folder with `packaging/linux/sentinel.spec`, built

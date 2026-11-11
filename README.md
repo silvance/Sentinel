@@ -38,9 +38,7 @@ recording outside set hours and motion markers for reviewers in the export summa
 Anything on the real camera, real removable drives, an administrator service install, Linux
 (except a WSL build), or Python 3.12; the operator screen cannot yet start
 an export (needs a request interface to the service; a technician can run `Sentinel.exe export run`).
-The repository has no LICENSE file yet (pyproject.toml says Apache-2.0; the owner must confirm).
-The sources and notices of the libraries linked into the bundled FFmpeg are not archived yet, so a
-build must not leave the organisation until docs/08 §8.7 is done (review 2026-11-10). The operator screen is bundled in the build
+The operator screen is bundled in the build
 (2026-11-10) but has not been looked at on a real display from the built program yet.
 
 ## Click-to-run program (branch design/single-executable)
@@ -88,3 +86,8 @@ example). `python -m sentinel.service status --config dev.toml` shows the operat
 | [06 Verification & traceability](docs/06_VERIFICATION.md) | test results and requirements matrix |
 | [07 Security](docs/07_SECURITY.md) | controls, residual risks, deployment checklist |
 | [08 Packaging](docs/08_PACKAGING.md) | click-to-run build, tool/config resolution, FFmpeg licensing |
+
+## Licence
+Sentinel is licensed under the Apache License, Version 2.0 (`LICENSE`). The click-to-run build
+also contains third-party software under its own licences; see `licences/` in the program folder
+and [docs/08](docs/08_PACKAGING.md).
