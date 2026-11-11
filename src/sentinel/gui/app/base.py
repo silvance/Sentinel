@@ -32,6 +32,7 @@ class Ctx:
     config_changed: Callable[[AppConfig], None] = lambda _c: None
     clock: Callable[[], float] | None = None
     restart: Callable[..., None] = lambda on_done=None: None   # AppWindow.restart_recorder
+    after_change: Callable[[], None] = lambda: None             # AppWindow.watch_after_change
 
 
 class Page(QWidget):
@@ -43,8 +44,8 @@ class Page(QWidget):
         super().__init__(parent)
         self.ctx = ctx
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(20, 14, 20, 12)
-        outer.setSpacing(10)
+        outer.setContentsMargins(16, 10, 16, 10)
+        outer.setSpacing(8)
         # Header: title and one-line description on the left, the page's commands on the right.
         head = QHBoxLayout()
         head.setSpacing(8)
@@ -53,7 +54,7 @@ class Page(QWidget):
         t = QLabel(self.title)
         t.setObjectName("pageTitle")
         f = t.font()
-        f.setPointSizeF(f.pointSizeF() + 5)
+        f.setPointSizeF(f.pointSizeF() + 4)
         t.setFont(f)
         titles.addWidget(t)
         if self.description:
@@ -68,7 +69,7 @@ class Page(QWidget):
         self.head = head
         outer.addLayout(head)
         self.body = QVBoxLayout()
-        self.body.setSpacing(10)
+        self.body.setSpacing(8)
         outer.addLayout(self.body, 1)
 
     def command(self, text: str, icon: str, slot: Callable[[], Any], tip: str = "",
@@ -88,6 +89,9 @@ class Page(QWidget):
 
     def on_status(self, read: StatusRead | None) -> None:
         """New recorder status (every few seconds)."""
+
+    def on_hide(self) -> None:
+        """Another page was opened (stop what only this page needs, e.g. the live view)."""
 
     @property
     def cfg(self) -> AppConfig | None:

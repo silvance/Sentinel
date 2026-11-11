@@ -21,7 +21,7 @@ Measured in this repository (FFmpeg 9.0.1; docs/PHASE2_REPORT.md):
   measured a two-hash pipeline at ~1.05x real time for 2592x1944@30 on a 20-thread host, which
   is why content hashing runs in a deferred, low-priority worker and never delays sealing.
 
-Caveat stored with every content hash: H.264 decoding is bit-exact by standard for conforming
+Caveat stored with every content hash: H.264 and H.265 decoding are bit-exact by standard for conforming
 streams, but error concealment of *damaged* streams may differ between decoder versions. The
 method string records the FFmpeg version and pixel format so a verifier can reproduce it.
 """

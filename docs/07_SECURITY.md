@@ -21,7 +21,7 @@ network. Approval is the deploying organisation's decision.
 | Service never runs code non-administrators can change: `install` refuses if any file/folder of the interpreter, PYTHONPATH, Sentinel package, FFmpeg folders, or the configuration (it names the FFmpeg path) grants write/delete/re-permission rights to anyone but SYSTEM, Administrators, TrustedInstaller, or is owned by someone else; every service start re-checks the top-level paths (C-001 otherwise) | `winsvc/codeacl.py`, `winsvc/__main__.py` | DACL fixtures (captured Program Files, generated `C:\<folder>` default with Authenticated Users Modify), real scan |
 | Sealed originals read-only; rolling audit re-hashes them and alerts V-001 on change | `finalizer.py`, `integrity.py` | `test_audit_detects_modified_original` |
 | Integrity fields write-once in the ledger | `db.py` | `test_sealed_integrity_fields_are_immutable` |
-| Ledger tamper evidence: SHA-256 hash chain over runs, sealed segments, gaps and events; head anchored to `chain_heads.log`, `status.json`, diagnostic reports; periodic verification raises V-003 (see below) | `ledgerchain.py`, `db.py`, `recorder/integrity.py` | `tests/unit/test_ledgerchain.py`, `tests/integration/test_ledger_chain.py` |
+| Ledger tamper evidence: SHA-256 hash chain over runs, sealed segments, gaps and events; head anchored to `chain_heads.log`, `status.json`, diagnostic reports, every archive drive and every review export; periodic verification raises V-003 (see below) | `ledgerchain.py`, `db.py`, `recorder/integrity.py` | `tests/unit/test_ledgerchain.py`, `tests/integration/test_ledger_chain.py` |
 | Audit events: service start/stop, configuration change (config file SHA-256), recovery, integrity failures | `service.py`, `db.events` | integration tests |
 | FFmpeg ≥ 6.0 enforced | `service.py` | — (dev host has 9.0.1) |
 | Single instance (no double recording) | `platform.acquire_instance_lock` | process test |
@@ -43,7 +43,8 @@ network. Approval is the deploying organisation's decision.
 * **Same-account tampering.** The recorder account can lift the read-only bit on its own files.
   The rolling audit detects changes; stronger separation (a separate owner via a privileged
   sealing helper, or filesystem immutability) is a Phase 6 option.
-* **Ledger tamper evidence is key-less and anchored locally by default.** The ledger is now
+* **Ledger tamper evidence is key-less; heads leave the machine on every archive drive and review
+  export (2026-11-10), not only by hand.** The ledger is now
   hash-chained (next section): edits are detectable, not impossible. Someone who controls the
   machine can rebuild a self-consistent chain; that is exposed only by a chain head copied off
   the machine earlier. Signed export manifests remain recommended (docs/04).
@@ -96,8 +97,12 @@ The head `(sequence, hash, UTC)` is copied to:
   diagnostic report;
 * `status.json` → `integrity.ledger_chain` (rewritten every few seconds);
 * every diagnostic report (`ledger_chain.json`, `summary.txt`, covered by the report's MANIFEST);
-* export manifests: `sentinel.ledgerchain.current_chain_head(ledger)` is the function the export
-  branch should call and write into `Export_Manifest.json` (not done on this branch).
+* **every archive drive** (2026-11-10): appended to `Sentinel/<camera>/INDEX/chain_heads.log` on the
+  drive (same line format, fsynced) each time the drive's index is written: when the drive is
+  attached, hourly while copying, and at every swap. Each drive that leaves the building therefore
+  carries the head as it was when the drive was made safe to remove;
+* **every review export** (2026-11-10): `Export_Manifest.json` field `recording_log_head`
+  (`seq`, `hash`, `utc`), also printed in the export summary;
 * by hand: `Sentinel.exe ledger head` (Command Prompt **as administrator** in the program folder:
   the data folder is service-only; `--config FILE` if not the installed one; from a source
   checkout `python -m sentinel.ledgerchain head --config …`) prints a head an administrator can
@@ -113,7 +118,9 @@ rewrite detectable. Rolling the database back to an older copy is exposed the sa
 head with a higher sequence number shows the end of the log was removed.
 
 ### Verification
-`Sentinel.exe ledger verify [--check-files] [--expect-head SEQ:HASH] [--config FILE]` (as administrator;
+`Sentinel.exe ledger verify [--check-files] [--expect-head SEQ:HASH] [--anchors-from DRIVE] [--config FILE]` (as administrator;
+`--anchors-from` reads every head saved on an archive or review drive, repeatable; in the window: System ›
+Check and history › "Check the log against a drive…";
 from a source checkout `python -m sentinel.ledgerchain verify --config …`) checks the log. It is read-only and safe while recording. Exit status: 0 = intact, 1 = altered,
 2 = cannot check, 3 = intact with protection gaps. The integrity worker also runs it every
 `chain_verify_interval_s` (default 1 h; the first run is about 90 s after start):

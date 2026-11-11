@@ -153,6 +153,7 @@ class RecorderService:
         self.schedule = RecordingSchedule(cfg.schedule) if cfg.schedule.enabled else None
         # Schedule action "motion": Sentinel's own motion detector (sentinel.motion).
         self.motion: MotionDetector | None = None
+        self.preview: Any = None                 # sentinel.preview.PreviewWorker (live view on demand)
         # Unattended laptop: keep Windows from idle-sleeping, check the power plan (sentinel.power).
         self.keep_awake: KeepAwake | None = None
         self._power: dict[str, Any] = {}
@@ -251,6 +252,12 @@ class RecorderService:
             log.info("motion detection on (%s; keep recording %.0f s after the last motion)",
                      f"second stream {cfg.motion.stream_path}" if cfg.motion.stream_path else "main stream key frames",
                      cfg.motion.keep_recording_s)
+        if not cfg.camera.pending:
+            # Live view for the window, on demand only (sentinel.preview); never affects recording.
+            from .preview import PreviewWorker
+
+            self.preview = PreviewWorker(cfg, url_with_credentials(cfg.camera.url, creds),
+                                         self.platform.low_priority_popen_kwargs(), clock=self.clock.wall).start()
         self.supervisor = RecordingSupervisor(
             cfg, self.ledger, self.platform, self.storage, self.finalizer,
             url_with_credentials(cfg.camera.url, creds), self.stop_event, clock=self.clock,
@@ -288,6 +295,8 @@ class RecorderService:
                 self.keep_awake.stop()
             if self.motion is not None:
                 self.motion.stop()
+            if self.preview is not None:
+                self.preview.stop()
             if not drained:
                 log.error("finaliser did not drain before shutdown; recovery will complete it on next start")
             if self.integrity.alive:

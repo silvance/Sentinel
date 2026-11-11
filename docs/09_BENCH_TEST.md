@@ -20,7 +20,7 @@ administrator"** in `C:\Program Files\Sentinel`. `CFG` means `C:\ProgramData\Sen
 | Laptop make, model, serial | |
 | Windows edition and build (`winver`) | |
 | Camera make, model, firmware | |
-| Camera stream path and codec (H.264 expected) | |
+| Camera stream path and codec (H.264 or H.265) | |
 | Sentinel build: `Sentinel.exe about` → version, git commit | |
 | Archive drives (make, size, serial) | |
 | Review drive (make, size, serial) | |
@@ -32,7 +32,7 @@ administrator"** in `C:\Program Files\Sentinel`. `CFG` means `C:\ProgramData\Sen
 | 1.1 | Copy the whole `Sentinel` folder to `C:\Program Files\Sentinel`. Run `Sentinel.exe about --verify`. | "installed files match the build manifest"; FFmpeg licence "OK: LGPL-3.0-or-later …". | |
 | 1.2 | Check `licences\` exists with `SOURCE-OFFER.txt`, `LGPL-3.0.txt`, `GPL-3.0.txt`, `THIRD-PARTY-NOTICES.txt` and the `third-party\` folder. | Present; `about` shows no "Licence notices incomplete" warning (otherwise the folder must not leave the organisation, docs/08 §8.7). | |
 | 1.3 | Double-click `Sentinel.exe`. The window opens on "Set up this computer"; press **Continue as administrator…** and approve the Windows prompt. | Window reopens with the setup form editable. | |
-| 1.4 | Fill in the camera (IP, stream path from the camera documentation, view-only account) and press **Test connection**; or tick **Add the camera later** (camera-later path). Choose the time zone (and, optionally, the organisation using the recorder; leave it empty to name none); press **Set up this computer**. | "The camera answered: h264 video, …" (if tested); "This computer is set up"; the full window (Status … System) appears. | |
+| 1.4 | Fill in the camera (IP, stream path from the camera documentation, view-only account) and press **Test connection**; or tick **Add the camera later** (camera-later path). Choose the time zone (and, optionally, the organisation using the recorder; leave it empty to name none); press **Set up this computer**. | "The camera answered: h264 video, …" or "hevc video, …" (if tested); "This computer is set up"; the full window (Status … System) appears. | |
 | 1.5 | System › Service: enter the time server if one exists, press **Install / repair service…**, read the plan in the output, confirm. | Every step OK; both services (recorder, archive) started. | |
 | 1.6 | `net localgroup "Sentinel Operators" <operator account> /add` for each operator account (Command Prompt as administrator). | Command completed successfully. | |
 | 1.7 | Sign in as an operator and open Sentinel. | Window title ends "[read-only]"; settings fields greyed; **Unlock settings…** shown. | |
@@ -103,6 +103,7 @@ is not a FAIL, but the laptop cannot be deployed with archive drives until it is
 | 5.4 | Wait 30 minutes; Drives › **Archive details**. | Copying, then up to date; copies verified. | |
 | 5.5 | Swap as an agent would (screen / `archive swap`), insert drive 2. Then `Sentinel.exe ledger head` (docs/07 checklist). | "SAFE TO REMOVE" before removal; drive 2 starts copying; chain head written on the custody form. | |
 | 5.6 | On another PC, open recordings from drive 1. | Files play; the drive's manifest verifies. | |
+| 5.6a | Back on the recorder, as administrator: System › Check and history › **Check the log against a drive…** › drive 1 (or `Sentinel.exe ledger verify --anchors-from <drive>:\`). | "N saved fingerprint(s) found"; intact (exit 0). | |
 | 5.7 | Retention (optional, long): run with a small recording disk until it is low. | Only recordings verified on a **removed** drive and older than 24 h are deleted; ledger records each deletion. | |
 
 ## 6. Review export and verification

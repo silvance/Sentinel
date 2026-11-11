@@ -19,6 +19,12 @@ from zoneinfo import ZoneInfo
 from ..clock import parse_iso_utc
 from . import layout
 
+# The camera records H.265 (HEVC): Windows plays it only with Microsoft's "HEVC Video Extensions"
+# (Microsoft Store) installed; VLC plays it without them.
+HEVC_NOTE = ("<p><b>These videos are H.265 (HEVC).</b> If Windows' Media Player or Films &amp; TV shows no picture, "
+             "install Microsoft's <i>HEVC Video Extensions</i> from the Microsoft Store, or open the files with VLC "
+             "media player. The files themselves are complete.</p>")
+
 FORMAT = "sentinel-review-export"
 FORMAT_VERSION = 1
 
@@ -153,8 +159,12 @@ def _jl(v: str | None) -> Any:
 
 class ManifestBuilder:
     def __init__(self, batch: dict[str, Any], items: list[dict[str, Any]], segments: dict[str, dict[str, Any]],
-                 drive: dict[str, Any], tz: ZoneInfo, organization: str = "") -> None:
+                 drive: dict[str, Any], tz: ZoneInfo, organization: str = "",
+                 log_head: dict[str, Any] | None = None) -> None:
         self.batch = batch
+        # The recording log's fingerprint when this export was made (tamper evidence: the laptop's log
+        # can later be checked against it with "Sentinel ledger verify --anchors-from <drive>").
+        self.log_head = log_head
         self.organization = organization          # [site] organization; "" = not named
         self.items = [i for i in items if i["kind"] != "document"]
         self.segments = segments
@@ -330,6 +340,7 @@ class ManifestBuilder:
             "format": FORMAT, "format_version": FORMAT_VERSION,
             "export_id": b["batch_id"], "purpose": b["purpose"], "camera_id": b["camera_id"],
             **({"organization": self.organization} if self.organization else {}),
+            **({"recording_log_head": self.log_head} if self.log_head else {}),
             "generated_utc": b["manifest_generated_utc"], "planned_utc": b["planned_utc"],
             "interval": {"start_utc": b["interval_start_utc"], "end_utc": b["interval_end_utc"],
                          "start_local": self._local(b["interval_start_utc"]),
@@ -378,6 +389,7 @@ class ManifestBuilder:
         gaps = self._gaps()
         warns = self.plan.get("warnings", [])
         quarantined = [o for o in self._originals() if o["quarantined"]]
+        hevc = any((s or {}).get("video_codec") == "hevc" for s in self.segments.values())
         cov = self.plan.get("coverage", {})
         rows = []
         for d in derivs:
@@ -417,9 +429,11 @@ small{{color:#555}}
 <h1>Sentinel review drive &mdash; export summary</h1>
 <div class="box"><b>Recordings from {e(self._local(b['interval_start_utc']) or '')} to {e(self._local(b['interval_end_utc']) or '')}</b><br>
 {('Organisation: ' + e(self.organization) + '. ') if self.organization else ''}Camera: {e(b['camera_id'])}. Every file listed was copied to this drive and then read back and checked.</div>
+{('<p><small>Recording log fingerprint when this drive was made: entry ' + str(self.log_head['seq']) + ', ' + e(self.log_head['hash']) + ' (' + e(self.log_head['utc']) + '). Keep this drive: it lets the recording log be checked for later changes.</small></p>') if self.log_head else ''}
 <h2>How to watch</h2>
 <p>Open the <b>Recordings</b> folder, then the folder for the day, and double-click a video. File names are the local
 start and end time followed by the time zone. A new file starts after every gap.</p>
+{HEVC_NOTE if hevc else ''}
 <h2>Videos ({len(derivs)})</h2>
 <table><tr><th>Starts</th><th>Ends</th><th>Length</th><th>File</th><th>Motion (time into the video)</th><th>Pictures compared with originals</th><th>Notes</th></tr>
 {''.join(rows) or '<tr><td colspan=7>No videos in this export.</td></tr>'}

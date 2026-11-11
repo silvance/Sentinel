@@ -1,6 +1,6 @@
 """Simulated IP camera with fault injection (development and test use only).
 
-FFmpeg generates an H.264 test pattern (``testsrc2``, which shows a running timecode) in
+FFmpeg generates an H.264 (or, with ``codec="hevc"``, H.265) test pattern (``testsrc2``, which shows a running timecode) in
 real time and muxes it to MPEG-TS on a pipe. A Python TCP server broadcasts that byte
 stream, aligned to 188-byte TS packets, to every connected client — so, like a real camera,
 the stream keeps running whether or not anyone is recording it.
@@ -45,7 +45,8 @@ CHUNK_PACKETS = 7  # 1316 bytes, the conventional UDP/TS payload size
 class SimulatedCamera:
     def __init__(self, port: int = 0, host: str = "127.0.0.1", size: str = "640x480", fps: int = 15,
                  bitrate: str = "800k", gop: int | None = None, ffmpeg: str = "ffmpeg",
-                 clock_rate: float = 1.0, motion: list[tuple[float, float]] | None = None) -> None:
+                 clock_rate: float = 1.0, motion: list[tuple[float, float]] | None = None,
+                 codec: str = "h264") -> None:
         """``clock_rate``: camera clock speed relative to real time (1.01 = camera clock 1 % fast:
         each real second carries 1.01 s of stream time). Frames are still produced and sent in
         real time (``-re``); only their timestamps are scaled (``setpts``). Measured with FFmpeg
@@ -53,6 +54,9 @@ class SimulatedCamera:
         (1.0007 without scaling), whereas ``-readrate`` pacing was less exact."""
         if not 0.5 <= clock_rate <= 2.0:
             raise ValueError("clock_rate must be between 0.5 and 2.0")
+        if codec not in ("h264", "hevc"):
+            raise ValueError('codec must be "h264" or "hevc"')
+        self.codec = codec              # "hevc": H.265, as cameras that default to it (needs libx265)
         self.host, self.port = host, port
         self.size, self.fps, self.bitrate = size, fps, bitrate
         self.clock_rate = clock_rate
@@ -151,11 +155,17 @@ class SimulatedCamera:
             # Camera clock drift: fine timebase so scaled timestamps are not rounded to frame
             # ticks; passthrough so FFmpeg does not drop/duplicate frames to restore the rate.
             argv += ["-vf", f"settb=1/90000,setpts=PTS*{self.clock_rate:.6f}", "-fps_mode", "passthrough"]
-        argv += ["-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
-                "-g", str(self.gop), "-keyint_min", str(self.gop), "-bf", "0", "-pix_fmt", "yuv420p",
-                # SPS/PPS before every keyframe, as IP cameras do, so late joiners can decode.
-                "-x264-params", "repeat-headers=1",
-                "-b:v", self.bitrate, "-f", "mpegts", "-flush_packets", "1", "pipe:1"]
+        if self.codec == "hevc":
+            # VPS/SPS/PPS before every keyframe and closed GOPs, as H.265 IP cameras send.
+            argv += ["-c:v", "libx265", "-preset", "ultrafast", "-tune", "zerolatency", "-pix_fmt", "yuv420p",
+                     "-x265-params", f"repeat-headers=1:keyint={self.gop}:min-keyint={self.gop}:bframes=0:"
+                                     "open-gop=0:log-level=error"]
+        else:
+            argv += ["-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
+                     "-g", str(self.gop), "-keyint_min", str(self.gop), "-bf", "0", "-pix_fmt", "yuv420p",
+                     # SPS/PPS before every keyframe, as IP cameras do, so late joiners can decode.
+                     "-x264-params", "repeat-headers=1"]
+        argv += ["-b:v", self.bitrate, "-f", "mpegts", "-flush_packets", "1", "pipe:1"]
         kwargs = {"creationflags": 0x08000000} if sys.platform == "win32" else {}
         self._encoder = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                          stderr=subprocess.DEVNULL, **kwargs)

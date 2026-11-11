@@ -494,7 +494,8 @@ class ReviewExporter:
         try:
             remux_concat(self.cfg.tools.ffmpeg, paths, partial_path(dest),
                          self.tmp_dir / f"{self.batch_id}-{it['item_id']}.ffconcat", timeout=600 + duration,
-                         popen_kwargs=self.platform.low_priority_popen_kwargs())
+                         popen_kwargs=self.platform.low_priority_popen_kwargs(),
+                         codec=next((s["video_codec"] for s in segs if s["video_codec"]), None))
             # Write-time hash: FFmpeg wrote the file; hash it now (normal read, straight after it was
             # written) so the later uncached read-back has an independent value to match.
             written, _ = sha256_file(partial_path(dest))
@@ -849,7 +850,14 @@ class ReviewExporter:
         segments = {sid: self._seg(sid) for sid in seg_ids}
         drive_row = self.xl.query("SELECT identity FROM drives WHERE drive_id=?", (b["drive_id"],))
         drive = json.loads(drive_row[0]["identity"]) if drive_row else {}
-        mb = ManifestBuilder(dict(b), items, segments, drive, self.tz, self.cfg.site.organization)
+        from ..ledgerchain import current_chain_head
+
+        try:
+            head = current_chain_head(self.ledger)
+        except Exception:  # noqa: BLE001 - extra tamper evidence; the export does not depend on it
+            head = None
+        mb = ManifestBuilder(dict(b), items, segments, drive, self.tz, self.cfg.site.organization,
+                             {"seq": head.seq, "hash": head.hash, "utc": head.utc} if head else None)
         mdir = layout.manifest_dir(b["stamp"], bid)
         docs: list[dict[str, Any]] = []
         docs.append(self._document(layout.README, mb.readme(), keep_existing=True))

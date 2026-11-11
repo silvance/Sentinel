@@ -228,6 +228,15 @@ def test_swap_during_active_recording_then_next_drive(tmp_path: Path) -> None:
         assert on_b == sealed               # this_drive policy: B starts again from the oldest
         check_drive(b.root, led2, db, complete=True)
         check_drive(a.root, led2, ids[0], complete=True)
+        # Each drive carries the recording log's fingerprint from its index writes (attach, swap...), and
+        # the log on the laptop still matches every one of them (tamper evidence, 2026-11-10).
+        from sentinel.ledgerchain import anchors_from, verify_ledger
+
+        for drive_root in (a.root, b.root):
+            found, _notes = anchors_from(Path(drive_root))
+            assert found, f"no recording-log fingerprint on {drive_root}"
+            rep = verify_ledger(h.cfg.data_path / "sentinel.db", anchors=found, use_local_anchors=False)
+            assert rep.ok, rep.render_text()
     finally:
         led2.close()
         led.close()

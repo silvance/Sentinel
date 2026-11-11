@@ -26,6 +26,9 @@ from .elevation import is_admin, relaunch_elevated
 from .procs import Task
 
 REFRESH_MS = 3000
+WATCH_EVERY_MS = 5000          # after a settings change: check every 5 s ...
+WATCH_LIMIT_S = 180.0          # ... for up to 3 minutes ...
+WATCH_PASSES = 3               # ... until it passes 3 times in a row (not a passing moment while starting)
 
 # Where an alert is dealt with (first letter of the code; some codes individually).
 CODE_PAGES = {"P-001": "schedule", "P-003": "motion", "W-001": "motion", "W-002": "camera", "P-002": "camera",
@@ -81,7 +84,7 @@ class AppWindow(QMainWindow):
         self.ctx = Ctx(cfg=cfg, cfg_path=Path(cfg_path) if cfg_path else None, admin=admin,
                        palette=pick_palette(self.appearance), tz=tz, navigate=self.navigate,
                        unlock=self.unlock, config_changed=self._config_changed, clock=clock,
-                       restart=self.restart_recorder)
+                       restart=self.restart_recorder, after_change=self.watch_after_change)
         self.view: DashboardView | None = None
         self.pages: dict[str, Page] = {}
         self._tasks: list[Task] = []
@@ -89,6 +92,10 @@ class AppWindow(QMainWindow):
         self._restart_again = False
         self._restart_callbacks: list[Callable[[str], None]] = []
         self._cfg_mtime = self._mtime()
+        self._watch: dict | None = None            # check after a settings change (see watch_after_change)
+        self.watch_timer = QTimer(self)
+        self.watch_timer.setInterval(WATCH_EVERY_MS)
+        self.watch_timer.timeout.connect(self._watch_tick)
         self.setMinimumSize(980, 620)
         self._build()
         self.timer = QTimer(self)
@@ -305,6 +312,9 @@ class AppWindow(QMainWindow):
         if key is None:
             return
         page = self.pages[key]
+        old = self.stack.currentWidget()
+        if isinstance(old, Page) and old is not page:
+            old.on_hide()
         self.stack.setCurrentWidget(page)
         save_pref("last_section", key, self.prefs_path)
         page.on_show()
@@ -386,8 +396,9 @@ class AppWindow(QMainWindow):
         read = read_status_robust(cfg.status_path, max_age_s=max_age)
         db = cfg.ledger_snapshot_path or (cfg.data_path / "sentinel.db")
         snap = snapshot(db, cfg.camera.id)
+        self.recording_since_epoch = recording_since(snap)   # current uninterrupted stretch (Status header)
         self.view = build_dashboard(read, tz=self.ctx.tz, now=now, last_saved_epoch=snap.last_saved_epoch,
-                                    recording_since_epoch=recording_since(snap),
+                                    recording_since_epoch=self.recording_since_epoch,
                                     config_test_camera=bool(getattr(cfg.camera, "development_source", False)))
         self.ctx.read = read
         self._show_summary(self.view, read)
@@ -597,11 +608,103 @@ class AppWindow(QMainWindow):
         self._restart_task = task
         task.start()
 
+    # ------------------------------------------------------------------ check after a change, rollback
+    def _status_reader(self):  # noqa: ANN202
+        from ...status import read_status
+
+        cfg = self.ctx.cfg
+        assert cfg is not None
+        return lambda: read_status(cfg.status_path, max_age_s=max(15.0, 5 * cfg.service.status_interval_s))
+
+    def check_now(self, require_saved_file: bool = True):  # noqa: ANN201
+        """Run the self-check; a pass (as administrator) is remembered as the last known good settings."""
+        from ...selfcheck import mark_known_good, run_checks
+
+        if self.ctx.cfg is None or self.ctx.cfg_path is None:
+            return None
+        rep = run_checks(self.ctx.cfg_path, self._status_reader(), self.clock(), require_saved_file)
+        if rep.ok and self.ctx.admin:
+            try:
+                mark_known_good(self.ctx.cfg_path, rep)
+            except OSError:
+                pass
+        return rep
+
+    def watch_after_change(self) -> None:
+        """After a save or restore: if the recorder does not work within 3 minutes, put the last
+        known good settings back (owner request 2026-11-10: a change must not leave the tool broken)."""
+        if self.ctx.cfg is None or not self.ctx.admin:
+            return
+        self._watch = {"started": self.clock(), "passes": 0, "last": None}
+        self.statusBar().showMessage("Checking the recorder with the new settings (up to 3 minutes)…")
+        self.watch_timer.start()
+
+    def watching(self) -> bool:
+        return self.watch_timer.isActive()
+
+    def _watch_tick(self) -> None:
+        from ...selfcheck import good_path, same_settings
+
+        w = self._watch
+        if w is None or (self._restart_task is not None and self._restart_task.running()):
+            return
+        rep = self.check_now(require_saved_file=False)
+        if rep is None:
+            return
+        w["last"] = rep
+        w["passes"] = w["passes"] + 1 if rep.ok else 0
+        if w["passes"] >= WATCH_PASSES:
+            self.watch_timer.stop()
+            self._watch = None
+            self.statusBar().showMessage("New settings checked: the recorder works. Saved as the last known "
+                                         "good settings.", 20000)
+            return
+        if self.clock() - w["started"] < WATCH_LIMIT_S:
+            return
+        self.watch_timer.stop()
+        self._watch = None
+        path = self.ctx.cfg_path
+        good = good_path(path) if path is not None else None
+        if good is not None and good.is_file() and not same_settings(good, path):
+            self.rollback_to_known_good(f"The recorder did not work with the new settings: {rep.summary()}")
+        else:
+            QMessageBox.warning(self, "Sentinel", "The recorder does not work with the current settings:\n\n"
+                                f"{rep.summary()}\n\nThere are no earlier working settings to go back to. "
+                                "See System › Check and history.")
+
+    def rollback_to_known_good(self, why: str = "") -> bool:
+        from ...config import ConfigError, load_config
+        from ...selfcheck import restore_known_good
+
+        path = self.ctx.cfg_path
+        if path is None:
+            return False
+        try:
+            backup = restore_known_good(path, self.clock)
+            cfg = load_config(path)
+        except (ConfigError, OSError) as exc:
+            QMessageBox.warning(self, "Sentinel", f"The last working settings could not be put back: {exc}")
+            return False
+        self._config_changed(cfg)
+        for page in self.pages.values():
+            if hasattr(page, "load"):
+                page.load()
+        self.restart_recorder()
+        QMessageBox.information(self, "Sentinel", (why + "\n\n" if why else "") +
+                                "The last working settings were put back and the recorder was restarted. "
+                                f"The settings that did not work are kept as {backup.name} "
+                                "(System › Check and history).")
+        self.watch_after_change()
+        return True
+
     def busy_work(self) -> list[str]:
         """What would be stopped if the window closed now."""
         from .base import OutputLog
 
         out = []
+        if self.watching():
+            out.append("checking the new settings (if they do not work, closing now means the last working "
+                       "settings are not put back automatically)")
         if self._restart_task is not None and self._restart_task.running():
             out.append("restarting the recorder")
         out += ["starting the recorder" for t in self._tasks if t.running()]

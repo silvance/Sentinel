@@ -575,6 +575,34 @@ def read_anchor_log(path: Path | None) -> tuple[list[Anchor], list[str]]:
     return anchors, problems
 
 
+def anchors_from(path: Path) -> tuple[list[Anchor], list[str]]:
+    """Every copy of the chain head found on a drive or folder that left the machine (review
+    2026-11-10): archive drives (``Sentinel/<camera>/INDEX/chain_heads.log``), review drives
+    (``Manifests/*/Export_Manifest.json`` field ``recording_log_head``), or one such file given
+    directly. Returns (anchors, notes); unreadable files are noted, not fatal."""
+    path = Path(path)
+    anchors: list[Anchor] = []
+    notes: list[str] = []
+    logs = [path] if path.is_file() and path.suffix == ".log" else sorted(path.glob("Sentinel/*/INDEX/chain_heads.log"))
+    manifests = [path] if path.is_file() and path.suffix == ".json" else sorted(path.glob("Manifests/*/Export_Manifest.json"))
+    for lg in logs:
+        found, problems = read_anchor_log(lg)
+        anchors += [Anchor(a.seq, a.hash, f"on {path} ({a.source})", a.anchored_utc) for a in found]
+        notes += problems
+    for m in manifests:
+        try:
+            head = json.loads(m.read_text("utf-8")).get("recording_log_head")
+        except (OSError, ValueError) as exc:
+            notes.append(f"{m}: not readable ({exc})")
+            continue
+        if isinstance(head, dict) and isinstance(head.get("seq"), int) and re.fullmatch(r"[0-9a-f]{64}",
+                                                                                        str(head.get("hash"))):
+            anchors.append(Anchor(head["seq"], head["hash"], f"in the review export manifest {m}", head.get("utc")))
+    if not logs and not manifests:
+        notes.append(f"{path}: no recording-log fingerprints found (not an archive or review drive?)")
+    return anchors, notes
+
+
 def parse_expected_head(text: str, source: str = "given on the command line") -> Anchor:
     m = re.fullmatch(r"(\d+):([0-9a-fA-F]{64})", text.strip())
     if m is None:
@@ -1175,6 +1203,9 @@ def main(argv: list[str] | None = None, prog: str = "python -m sentinel.ledgerch
                    help="also re-read every sealed recording file and compare its SHA-256 (slow)")
     v.add_argument("--expect-head", action="append", default=[], metavar="SEQ:HASH",
                    help="a chain head saved elsewhere (export manifest, diagnostic report); repeatable")
+    v.add_argument("--anchors-from", action="append", default=[], metavar="DRIVE",
+                   help="an archive or review drive (or folder) whose saved fingerprints the log must match; "
+                        "repeatable")
     v.add_argument("--no-local-anchors", action="store_true",
                    help="ignore chain_heads.log and status.json beside the ledger")
     v.add_argument("--json", action="store_true", help="print the full report as JSON")
@@ -1203,6 +1234,12 @@ def main(argv: list[str] | None = None, prog: str = "python -m sentinel.ledgerch
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 2
+    for src in args.anchors_from:
+        found, notes = anchors_from(Path(src))
+        expected += found
+        for n in notes:
+            print(f"note: {n}")
+        print(f"{len(found)} saved fingerprint(s) found on {src}")
     rep = verify_ledger(db, spool_path=cfg.spool_path, check_files=args.check_files, anchors=expected,
                         use_local_anchors=not args.no_local_anchors, status_path=cfg.status_path)
     print(json.dumps(rep.to_dict(), indent=2) if args.json else rep.render_text())

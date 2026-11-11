@@ -1035,7 +1035,25 @@ class ArchiveWorker:
         att.last_index_mono = self.mono()
         att.stale_index = False
         log.info("archive index generation %d written to %s (%s, %d files)", gen, att.drive_id, reason, len(copies))
+        self._anchor_on_drive(root, reason)
         return True
+
+    def _anchor_on_drive(self, root: Path, reason: str) -> None:
+        """Copy the recording log's fingerprint (chain head) onto the archive drive, append-only, every
+        time its index is written (attach, hourly, swap). A drive that has left the building then
+        proves what the log held at that moment: rewriting the laptop's log later no longer matches
+        it (``Sentinel ledger verify --anchors-from <drive>``). Never stops archiving if it fails."""
+        from ..ledgerchain import append_anchor, current_chain_head
+
+        assert self.ledger is not None
+        try:
+            head = current_chain_head(self.ledger)
+            if head is None:
+                return
+            line = append_anchor(root / layout.chain_heads_path(self.camera_id), head, f"archive_{reason}")
+            log.info("recording log fingerprint written to the archive drive: %s", line)
+        except Exception as exc:  # noqa: BLE001 - tamper evidence is extra; never block archiving
+            log.warning("could not write the recording log fingerprint to the archive drive: %s", exc)
 
     # ================================================================== status
     def _set(self, state: str, message: str) -> None:

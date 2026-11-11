@@ -47,6 +47,8 @@ def stylesheet(p: Palette) -> str:
                                       border-left: 3px solid {p.accent}; }}
     QListWidget#nav::item:hover:!selected {{ background: {p.surface_alt}; }}
     QLabel#pageTitle {{ font-weight: 600; }}
+    QLabel#sectionTitle {{ font-weight: 600; color: {p.text2}; }}
+    QFrame#sep {{ color: {p.border}; }}
     QLabel#muted {{ color: {p.text2}; }}
     QLabel#ok {{ color: {p.ok}; }}
     QLabel#warning {{ color: {p.warning}; }}
@@ -56,7 +58,7 @@ def stylesheet(p: Palette) -> str:
     QFrame#noticeWarning {{ background: {p.surface}; border: 1px solid {p.warning}; border-radius: 4px; }}
     QPlainTextEdit#log {{ font-family: Consolas, 'Cascadia Mono', monospace; }}
     QGroupBox {{ background: {p.surface}; border: 1px solid {p.border}; border-radius: 6px;
-                 margin-top: 24px; padding: 10px 10px 8px 10px; }}
+                 margin-top: 20px; padding: 6px 8px 6px 8px; }}
     QGroupBox::title {{ subcontrol-origin: margin; subcontrol-position: top left; left: 2px; top: 2px;
                         padding: 0; font-weight: 600; }}
     """
@@ -77,7 +79,7 @@ def apply(app: QApplication, appearance: str) -> Palette:
     f = QFont("Segoe UI Variable Text") if sys.platform == "win32" else app.font()
     if sys.platform == "win32" and not f.exactMatch():
         f = QFont("Segoe UI")
-    f.setPointSizeF(9.0)
+    f.setPointSizeF(10.0)                     # layout refinement 2026-11-10: was 9 pt
     app.setFont(f)
     app.setStyleSheet(stylesheet(p))
     from .icons import app_icon

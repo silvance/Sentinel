@@ -9,6 +9,7 @@
       <camera>/Quarantine/<YYYY-MM-DD>/...                 CORRUPT originals (kept for examination)
       <camera>/INDEX/archive_index.json | archive_index.csv | gaps.csv | SHA256SUMS.txt   rolling index
       <camera>/INDEX/verified_journal.csv                  append-only, one line per verified file
+      <camera>/INDEX/chain_heads.log                       append-only recording-log fingerprints (tamper evidence)
 
 The index is **per camera** so drives that receive footage from several appliances / cameras keep
 one index per camera; a reinstalled ledger carries entries it does not know forward (index.py).
@@ -38,6 +39,12 @@ SET_ASIDE_MARK = ".unverified-"          # suffix of a file that failed read-bac
 
 def index_dir(camera_id: str) -> str:
     return f"{ROOT}/{safe(camera_id)}/INDEX"
+
+
+def chain_heads_path(camera_id: str) -> str:
+    """Append-only copies of the recording log's fingerprint (chain head), one line per index write;
+    same line format as the recorder's own chain_heads.log (sentinel.ledgerchain)."""
+    return f"{index_dir(camera_id)}/chain_heads.log"
 
 
 def index_files(camera_id: str) -> dict[str, str]:

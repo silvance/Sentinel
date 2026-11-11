@@ -45,6 +45,8 @@ def _config_is_admin_only(monkeypatch: pytest.MonkeyPatch) -> None:
     from sentinel.gui.app import window as winmod
 
     monkeypatch.setattr(winmod, "admin_config_problem", lambda _p, _c: "")
+    # The 3-minute check after a save has its own test; elsewhere it would hold up closing the window.
+    monkeypatch.setattr(winmod.AppWindow, "watch_after_change", lambda self: None)
 
 
 @pytest.fixture(scope="module")
@@ -138,7 +140,10 @@ def test_missing_status_is_x001_and_opening_writes_nothing(app: QApplication, tm
     assert "X-001" in w.sb_alerts.text()
     assert w.pages["status"].alerts.topLevelItem(0).text(0) == "X-001"
     w.close()
-    assert sorted(p.relative_to(tmp_path) for p in tmp_path.rglob("*")) == before
+    # The only write: the live view's request to the recorder (the operators' request folder).
+    after = sorted(p.relative_to(tmp_path) for p in tmp_path.rglob("*"))
+    extra = [p for p in after if p not in before]
+    assert all(p.name == "preview.request" or (tmp_path / p).is_dir() for p in extra), extra
 
 
 def test_timeline_marks_gaps_and_motion(app: QApplication) -> None:
@@ -235,7 +240,8 @@ def test_invalid_schedule_is_refused_and_nothing_changes(app: QApplication, tmp_
     page = w.pages["schedule"]
     before = Path(w.ctx.cfg_path).read_text(encoding="utf-8")
     page.enabled.setChecked(True)
-    page.weekly.add("pause", ["someday", "07:00", "18:00"])
+    page.weekly.add("record", {"mon"}, "07:00", "18:00")      # overlapping periods with different actions
+    page.weekly.add("pause", {"mon"}, "08:00", "09:00")
     page.save()
     assert said and "Nothing was changed" in said[0]
     assert Path(w.ctx.cfg_path).read_text(encoding="utf-8") == before
@@ -471,4 +477,117 @@ def test_general_page_sets_and_clears_the_organisation(app: QApplication, tmp_pa
     page.save()
     _drain(app, 0.3)
     assert load_config(w.ctx.cfg_path).site.organization == ""
+    w.close()
+
+
+def test_schedule_days_are_picked_not_typed_and_round_trip(app: QApplication, tmp_path: Path,
+                                                          monkeypatch: pytest.MonkeyPatch) -> None:
+    from sentinel.gui.app.settings_pages import days_from_config, days_to_config
+
+    assert days_to_config({"mon", "tue", "wed", "thu", "fri"}) == ["weekdays"]
+    assert days_to_config({"sat", "sun"}) == ["weekend"] and days_to_config({"wed", "mon"}) == ["mon", "wed"]
+    assert days_from_config(["weekend", "Monday"]) == {"sat", "sun", "mon"}
+    monkeypatch.setattr(base, "restart_recorder", lambda p, c: "Restarted.")
+    w = _window(app, tmp_path, admin=True)
+    page = w.pages["schedule"]
+    page.enabled.setChecked(True)
+    page.weekly.add("record", {"mon", "wed"}, "07:30", "00:00")              # until midnight
+    page.save()
+    _drain(app, 0.3)
+    sch = load_config(w.ctx.cfg_path).schedule
+    assert [(p.action, p.days, p.start_s, p.end_s) for p in sch.weekly] == [("record", (0, 2), 27000, 86400)]
+    page.load()
+    picker = page.weekly.t.cellWidget(0, 1)
+    assert picker.days() == {"mon", "wed"}
+    w.close()
+
+
+def test_days_off_pauses_and_comes_back_by_itself(app: QApplication, tmp_path: Path,
+                                                  monkeypatch: pytest.MonkeyPatch) -> None:
+    """Owner request: on leave for 6 days in December; no recording, nothing shut down, recording
+    resumes the day he is back."""
+    from PySide6.QtCore import QDate
+
+    from sentinel.gui.app import settings_pages as sp
+    from sentinel.schedule import RecordingSchedule
+
+    monkeypatch.setattr(base, "restart_recorder", lambda p, c: "Restarted.")
+
+    def accept(dlg: QDialog) -> int:
+        dlg.first.setDate(QDate(2026, 12, 14))
+        dlg.back.setDate(QDate(2026, 12, 20))
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(sp.DaysOffDialog, "exec", accept)
+    w = _window(app, tmp_path, admin=True)
+    page = w.pages["schedule"]
+    page._days_off()
+    assert page.enabled.isChecked() and "Days off added" in page.result.text()
+    page.save()
+    _drain(app, 0.3)
+    cfg = load_config(w.ctx.cfg_path)
+    assert [(d["action"], d["start"], d["end"]) for d in page.dates.rows()] == [
+        ("pause", "2026-12-14 00:00", "2026-12-20 00:00")]
+    s = RecordingSchedule(cfg.schedule)
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    tz = ZoneInfo(cfg.schedule.timezone)
+    at = lambda d, h: datetime(2026, 12, d, h, tzinfo=tz).timestamp()    # noqa: E731
+    assert s.mode_at(at(13, 23)) == "record" and s.mode_at(at(14, 9)) == "pause" and s.mode_at(at(19, 23)) == "pause"
+    assert s.mode_at(at(20, 0)) == "record"                                # back by itself
+    assert s.next_change(at(16, 12)) == at(20, 0)
+    w.close()
+
+
+def test_a_change_that_breaks_the_recorder_is_rolled_back(app: QApplication, tmp_path: Path,
+                                                          monkeypatch: pytest.MonkeyPatch) -> None:
+    """Owner request: if a change leaves the tool not working, put the last working settings back."""
+    from sentinel.gui.app import window as winmod
+    from sentinel.selfcheck import good_path
+
+    monkeypatch.undo()                                       # this test wants the real watch ...
+    monkeypatch.setattr(winmod, "admin_config_problem", lambda _p, _c: "")
+    monkeypatch.setattr(base, "restart_recorder", lambda p, c: "Restarted.")
+    told: list[str] = []
+    monkeypatch.setattr(winmod.QMessageBox, "information", lambda _w, _t, text: told.append(text))
+    w = _window(app, tmp_path, admin=True)
+    assert w.check_now(require_saved_file=False).ok          # healthy: remembered as known good
+    good = good_path(w.ctx.cfg_path)
+    assert good.is_file()
+    page = w.pages["motion"]
+    page.keep.setValue(600)
+    page.save()                                              # starts the watch
+    _drain(app, 0.3)
+    assert w.watching()
+    bad = status_doc(base_measurements(component_errors=["C-001"]), time.time())
+    write_doc(w.ctx.cfg.status_path, bad)                    # the recorder is not working now
+    w._watch["started"] -= 1000                              # 3 minutes have passed
+    w._watch_tick()
+    _drain(app, 0.3)
+    assert w.ctx.cfg_path.read_bytes() == good.read_bytes()  # last working settings are back
+    assert load_config(w.ctx.cfg_path).motion.keep_recording_s != 600
+    assert told and "put back" in told[0]
+    w.watch_timer.stop()
+    w._watch = None
+    w.close()
+
+
+def test_a_working_change_becomes_the_new_known_good(app: QApplication, tmp_path: Path,
+                                                     monkeypatch: pytest.MonkeyPatch) -> None:
+    from sentinel.gui.app import window as winmod
+    from sentinel.selfcheck import good_path
+
+    monkeypatch.undo()
+    monkeypatch.setattr(winmod, "admin_config_problem", lambda _p, _c: "")
+    monkeypatch.setattr(base, "restart_recorder", lambda p, c: "Restarted.")
+    w = _window(app, tmp_path, admin=True)
+    page = w.pages["motion"]
+    page.keep.setValue(600)
+    page.save()
+    _drain(app, 0.3)
+    for _ in range(3):
+        w._watch_tick()
+    assert not w.watching()
+    assert load_config(good_path(w.ctx.cfg_path)).motion.keep_recording_s == 600
     w.close()

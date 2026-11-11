@@ -7,14 +7,15 @@ from typing import Any
 
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QFont
-from PySide6.QtWidgets import (QComboBox, QFormLayout, QFrame, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
-                               QPlainTextEdit, QPushButton, QSplitter, QTabWidget, QTreeWidget, QTreeWidgetItem,
-                               QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QBoxLayout, QComboBox, QFormLayout, QFrame, QGridLayout, QGroupBox, QHBoxLayout,
+                               QLabel, QLineEdit, QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QSplitter, QTabWidget,
+                               QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from .. import textfmt as tf
 from ..ledger_view import SpanKind, load_admin, load_timeline, pretty_json
 from ..viewmodel import ReadKind, StatusRead, Tone
-from .base import CommandPanel, OutputLog, Page, ReadOnlyBar, capped, fill, icon_button, muted, table
+from .base import (CommandPanel, OutputLog, Page, ReadOnlyBar, capped, fill, icon_button, muted, selected_data,
+                   table)
 from .procs import Command, sentinel_argv, service_argv
 from .timeline import TimelineBar
 from .window import page_for_code
@@ -34,16 +35,21 @@ def _ep(iso: Any) -> float | None:
 
 
 class StatusPage(Page):
+    """Operational overview (layout refinement 2026-11-10): a compact status header, then two columns
+    sized by their content: alerts and details on the left, the live view on the right. Nothing is
+    stretched to fill the window; free space stays below the content."""
+
     key = "status"
     title = "Status"
     description = "What the recorder is doing now."
 
-    # (key, label, page it opens)
-    ROWS = [("camera", "Camera", "camera"), ("link", "Camera connection", "camera"),
-            ("last", "Last recording saved", "recordings"), ("since", "Current run started", "recordings"),
-            ("storage", "Recording storage", "storage"), ("archive", "Archive drive", "drives"),
-            ("schedule", "Schedule", "schedule"), ("motion", "Motion", "motion"),
-            ("clock", "Clock synchronised", "system"), ("service", "Recorder", "system")]
+    # Details grouped as an operator reads them: (group, [(key, label, page it opens)])
+    GROUPS = [("Camera", [("camera", "Camera", "camera"), ("link", "Connection", "camera")]),
+              ("Recording", [("last", "Last file saved", "recordings"), ("since", "Current run started", "recordings")]),
+              ("Storage and archive", [("storage", "Recording storage", "storage"), ("archive", "Archive drive", "drives")]),
+              ("Schedule and motion", [("schedule", "Schedule", "schedule"), ("motion", "Motion", "motion")]),
+              ("System", [("clock", "Clock synchronised", "system"), ("service", "Recorder", "system")])]
+    STACK_BELOW_PX = 1150      # narrower than this: the live view goes under the details
 
     def __init__(self, ctx, parent=None) -> None:  # noqa: ANN001
         super().__init__(ctx, parent)
@@ -54,55 +60,180 @@ class StatusPage(Page):
         self.command("Lock computer", "lock", lambda: self.window().lock_computer(),
                      "Locks Windows. Recording continues.")
 
-        # Summary: one large status icon and the headline, as in Windows Security.
-        summary = QFrame()
-        summary.setObjectName("summary")
-        sl = QHBoxLayout(summary)
-        sl.setContentsMargins(16, 14, 16, 14)
-        sl.setSpacing(14)
+        # Everything below the page title scrolls in a small window instead of being clipped.
+        content = QWidget()
+        cl = QVBoxLayout(content)
+        cl.setContentsMargins(0, 0, 4, 0)
+        cl.setSpacing(8)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)   # scroll down only
+        scroll.setWidget(content)
+        self.body.addWidget(scroll, 1)
+
+        # ---- compact status header: state + six key facts, two rows of label/value pairs
+        header = QFrame()
+        header.setObjectName("summary")
+        hl = QHBoxLayout(header)
+        hl.setContentsMargins(12, 8, 12, 8)
+        hl.setSpacing(12)
         self.big_icon = QLabel()
-        self.big_icon.setFixedSize(44, 44)
-        sl.addWidget(self.big_icon, 0, Qt.AlignmentFlag.AlignTop)
-        texts = QVBoxLayout()
-        texts.setSpacing(2)
+        self.big_icon.setFixedSize(32, 32)
+        hl.addWidget(self.big_icon, 0, Qt.AlignmentFlag.AlignVCenter)
+        state = QVBoxLayout()
+        state.setSpacing(0)
         self.headline = QLabel("…")
         f = self.headline.font()
-        f.setPointSizeF(f.pointSizeF() + 6)
+        f.setPointSizeF(f.pointSizeF() + 4)
         f.setWeight(QFont.Weight.DemiBold)
         self.headline.setFont(f)
-        texts.addWidget(self.headline)
+        state.addWidget(self.headline)
         self.supporting = muted()
-        texts.addWidget(self.supporting)
-        sl.addLayout(texts, 1)
-        self.body.addWidget(summary)
+        self.supporting.setMaximumWidth(380)
+        state.addWidget(self.supporting)
+        hl.addLayout(state)
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.VLine)
+        sep.setObjectName("sep")
+        hl.addWidget(sep)
+        self.facts_grid = QGridLayout()
+        self.facts_grid.setHorizontalSpacing(10)
+        self.facts_grid.setVerticalSpacing(2)
+        self.facts: dict[str, QLabel] = {}
+        self._fact_cells: list[tuple[QLabel, QLabel]] = []
+        vf = self.font()
+        vf.setPointSizeF(vf.pointSizeF() + 1)
+        for key, label in (("camera", "Camera"), ("duration", "Recording for"), ("storage", "Storage"),
+                           ("archive", "Archive"), ("verified", "Last verified file"), ("updated", "Status")):
+            lab = muted(label)
+            lab.setWordWrap(False)
+            val = QLabel("—")
+            val.setFont(vf)
+            val.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            # A narrow window cuts a long value (full text in its tooltip) rather than widening the page.
+            val.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+            val.setMinimumWidth(80)
+            self.facts[key] = val
+            self._fact_cells.append((lab, val))
+        self._fact_cols = 0
+        self._layout_facts(3)
+        hl.addLayout(self.facts_grid, 1)
+        cl.addWidget(header)
 
-        split = QSplitter(Qt.Orientation.Vertical)
-        split.setChildrenCollapsible(False)
-        abox = QGroupBox("Alerts")
-        al = QVBoxLayout(abox)
+        # ---- two columns; content-sized, no splitter stretching
+        self.columns = QBoxLayout(QBoxLayout.Direction.LeftToRight)
+        self.columns.setSpacing(12)
+        left = QVBoxLayout()
+        left.setSpacing(4)
+        self.alerts_title = QLabel("Alerts")
+        self.alerts_title.setObjectName("sectionTitle")
+        left.addWidget(self.alerts_title)
         self.alerts = _tree(["Code", "Message"])
-        self.alerts.itemActivated.connect(lambda it, _c: self._open_alert(self.alerts.indexOfTopLevelItem(it), 0))
-        self.alerts.setToolTip("Double-click or press Enter to open the page where this is dealt with")
-        al.addWidget(self.alerts)
-        split.addWidget(abox)
-        dbox = QGroupBox("Details")
-        dl = QVBoxLayout(dbox)
+        self.alerts.setRootIsDecorated(True)
+        self.alerts.setUniformRowHeights(False)
+        self.alerts.itemActivated.connect(self._alert_activated)
+        self.alerts.setToolTip("Click the arrow for details; double-click or Enter opens the page where it is dealt with")
+        self.alerts.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.alerts.itemExpanded.connect(lambda _i: self._fit_tree(self.alerts, 8))
+        self.alerts.itemCollapsed.connect(lambda _i: self._fit_tree(self.alerts, 8))
+        left.addWidget(self.alerts)
+        left.addSpacing(8)
+        dt = QLabel("Details")
+        dt.setObjectName("sectionTitle")
+        left.addWidget(dt)
         self.details = _tree(["Item", "Now"])
-        self.details.itemActivated.connect(lambda it, _c: self.ctx.navigate(it.data(0, Qt.ItemDataRole.UserRole)))
+        self.details.setRootIsDecorated(False)
+        self.details.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.details.itemActivated.connect(self._detail_activated)
         self.details.setToolTip("Double-click or press Enter to open the matching page")
         self.items: dict[str, QTreeWidgetItem] = {}
-        for k, text, page in self.ROWS:
-            it = QTreeWidgetItem([text, "—"])
-            it.setData(0, Qt.ItemDataRole.UserRole, page)
-            self.details.addTopLevelItem(it)
-            self.items[k] = it
-        self.details.resizeColumnToContents(0)
-        self.details.setColumnWidth(0, max(190, self.details.columnWidth(0) + 30))
-        dl.addWidget(self.details)
-        split.addWidget(dbox)
-        split.setStretchFactor(0, 1)
-        split.setStretchFactor(1, 2)
-        self.body.addWidget(split, 1)
+        bold = self.font()
+        bold.setBold(True)
+        for group, rows in self.GROUPS:
+            g = QTreeWidgetItem([group, ""])
+            g.setFont(0, bold)
+            g.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            g.setFirstColumnSpanned(True)
+            self.details.addTopLevelItem(g)
+            for k, text, page in rows:
+                it = QTreeWidgetItem(["   " + text, "—"])
+                it.setData(0, Qt.ItemDataRole.UserRole, page)
+                self.details.addTopLevelItem(it)
+                self.items[k] = it
+        self.details.setColumnWidth(0, 210)
+        left.addWidget(self.details)
+        left.addStretch(1)                       # free space goes below the content
+        self.columns.addLayout(left, 3)
+        right = QVBoxLayout()
+        right.setSpacing(4)
+        lt = QLabel("Live view")
+        lt.setObjectName("sectionTitle")
+        right.addWidget(lt)
+        from .liveview import LiveView
+
+        self.live = LiveView(ctx)
+        self.live.picture.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        right.addWidget(self.live)
+        right.addStretch(1)
+        self.columns.addLayout(right, 2)
+        cl.addLayout(self.columns)
+        cl.addStretch(1)
+        self._fit_tree(self.details, 30)
+
+    # ---- sizing
+    def _layout_facts(self, cols: int) -> None:
+        """Header facts in ``cols`` columns of label/value pairs (3 wide, 2 when the window is narrow)."""
+        if cols == self._fact_cols:
+            return
+        self._fact_cols = cols
+        g = self.facts_grid
+        for lab, val in self._fact_cells:
+            g.removeWidget(lab)
+            g.removeWidget(val)
+        for c in range(6):
+            g.setColumnStretch(c, 0)
+        for i, (lab, val) in enumerate(self._fact_cells):
+            r, c = divmod(i, cols)
+            g.addWidget(lab, r, c * 2, Qt.AlignmentFlag.AlignRight)
+            g.addWidget(val, r, c * 2 + 1)
+            g.setColumnStretch(c * 2 + 1, 1)
+
+    @staticmethod
+    def _fit_tree(t: QTreeWidget, max_rows: int) -> None:
+        """Height = header + visible rows (at most ``max_rows``; scrolls beyond)."""
+        rows, total = 0, 0
+        it = t.topLevelItem(0)
+        fallback = max(t.sizeHintForRow(0), t.fontMetrics().height() + 6)
+        while it is not None and rows < max_rows:
+            h = t.visualItemRect(it).height()
+            total += h if h > 0 else fallback
+            rows += 1
+            it = t.itemBelow(it)
+        t.setFixedHeight(t.header().sizeHint().height() + max(total, 24) + 2 * t.frameWidth() + 2)
+
+    def resizeEvent(self, e) -> None:  # noqa: ANN001, N802
+        super().resizeEvent(e)
+        narrow = self.width() < self.STACK_BELOW_PX
+        self._layout_facts(2 if self.width() < 1400 else 3)
+        self.columns.setDirection(QBoxLayout.Direction.TopToBottom if narrow else QBoxLayout.Direction.LeftToRight)
+        w = self.live.width()
+        self.live.picture.setFixedHeight(max(180, min(int(w * 9 / 16), 560)))   # 16:9 for the column width
+
+    def on_show(self) -> None:
+        self.live.start()
+
+    def on_hide(self) -> None:
+        self.live.stop()
+
+    def _alert_activated(self, it: QTreeWidgetItem, _c: int) -> None:
+        top = it if it.parent() is None else it.parent()
+        self._open_alert(self.alerts.indexOfTopLevelItem(top), 0)
+
+    def _detail_activated(self, it: QTreeWidgetItem, _c: int) -> None:
+        page = it.data(0, Qt.ItemDataRole.UserRole)
+        if page:
+            self.ctx.navigate(page)
 
     def _open_alert(self, row: int, _col: int) -> None:
         item = self.alerts.topLevelItem(row)
@@ -120,6 +251,14 @@ class StatusPage(Page):
         color = {"ok": p.ok, "warning": p.warning, "critical": p.critical}.get(tone, p.text3)
         it.setIcon(0, glyph({"ok": "ok", "warning": "warning", "critical": "critical"}.get(tone, "info"), color, 16))
 
+    def _fact(self, key: str, text: str, tone: str = "") -> None:
+        lab = self.facts[key]
+        lab.setText(text)
+        lab.setToolTip(text)
+        lab.setObjectName(tone)
+        lab.style().polish(lab)
+
+    # ---- data
     def on_status(self, read: StatusRead | None) -> None:
         from .icons import glyph, glyph_pixmap
 
@@ -129,38 +268,91 @@ class StatusPage(Page):
             return
         p = self.ctx.palette
         icon = {Tone.OK: "ok", Tone.WARNING: "warning", Tone.CRITICAL: "critical"}.get(v.tone, "info")
-        self.big_icon.setPixmap(glyph_pixmap(icon, p.tone(v.tone), 44))
+        self.big_icon.setPixmap(glyph_pixmap(icon, p.tone(v.tone), 32))
         self.headline.setText(v.headline)
-        sup = " ".join(x for x in (v.supporting, v.detail) if x)
-        self.supporting.setText(sup + (f"  ·  {v.updated}" if v.updated else ""))
+        self.headline.setStyleSheet(f"color: {p.tone(v.tone)};" if v.tone is not Tone.OK else "")
+        self.supporting.setText(" ".join(x for x in (v.supporting, v.detail) if x))
         doc = read.doc or {}
-        rows: list[tuple[str, str, str]] = []
+        rows: list[tuple[str, str, str, dict]] = []
         if read.kind is not ReadKind.OK:
             rows.append(("X-001", "critical", "The recorder's status is not updating. The recorder may have "
-                                              "stopped or this computer may be overloaded."))
+                                              "stopped or this computer may be overloaded.", {}))
         for a in doc.get("alerts") or []:
             if isinstance(a, dict):
                 sev = a.get("severity")
                 tone = "critical" if sev == 3 else "warning" if sev == 2 else "info"
-                rows.append((str(a.get("code", "")), tone, str(a.get("message", ""))))
+                rows.append((str(a.get("code", "")), tone, str(a.get("message", "")), a))
+        expanded = {self.alerts.topLevelItem(i).text(0) for i in range(self.alerts.topLevelItemCount())
+                    if self.alerts.topLevelItem(i).isExpanded()}
         self.alerts.clear()
-        for code, tone, msg in rows:
+        for code, tone, msg, a in rows:
             it = QTreeWidgetItem([code, msg])
             color = {"critical": p.critical, "warning": p.warning}.get(tone, p.info)
             it.setIcon(0, glyph(tone, color, 16))
             it.setToolTip(1, msg)
+            extra = [("Severity", str(a.get("severity_name") or tone).lower())]
+            if a.get("since_utc"):
+                extra.append(("Since (UTC)", str(a["since_utc"])))
+            if a.get("recording_stopped"):
+                extra.append(("Recording", "stopped by this problem"))
+            for k2, v2 in (a.get("detail") or {}).items():
+                extra.append((str(k2).replace("_", " "), str(v2)))
+            for k2, v2 in extra:
+                child = QTreeWidgetItem(["", f"{k2}: {v2}"])
+                child.setFlags(Qt.ItemFlag.ItemIsEnabled)
+                it.addChild(child)
             self.alerts.addTopLevelItem(it)
+            it.setExpanded(code in expanded)
         if not rows:
             it = QTreeWidgetItem(["", "No alerts."])
             it.setIcon(0, glyph("ok", p.ok, 16))
             it.setFlags(Qt.ItemFlag.ItemIsEnabled)
             self.alerts.addTopLevelItem(it)
+        self.alerts_title.setText(f"Alerts ({len(rows)})" if rows else "Alerts")
         self.alerts.resizeColumnToContents(0)
-        # As tall as its alerts (2 to 8 rows), so the details below get the room.
-        n = min(8, max(2, self.alerts.topLevelItemCount()))
-        row_h = max(22, self.alerts.sizeHintForRow(0))
-        self.alerts.setFixedHeight(self.alerts.header().height() + n * row_h + 6)
+        self._fit_tree(self.alerts, 8)
         self._facts(doc, read)
+        self._header(doc, read, v)
+        self._fit_tree(self.details, 30)                 # measured now that rows are laid out
+
+    def _header(self, doc: dict[str, Any], read: StatusRead, v) -> None:  # noqa: ANN001
+        now = (self.ctx.clock or __import__("time").time)()
+        tz = self.ctx.tz
+        cfg = self.ctx.cfg
+        link = str(doc.get("camera_link") or "")
+        if cfg is not None and cfg.camera.pending:
+            self._fact("camera", "not added yet", "warning")
+        else:
+            self._fact("camera", link.replace("_", " ") or "—", "ok" if link == "connected" else "warning")
+        since = getattr(self.window(), "recording_since_epoch", None) or _ep((doc.get("recording") or {})
+                                                                               .get("run_started_utc"))
+        if v.live and since:
+            self._fact("duration", f"{tf.duration(now - since)} (since {tf.when(since, tz, now)})")
+        elif v.live:
+            self._fact("duration", "recording (start time not known yet)")
+        else:
+            self._fact("duration", "not recording now", "" if doc.get("overall") in ("PAUSED", "WATCHING")
+                       else "warning")
+        st = doc.get("storage") or {}
+        free, secs = st.get("free_bytes"), st.get("seconds_until_attention")
+        text = f"{tf.size(free)} free" if isinstance(free, (int, float)) else "—"
+        if isinstance(secs, (int, float)):
+            text += f" · {tf.approx_remaining(secs)} left"
+        self._fact("storage", text, {"warning": "warning", "critical": "critical"}.get(st.get("level"), ""))
+        arc = doc.get("archive") or {}
+        if not arc:
+            self._fact("archive", "not enabled")
+        elif not arc.get("running"):
+            self._fact("archive", "copying not running", "warning")
+        else:
+            bk = (arc.get("backlog") or {}).get("text") or ""
+            self._fact("archive", f"{arc.get('drive_label') or 'no drive'}" + (f" · {bk}" if bk else ""),
+                       "" if arc.get("drive_label") else "warning")
+        last = (doc.get("last_segment") or {}).get("end_utc")
+        le = _ep(last)
+        self._fact("verified", f"{tf.when(le, tz, now, seconds=True)} (SHA-256 sealed)" if le else "none yet")
+        self._fact("updated", v.updated if read.kind is ReadKind.OK else "not updating (X-001)",
+                   "" if read.kind is ReadKind.OK else "critical")
 
     def _facts(self, doc: dict[str, Any], read: StatusRead) -> None:
         cfg, tz, now = self.ctx.cfg, self.ctx.tz, (self.ctx.clock or __import__("time").time)()
@@ -400,6 +592,63 @@ class SystemPage(Page):
         dl.addWidget(inner, 1)
         tabs.addTab(diag, "Diagnostics")
 
+        # --- check and history (owner request 2026-11-10)
+        hist = QWidget()
+        hl = QVBoxLayout(hist)
+        top = QHBoxLayout()
+        self.b_checkall = icon_button("Check everything", "test", c)
+        self.b_checkall.setToolTip("Check the whole chain: settings, recorder, camera, saved recordings, alerts")
+        self.b_checkall.clicked.connect(self._check_all)
+        top.addWidget(self.b_checkall)
+        self.check_result = QLabel()
+        self.check_result.setWordWrap(True)
+        top.addWidget(self.check_result, 1)
+        hl.addLayout(top)
+        self.checks = table(["Check", "Result", "Detail"])
+        self.checks.setMaximumHeight(210)
+        hl.addWidget(self.checks)
+        good = QGroupBox("Last known good settings")
+        gl = QHBoxLayout(good)
+        self.good_label = muted()
+        gl.addWidget(self.good_label, 1)
+        self.b_good = icon_button("Put them back…", "refresh", c)
+        self.b_good.clicked.connect(self._restore_good)
+        gl.addWidget(self.b_good)
+        hl.addWidget(good)
+        hbox = QGroupBox("Settings history (every save keeps the previous settings)")
+        hb = QVBoxLayout(hbox)
+        self.history = table(["Saved (replaced at)", "File"])
+        hb.addWidget(self.history)
+        hrow = QHBoxLayout()
+        self.b_undo = icon_button("Roll back last change…", "refresh", c)
+        self.b_undo.clicked.connect(lambda: self._restore_history(latest=True))
+        self.b_restore = icon_button("Restore selected…", "document", c)
+        self.b_restore.clicked.connect(lambda: self._restore_history(latest=False))
+        hrow.addWidget(self.b_undo)
+        hrow.addWidget(self.b_restore)
+        hrow.addWidget(muted("A restore keeps the current settings in the history too, so it can be undone. "
+                             "After a change Sentinel checks the recorder for up to 3 minutes and puts the last "
+                             "known good settings back by itself if it does not work."), 1)
+        hb.addLayout(hrow)
+        hl.addWidget(hbox, 1)
+        tamper = QGroupBox("Recording log against a drive (tamper evidence)")
+        tl = QVBoxLayout(tamper)
+        trow = QHBoxLayout()
+        self.b_tamper = icon_button("Check the log against a drive…", "shield", c)
+        self.b_tamper.setToolTip("Archive and review drives carry the recording log's fingerprint from when they "
+                                 "were written; the log on this computer must still match it")
+        self.b_tamper.clicked.connect(self._check_against_drive)
+        trow.addWidget(self.b_tamper)
+        trow.addWidget(muted("Pick an archive drive or a review drive. Any later change to the recording log on "
+                             "this computer shows up as ALTERED."), 1)
+        tl.addLayout(trow)
+        self.tamper_log = OutputLog()
+        tl.addWidget(CommandPanel(self.tamper_log, ctx.palette))
+        hl.addWidget(tamper)
+        for b in (self.b_good, self.b_undo, self.b_restore, self.b_tamper):
+            b.setEnabled(ctx.admin)
+        tabs.addTab(hist, "Check and history")
+
         # --- configuration file
         conf = QWidget()
         cl = QVBoxLayout(conf)
@@ -422,6 +671,89 @@ class SystemPage(Page):
     def _cfgp(self) -> str:
         return str(self.ctx.cfg_path or "")
 
+    # ---- check and history
+    def _load_history(self) -> None:
+        from ...selfcheck import good_path, history, known_good_info
+
+        path = self.ctx.cfg_path
+        if path is None:
+            return
+        import time as _t
+
+        now = _t.time()
+        files = history(path)
+        fill(self.history, [[tf.when(f.stat().st_mtime, self.ctx.tz, now, seconds=True), f.name] for f in files],
+             files, empty="No earlier settings yet.")
+        info = known_good_info(path)
+        if good_path(path).is_file() and info:
+            when = info.get("checked_utc", "")
+            self.good_label.setText(f"Saved when the self-check passed ({when}).")
+            self.b_good.setEnabled(self.ctx.admin)
+        else:
+            self.good_label.setText("None yet: they are saved the first time the self-check passes "
+                                    "(as administrator).")
+            self.b_good.setEnabled(False)
+
+    def _check_all(self) -> None:
+        rep = self.window().check_now()
+        if rep is None:
+            return
+        word = {True: "OK", False: "FAILED", None: "—"}
+        fill(self.checks, [[c.name, "note" if c.warning else word[c.ok], c.detail] for c in rep.checks])
+        self.check_result.setText(rep.summary())
+        self.check_result.setObjectName("ok" if rep.ok else "critical")
+        self.check_result.style().polish(self.check_result)
+        self._load_history()
+
+    def _check_against_drive(self) -> None:
+        from PySide6.QtWidgets import QFileDialog
+
+        folder = QFileDialog.getExistingDirectory(self, "Archive or review drive (its top folder)")
+        if folder:
+            self.tamper_log.run(sentinel_argv("ledger", "verify", "--config", self._cfgp(), "--anchors-from", folder),
+                                "Check the recording log against " + folder)
+
+    def _restore_good(self) -> None:
+        from PySide6.QtWidgets import QMessageBox
+
+        if QMessageBox.question(self, "Sentinel", "Put back the last known good settings and restart the "
+                                "recorder? The current settings are kept in the history.") \
+                == QMessageBox.StandardButton.Yes:
+            self.window().rollback_to_known_good()
+            self._load_history()
+
+    def _restore_history(self, latest: bool) -> None:
+        from PySide6.QtWidgets import QMessageBox
+
+        from ...config import ConfigError, load_config
+        from ...selfcheck import history, restore
+
+        path = self.ctx.cfg_path
+        if path is None:
+            return
+        files = history(path)
+        src = files[0] if latest and files else (selected_data(self.history) if not latest else None)
+        if src is None:
+            self.info("There is nothing to roll back to." if latest else "Select an entry in the history first.")
+            return
+        if QMessageBox.question(self, "Sentinel", f"Restore the settings from {src.name} and restart the recorder? "
+                                "The current settings are kept in the history.") != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            restore(path, src)
+            cfg = load_config(path)
+        except (ConfigError, OSError) as exc:
+            self.problem(f"Those settings could not be restored: {exc}")
+            return
+        win = self.window()
+        win._config_changed(cfg)
+        for page in win.pages.values():
+            if hasattr(page, "load"):
+                page.load()
+        win.restart_recorder()
+        win.watch_after_change()
+        self._load_history()
+
     def _run(self, argv: list[str], title: str) -> None:
         self.log.run(argv, title)
 
@@ -438,6 +770,7 @@ class SystemPage(Page):
                           g.get("reason", "")] for g in data.recent_gaps])
         read = self.ctx.read
         self.raw.setPlainText(pretty_json(read.doc) if read is not None and read.doc else "No status available.")
+        self._load_history()
         try:
             self.config_text.setPlainText(Path(self._cfgp()).read_text(encoding="utf-8"))
         except OSError as exc:

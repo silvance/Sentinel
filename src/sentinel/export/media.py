@@ -58,17 +58,20 @@ def write_concat_list(path: Path, sources: list[Path]) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def remux_argv(ffmpeg: str, list_path: Path, out_partial: Path) -> list[str]:
+def remux_argv(ffmpeg: str, list_path: Path, out_partial: Path, codec: str | None = None) -> list[str]:
+    """``codec`` is the recorded video codec (ffprobe name). H.265 is labelled ``hvc1``, the MP4 tag
+    Windows' and Apple's players expect (FFmpeg's default ``hev1`` is not opened by QuickTime)."""
+    tag = ["-tag:v", "hvc1"] if codec == "hevc" else []
     return [ffmpeg, "-hide_banner", "-nostdin", "-v", "error", "-f", "concat", "-safe", "0", "-i", str(list_path),
-            "-map", "0:v:0", "-c", "copy", "-an", "-sn", "-dn", "-movflags", "+faststart",
+            "-map", "0:v:0", "-c", "copy", *tag, "-an", "-sn", "-dn", "-movflags", "+faststart",
             "-f", "mp4", "-n", str(out_partial)]
 
 
 def remux_concat(ffmpeg: str, sources: list[Path], out_partial: Path, list_path: Path, timeout: float,
-                 popen_kwargs: dict[str, Any] | None = None) -> None:
+                 popen_kwargs: dict[str, Any] | None = None, codec: str | None = None) -> None:
     write_concat_list(list_path, sources)
     try:
-        cp = subprocess.run(remux_argv(ffmpeg, list_path, out_partial), stdin=subprocess.DEVNULL,
+        cp = subprocess.run(remux_argv(ffmpeg, list_path, out_partial, codec), stdin=subprocess.DEVNULL,
                             capture_output=True, timeout=timeout, check=False, **(popen_kwargs or {}))
     except FileNotFoundError:
         raise MediaError(f"tool not found: {ffmpeg}") from None

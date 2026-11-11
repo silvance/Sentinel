@@ -9,9 +9,11 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QGroupBox, QHBoxLayout,
-                               QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QSpinBox, QTableWidget,
-                               QTableWidgetItem, QVBoxLayout, QWidget)
+from PySide6.QtCore import QDate, QDateTime, QTime
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QDateEdit, QDateTimeEdit, QDialog, QDialogButtonBox,
+                               QDoubleSpinBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
+                               QPlainTextEdit, QPushButton, QSpinBox, QTableWidget, QTimeEdit,
+                               QToolButton, QVBoxLayout, QWidget)
 
 from ...config import AppConfig
 from .base import CommandPanel, OutputLog, Page, ReadOnlyBar, capped, icon_button, muted
@@ -99,8 +101,10 @@ class SettingsPage(Page):
         self.ctx.config_changed(new_cfg)
         self.load()                              # show what is saved now (review 2026-11-10)
         self.result.setText(f"Saved (previous settings kept as {backup.name}). Restarting the recorder…")
-        # One restart at a time for the whole window (review 2026-11-10).
+        # One restart at a time for the whole window (review 2026-11-10); then check that the recorder
+        # works with the new settings, and put the last working ones back if not.
         self.ctx.restart(on_done=self.result.setText)
+        self.ctx.after_change()
 
 
 # --------------------------------------------------------------------------- camera
@@ -161,10 +165,22 @@ class CameraPage(SettingsPage):
         self.test_result.setWordWrap(True)
         row.addWidget(self.test_result, 1)
         self.body.addLayout(row)
-        self.body.addStretch(1)
+        from .liveview import LiveView
+
+        lbox = QGroupBox("Live view (main stream, from the recorder, with the saved settings)")
+        ll = QVBoxLayout(lbox)
+        self.live = LiveView(ctx)
+        ll.addWidget(self.live)
+        self.body.addWidget(capped(lbox), 1)
         self.tested_ok_for: str | None = None
         self.saved_user = ""
         self.finish_layout()
+
+    def on_show(self) -> None:
+        self.live.start()
+
+    def on_hide(self) -> None:
+        self.live.stop()
 
     def _pending_changed(self, on: bool) -> None:
         for w in (self.host, self.port, self.path, self.transport, self.user, self.password, self.test_btn):
@@ -341,7 +357,10 @@ class CameraPage(SettingsPage):
 
 
 # --------------------------------------------------------------------------- schedule
-ACTIONS = [("record", "Record"), ("pause", "Pause"), ("motion", "Record on motion")]
+ACTIONS = [("record", "Record"), ("pause", "Pause (do not record)"), ("motion", "Record on motion")]
+DAY_KEYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+DAY_LABELS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+GROUPS = {"weekdays": set(DAY_KEYS[:5]), "weekend": set(DAY_KEYS[5:]), "daily": set(DAY_KEYS)}
 
 
 def _action_combo(value: str) -> QComboBox:
@@ -352,61 +371,252 @@ def _action_combo(value: str) -> QComboBox:
     return c
 
 
-class PeriodTable(QWidget):
-    """Editable list of schedule periods (action + text columns)."""
+def days_from_config(value: Any) -> set[str]:
+    items = [value] if isinstance(value, str) else list(value or [])
+    out: set[str] = set()
+    for it in items:
+        k = str(it).strip().lower()
+        out |= GROUPS.get(k, {k[:3]} if k[:3] in DAY_KEYS else set())
+    return out
 
-    def __init__(self, columns: list[str], hints: list[str], parent: QWidget | None = None) -> None:
+
+def days_to_config(days: set[str]) -> list[str]:
+    """Compact form for the file: "daily", "weekdays", "weekend", else the day names in order."""
+    for name, group in GROUPS.items():
+        if days == group:
+            return [name]
+    return [d for d in DAY_KEYS if d in days]
+
+
+class DaysPicker(QWidget):
+    """Seven toggle buttons, Mon to Sun: no typing of day names (owner request 2026-11-10)."""
+
+    def __init__(self, days: set[str], parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(2, 0, 2, 0)
+        lay.setSpacing(2)
+        self.buttons: dict[str, QToolButton] = {}
+        for key, text in zip(DAY_KEYS, DAY_LABELS):
+            b = QToolButton()
+            b.setText(text)
+            b.setCheckable(True)
+            b.setChecked(key in days)
+            b.setAutoRaise(False)
+            b.setToolTip(f"{text}: on or off")
+            lay.addWidget(b)
+            self.buttons[key] = b
+
+    def days(self) -> set[str]:
+        return {k for k, b in self.buttons.items() if b.isChecked()}
+
+
+def _time_edit(text: str) -> QTimeEdit:
+    t = QTimeEdit()
+    t.setDisplayFormat("HH:mm")
+    hh, _, mm = (text or "00:00").partition(":")
+    try:
+        t.setTime(QTime(int(hh) % 24, int(mm[:2] or 0)))
+    except ValueError:
+        t.setTime(QTime(0, 0))
+    return t
+
+
+def _date_time_edit(value: QDateTime) -> QDateTimeEdit:
+    e = QDateTimeEdit(value)
+    e.setCalendarPopup(True)
+    e.setDisplayFormat("ddd d MMM yyyy  HH:mm")
+    return e
+
+
+def parse_date_value(text: str, is_end: bool) -> QDateTime:
+    """``YYYY-MM-DD`` or ``YYYY-MM-DD HH:MM``; a date alone as an end means the END of that day."""
+    text = (text or "").strip()
+    if len(text) <= 10:
+        d = QDate.fromString(text, "yyyy-MM-dd")
+        if not d.isValid():
+            d = QDate.currentDate()
+        dt = QDateTime(d, QTime(0, 0))
+        return dt.addDays(1) if is_end else dt
+    dt = QDateTime.fromString(text[:16], "yyyy-MM-dd HH:mm")
+    return dt if dt.isValid() else QDateTime.currentDateTime()
+
+
+def date_value(dt: QDateTime) -> str:
+    return dt.toString("yyyy-MM-dd HH:mm")
+
+
+class WeeklyTable(QWidget):
+    """Weekly periods: action, days (toggle buttons), start and end time (time pickers)."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
-        self.t = QTableWidget(0, 1 + len(columns))
-        self.t.setHorizontalHeaderLabels(["Action", *columns])
+        self.t = QTableWidget(0, 4)
+        self.t.setHorizontalHeaderLabels(["Action", "Days", "From", "Until"])
         self.t.verticalHeader().setVisible(False)
-        self.t.verticalHeader().setDefaultSectionSize(24)
+        self.t.verticalHeader().setDefaultSectionSize(34)
+        self.t.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.t.horizontalHeader().setStretchLastSection(True)
-        self.hints = hints
         lay.addWidget(self.t)
         row = QHBoxLayout()
         self.add_btn = QPushButton("Add")
-        self.add_btn.clicked.connect(lambda: self.add("record", [""] * len(columns)))
+        self.add_btn.clicked.connect(lambda: self.add("record", set(DAY_KEYS[:5]), "07:00", "18:00"))
         self.del_btn = QPushButton("Remove selected")
         self.del_btn.clicked.connect(self._remove)
         row.addWidget(self.add_btn)
         row.addWidget(self.del_btn)
-        row.addWidget(muted("; ".join(hints)), 1)
+        row.addWidget(muted("Until 00:00 means until midnight. An end before the start runs past midnight."), 1)
         lay.addLayout(row)
 
     def clear(self) -> None:
         self.t.setRowCount(0)
 
-    def add(self, action: str, values: list[str]) -> None:
+    def add(self, action: str, days: set[str], start: str, end: str) -> None:
         r = self.t.rowCount()
         self.t.insertRow(r)
         self.t.setCellWidget(r, 0, _action_combo(action))
-        for j, v in enumerate(values, 1):
-            self.t.setItem(r, j, QTableWidgetItem(v))
-        self.t.resizeColumnToContents(0)
+        self.t.setCellWidget(r, 1, DaysPicker(days))
+        self.t.setCellWidget(r, 2, _time_edit(start))
+        self.t.setCellWidget(r, 3, _time_edit("00:00" if end == "24:00" else end))
+        self.t.resizeColumnsToContents()
 
     def _remove(self) -> None:
         rows = sorted({i.row() for i in self.t.selectedIndexes()} | ({self.t.currentRow()} - {-1}), reverse=True)
         for r in rows:
             self.t.removeRow(r)
 
-    def rows(self) -> list[tuple[str, list[str]]]:
+    def rows(self) -> list[dict[str, Any]]:
         out = []
         for r in range(self.t.rowCount()):
-            combo = self.t.cellWidget(r, 0)
-            vals = [(self.t.item(r, j).text().strip() if self.t.item(r, j) else "")
-                    for j in range(1, self.t.columnCount())]
-            if not any(vals):
+            action, days = self.t.cellWidget(r, 0), self.t.cellWidget(r, 1)
+            start, end = self.t.cellWidget(r, 2), self.t.cellWidget(r, 3)
+            picked = days.days() if isinstance(days, DaysPicker) else set()
+            if not picked:
                 continue
-            out.append((str(combo.currentData()) if isinstance(combo, QComboBox) else "record", vals))
+            e = end.time().toString("HH:mm") if isinstance(end, QTimeEdit) else "00:00"
+            out.append({"action": str(action.currentData()) if isinstance(action, QComboBox) else "record",
+                        "days": days_to_config(picked),
+                        "start": start.time().toString("HH:mm") if isinstance(start, QTimeEdit) else "00:00",
+                        "end": "24:00" if e == "00:00" else e})
         return out
 
     def set_enabled(self, on: bool) -> None:
         self.t.setEnabled(on)
         self.add_btn.setEnabled(on)
         self.del_btn.setEnabled(on)
+
+
+class DatesTable(QWidget):
+    """One-off periods (holidays, leave): action, from, until (date-and-time pickers with a calendar)."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        self.t = QTableWidget(0, 3)
+        self.t.setHorizontalHeaderLabels(["Action", "From", "Until"])
+        self.t.verticalHeader().setVisible(False)
+        self.t.verticalHeader().setDefaultSectionSize(34)
+        self.t.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        lay.addWidget(self.t)
+        row = QHBoxLayout()
+        self.leave_btn = QPushButton("Days off…")
+        self.leave_btn.setToolTip("Stop recording for whole days (leave, holidays); recording starts again by itself")
+        self.add_btn = QPushButton("Add period")
+        self.add_btn.clicked.connect(self._add_default)
+        self.del_btn = QPushButton("Remove selected")
+        self.del_btn.clicked.connect(self._remove)
+        for b in (self.leave_btn, self.add_btn, self.del_btn):
+            row.addWidget(b)
+        row.addWidget(muted("These take priority over the weekly periods. The recorder keeps running and goes "
+                            "back to the weekly plan by itself when a period ends."), 1)
+        lay.addLayout(row)
+        self.t.horizontalHeader().setStretchLastSection(True)
+
+    def _add_default(self) -> None:
+        start = QDateTime(QDate.currentDate().addDays(1), QTime(0, 0))
+        self.add("pause", start, start.addDays(1))
+
+    def clear(self) -> None:
+        self.t.setRowCount(0)
+
+    def add(self, action: str, start: QDateTime, end: QDateTime) -> None:
+        r = self.t.rowCount()
+        self.t.insertRow(r)
+        self.t.setCellWidget(r, 0, _action_combo(action))
+        self.t.setCellWidget(r, 1, _date_time_edit(start))
+        self.t.setCellWidget(r, 2, _date_time_edit(end))
+        self.t.resizeColumnsToContents()
+
+    def _remove(self) -> None:
+        rows = sorted({i.row() for i in self.t.selectedIndexes()} | ({self.t.currentRow()} - {-1}), reverse=True)
+        for r in rows:
+            self.t.removeRow(r)
+
+    def rows(self) -> list[dict[str, Any]]:
+        out = []
+        for r in range(self.t.rowCount()):
+            action, start, end = (self.t.cellWidget(r, c) for c in range(3))
+            if not isinstance(start, QDateTimeEdit) or not isinstance(end, QDateTimeEdit):
+                continue
+            out.append({"action": str(action.currentData()) if isinstance(action, QComboBox) else "pause",
+                        "start": date_value(start.dateTime()), "end": date_value(end.dateTime())})
+        return out
+
+    def set_enabled(self, on: bool) -> None:
+        self.t.setEnabled(on)
+        for b in (self.leave_btn, self.add_btn, self.del_btn):
+            b.setEnabled(on)
+
+
+class DaysOffDialog(QDialog):
+    """"He is on leave for 6 days in December": no recording from the first day off until the day he
+    is back; nothing is shut down, recording starts again by itself (owner request 2026-11-10)."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Days off")
+        lay = QVBoxLayout(self)
+        f = QFormLayout()
+        today = QDate.currentDate()
+        self.first = QDateEdit(today.addDays(1))
+        self.back = QDateEdit(today.addDays(7))
+        for d in (self.first, self.back):
+            d.setCalendarPopup(True)
+            d.setDisplayFormat("dddd d MMMM yyyy")
+        f.addRow("First day off", self.first)
+        f.addRow("Back on", self.back)
+        self.action = _action_combo("pause")
+        f.addRow("While away", self.action)
+        lay.addLayout(f)
+        self.summary = muted()
+        lay.addWidget(self.summary)
+        for d in (self.first, self.back):
+            d.dateChanged.connect(self._update)
+        self.action.currentIndexChanged.connect(self._update)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        self.ok = bb.button(QDialogButtonBox.StandardButton.Ok)
+        lay.addWidget(bb)
+        self._update()
+
+    def period(self) -> tuple[QDateTime, QDateTime]:
+        return QDateTime(self.first.date(), QTime(0, 0)), QDateTime(self.back.date(), QTime(0, 0))
+
+    def _update(self) -> None:
+        start, end = self.period()
+        n = start.daysTo(end)
+        ok = n >= 1
+        self.ok.setEnabled(ok)
+        what = {"pause": "Nothing is recorded", "motion": "Recording only when there is motion",
+                "record": "Recording all the time"}[str(self.action.currentData())]
+        self.summary.setText(
+            f"{what} from {start.toString('dddd d MMMM')} 00:00 until {end.toString('dddd d MMMM')} 00:00 "
+            f"({n} day{'s' if n != 1 else ''}). Then the normal schedule applies again by itself. The laptop and "
+            "Sentinel keep running." if ok else "'Back on' must be after the first day off.")
 
 
 class SchedulePage(SettingsPage):
@@ -422,8 +632,13 @@ class SchedulePage(SettingsPage):
         top.addRow("", self.enabled)
         self.default = self.editor(_action_combo("record"))
         top.addRow("Outside the periods below", self.default)
-        self.tz = self.editor(QLineEdit())
-        self.tz.setPlaceholderText(ctx.cfg.recording.display_timezone if ctx.cfg else "UTC")
+        self.tz = self.editor(QComboBox())
+        self.tz.setEditable(True)
+        from .setup_page import COMMON_ZONES
+
+        self.tz.addItem("", "")
+        self.tz.addItems(COMMON_ZONES)
+        self.tz.setToolTip("Empty: the time zone on the General page")
         top.addRow("Time zone", self.tz)
         preset = self.editor(icon_button("Work hours, motion at other times", "time", ctx.palette.text))
         preset.setToolTip("Record all the time Monday to Friday 07:00–18:00; at other times record only on motion")
@@ -433,18 +648,17 @@ class SchedulePage(SettingsPage):
         topw.setLayout(top)
         top.setContentsMargins(0, 0, 0, 0)
         self.body.addWidget(capped(topw))
-        self.weekly = PeriodTable(["Days", "Start", "End"],
-                                  ["Days: mon..sun, weekdays, weekend or daily (comma-separated)",
-                                   "Times HH:MM; end 24:00 = midnight; an end before the start runs past midnight"])
-        self.dates = PeriodTable(["Start", "End"], ["Dates: YYYY-MM-DD HH:MM; a date alone as the end = end of that day"])
+        self.weekly = WeeklyTable()
+        self.dates = DatesTable()
+        self.dates.leave_btn.clicked.connect(self._days_off)
         g1 = QGroupBox("Every week")
         QVBoxLayout(g1).addWidget(self.weekly)
-        g2 = QGroupBox("Particular dates (take priority over the weekly periods)")
+        g2 = QGroupBox("Particular dates: days off, holidays")
         QVBoxLayout(g2).addWidget(self.dates)
-        self.body.addWidget(g1, 2)
-        self.body.addWidget(g2, 1)
+        self.body.addWidget(g1, 3)
+        self.body.addWidget(g2, 2)
         prev = QHBoxLayout()
-        b = QPushButton("Preview the next 7 days")
+        b = QPushButton("Preview the next 14 days")
         b.clicked.connect(self.preview)
         prev.addWidget(b)
         prev.addStretch(1)
@@ -462,16 +676,15 @@ class SchedulePage(SettingsPage):
         raw = self.raw().get("schedule", {}) or {}
         self.enabled.setChecked(bool(raw.get("enabled", False)))
         self.default.setCurrentIndex(max(0, self.default.findData(raw.get("default", "record"))))
-        self.tz.setText(str(raw.get("timezone", "") or ""))
+        self.tz.setEditText(str(raw.get("timezone", "") or ""))
         self.weekly.clear()
         for w in raw.get("weekly", []) or []:
-            days = w.get("days", [])
-            self.weekly.add(str(w.get("action", "record")),
-                            [", ".join(days) if isinstance(days, list) else str(days), str(w.get("start", "")),
-                             str(w.get("end", ""))])
+            self.weekly.add(str(w.get("action", "record")), days_from_config(w.get("days", [])),
+                            str(w.get("start", "00:00")), str(w.get("end", "24:00")))
         self.dates.clear()
         for d in raw.get("dates", []) or []:
-            self.dates.add(str(d.get("action", "record")), [str(d.get("start", "")), str(d.get("end", ""))])
+            self.dates.add(str(d.get("action", "pause")), parse_date_value(str(d.get("start", "")), False),
+                           parse_date_value(str(d.get("end", "")), True))
         self.result.clear()
         self.preview()
 
@@ -479,15 +692,23 @@ class SchedulePage(SettingsPage):
         self.enabled.setChecked(True)
         self.default.setCurrentIndex(self.default.findData("motion"))
         self.weekly.clear()
-        self.weekly.add("record", ["weekdays", "07:00", "18:00"])
+        self.weekly.add("record", set(DAY_KEYS[:5]), "07:00", "18:00")
         self.preview()
 
+    def _days_off(self) -> None:
+        dlg = DaysOffDialog(self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        start, end = dlg.period()
+        self.enabled.setChecked(True)
+        self.dates.add(str(dlg.action.currentData()), start, end)
+        self.preview()
+        self.result.setText("Days off added. Press Save and restart recorder to use them.")
+
     def tables(self) -> dict[str, dict[str, Any]]:
-        weekly = [{"action": a, "days": [d for d in re.split(r"[,\s]+", v[0]) if d], "start": v[1], "end": v[2]}
-                  for a, v in self.weekly.rows()]
-        dates = [{"action": a, "start": v[0], "end": v[1]} for a, v in self.dates.rows()]
+        weekly, dates = self.weekly.rows(), self.dates.rows()
         table: dict[str, Any] = {"enabled": self.enabled.isChecked(), "default": str(self.default.currentData()),
-                                 "timezone": self.tz.text().strip()}
+                                 "timezone": self.tz.currentText().strip()}
         if weekly:
             table["weekly"] = weekly
         if dates:
@@ -500,7 +721,7 @@ class SchedulePage(SettingsPage):
         cfg = self.cfg
         try:
             sc = parse_schedule(self.tables()["schedule"], cfg.recording.display_timezone if cfg else "UTC")
-            self.plan.setPlainText(render_plan(RecordingSchedule(sc), time.time(), days=7))
+            self.plan.setPlainText(render_plan(RecordingSchedule(sc), time.time(), days=14))
         except ScheduleError as exc:
             self.plan.setPlainText(f"Not valid yet: {exc}")
 
