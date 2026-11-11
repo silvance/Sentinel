@@ -837,3 +837,23 @@ def test_the_apply_button_itself_opens_the_file_browser(app: QApplication, tmp_p
     tab.b_back.click()
     assert went == [""]
     w.close()
+
+
+def test_while_updating_the_window_says_so_instead_of_system_error(app: QApplication, tmp_path: Path,
+                                                                  monkeypatch: pytest.MonkeyPatch) -> None:
+    """Field report 2026-11-11: during the update the window showed 'System error' with no explanation."""
+    from dataclasses import asdict
+
+    from sentinel.update import apply as ap
+
+    w = _window(app, tmp_path, admin=True, doc=False)          # no status from the recorder: it is stopped
+    folders = ap.Folders(tmp_path / "Sentinel")
+    ap.Pending("update", "0.3.3", "0.3.4", str(folders.app), "s", "p", None,
+               asdict(ap.RecordingState())).write(folders.state)
+    monkeypatch.setattr(w, "_update_folders", lambda: folders)
+    w.refresh()
+    assert w.sb_state.text().startswith("Updating to Sentinel 0.3.4: recording restarts by itself")
+    folders.state.unlink()
+    w.refresh()
+    assert "Updating" not in w.sb_state.text()
+    w.close()

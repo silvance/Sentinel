@@ -328,6 +328,21 @@ def write_result(folders: Folders, outcome: str, pending: Pending | None, messag
     return doc
 
 
+def in_progress(folders: Folders, now: float | None = None, stale_s: float = 3600.0) -> str | None:
+    """'Updating to Sentinel 0.3.4' while an update or rollback is under way (its state file is less
+    than an hour old), else None. The window shows it instead of "System error" while recording is
+    stopped for the swap (field report 2026-11-11)."""
+    try:
+        age = (time.time() if now is None else now) - folders.state.stat().st_mtime
+        if age > stale_s:
+            return None
+        p = Pending.read(folders.state)
+    except (OSError, ValueError, TypeError):
+        return None
+    return (f"Updating to Sentinel {p.to_version}" if p.action == "update"
+            else f"Going back to Sentinel {p.to_version}")
+
+
 def read_result(folders: Folders) -> dict[str, Any] | None:
     try:
         return json.loads(folders.result.read_text("utf-8"))
@@ -396,24 +411,41 @@ function Fail-Plain($m) {{
 function From-App {{
   @(Get-CimInstance Win32_Process | Where-Object {{ $_.ExecutablePath -and $_.ExecutablePath.StartsWith($app + '\\', [StringComparison]::OrdinalIgnoreCase) }})
 }}
+# Only the recorder must have stopped by itself (it closes its current file first). Windows and the
+# archive copier are ended here: the copier is built to survive a drive pulled mid-copy and is
+# started again with the recorder (field report 2026-11-11: it was taken for the recorder).
+function Recorders {{
+  @(From-App | Where-Object {{ $_.CommandLine -match '\\brecorder\\s+run\\b' -or $_.Name -like 'SentinelService*' }})
+}}
+# A click in this window must not pause the update (field report 2026-11-11: Windows' text selection
+# mode froze it at the next line printed). Switch off QuickEdit for this console.
+try {{
+  $cm = Add-Type -PassThru -Name ConsoleMode -Namespace SentinelUpdate -MemberDefinition @'
+[DllImport("kernel32.dll")] public static extern System.IntPtr GetStdHandle(int n);
+[DllImport("kernel32.dll")] public static extern bool GetConsoleMode(System.IntPtr h, out uint m);
+[DllImport("kernel32.dll")] public static extern bool SetConsoleMode(System.IntPtr h, uint m);
+'@
+  $hin = $cm::GetStdHandle(-10); $mode = 0
+  if ($cm::GetConsoleMode($hin, [ref]$mode)) {{ [void]$cm::SetConsoleMode($hin, (($mode -band (-bnot 0x40)) -bor 0x80)) }}
+}} catch {{}}
 Say {_ps(what + ".")}
 Say 'Recording has been stopped for the update; it restarts by itself. Please do not close this window.'
-{f"try {{ Wait-Process -Id {int(window_pid)} -Timeout 60 -ErrorAction SilentlyContinue }} catch {{}}" if window_pid else ""}
+{f"try {{ Wait-Process -Id {int(window_pid)} -Timeout 30 -ErrorAction SilentlyContinue }} catch {{}}" if window_pid else ""}
 $deadline = (Get-Date).AddSeconds(60)
-while ((From-App).Count -gt 0 -and (Get-Date) -lt $deadline) {{ Start-Sleep -Seconds 1 }}
-$left = From-App
-if ($left.Count -gt 0) {{
-  $rec = @($left | Where-Object {{ $_.CommandLine -match '\\b(recorder|archive|host)\\b' -or $_.Name -like 'SentinelService*' }})
-  if ($rec.Count -gt 0) {{
-    Say 'The recorder is still running; this is cancelled and recording continues on the installed version.'
-    & $exe update restart --state $state --outcome aborted --reason 'the recorder did not stop'
-    {"Remove-Item -LiteralPath $staged -Recurse -Force -ErrorAction SilentlyContinue" if p.action == "update"
-     else "# (going back: $staged is the kept previous version; it stays)"}
-    Start-Sleep -Seconds 5; exit 1
-  }}
-  Say ('Closing ' + $left.Count + ' Sentinel window(s) still open.')
-  $left | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}
-  Start-Sleep -Seconds 2
+while ((Recorders).Count -gt 0 -and (Get-Date) -lt $deadline) {{ Start-Sleep -Seconds 1 }}
+if ((Recorders).Count -gt 0) {{
+  Say 'The recorder is still running; this is cancelled and recording continues on the installed version.'
+  & $exe update restart --state $state --outcome aborted --reason 'the recorder did not stop'
+  {"Remove-Item -LiteralPath $staged -Recurse -Force -ErrorAction SilentlyContinue" if p.action == "update"
+   else "# (going back: $staged is the kept previous version; it stays)"}
+  Start-Sleep -Seconds 5; exit 1
+}}
+$others = From-App
+if ($others.Count -gt 0) {{
+  Say ('Closing ' + $others.Count + ' other Sentinel program(s): open windows and the archive copier (it starts again after the update).')
+  $others | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}
+  $gone = (Get-Date).AddSeconds(20)
+  while ((From-App).Count -gt 0 -and (Get-Date) -lt $gone) {{ Start-Sleep -Seconds 1 }}
 }}
 try {{
   try {{ Get-Acl -LiteralPath $app | Set-Acl -LiteralPath $staged }} catch {{ Say ('Note: permissions not copied: ' + $_.Exception.Message) }}

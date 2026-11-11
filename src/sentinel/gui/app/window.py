@@ -420,6 +420,12 @@ class AppWindow(QMainWindow):
         tone_icon = {Tone.OK: "ok", Tone.WARNING: "warning", Tone.CRITICAL: "critical"}.get(v.tone, "info")
         test = (f"<br><span style='color:{p.critical}'>TEST CAMERA — not evidence</span>"
                 if v.test_camera is not None else "")
+        updating = self._update_in_progress()
+        if updating:       # recording is stopped on purpose for the swap; not a "System error"
+            from dataclasses import replace
+
+            v = replace(v, headline=f"{updating}: recording restarts by itself", tone=Tone.INFO)
+            color, tone_icon = p.tone(Tone.INFO), "info"
         self.state_label.setText(f"<span style='color:{color}'>●</span> <b>{v.headline}</b>{test}")
         self.sb_state.setIcon(glyph(tone_icon, color, 16))
         self.sb_state.setText(v.headline + ("  ·  TEST CAMERA — not evidence" if test else ""))
@@ -764,6 +770,12 @@ class AppWindow(QMainWindow):
 
         app = app_dir()
         return Folders(app) if app is not None else None
+
+    def _update_in_progress(self) -> str | None:
+        from ...update.apply import in_progress
+
+        folders = self._update_folders()
+        return in_progress(folders) if folders is not None else None
 
     def close_for_update(self) -> None:
         """The update (in its own console) replaces the program folder: close without questions."""

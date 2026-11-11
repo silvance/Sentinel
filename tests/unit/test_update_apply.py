@@ -213,3 +213,27 @@ def test_dropping_an_update_file_on_sentinel_runs_update_apply(monkeypatch) -> N
     monkeypatch.setattr(ucli, "main", lambda argv: seen.append(argv) or 0)
     assert lcli.main([r"D:\Sentinel-update-0.3.1.sntu"]) == 0
     assert seen == [["apply", r"D:\Sentinel-update-0.3.1.sntu"]]
+
+
+# ---------------------------------------------------------------------- field report 2026-11-11 (laptop)
+def test_only_the_recorder_blocks_the_swap_and_a_click_cannot_pause_it(tmp_path: Path) -> None:
+    """The archive copier (a background 'archive run' process) was taken for a recorder that did not
+    stop, so the update cancelled itself; and a click in the window froze it (QuickEdit)."""
+    app = tmp_path / "Sentinel"
+    folders = ap.Folders(app)
+    p = ap.Pending("update", "0.3.0", "0.3.4", str(app), str(folders.staging("0.3.4")), str(folders.previous),
+                   None, asdict(ap.RecordingState()))
+    s = ap.finisher_script(p, folders, None)
+    block = s[s.index("function Recorders"):s.index("function Recorders") + 200]
+    assert r"recorder\s+run" in block and "archive" not in block
+    assert "SetConsoleMode" in s and "0x40" in s and s.index("SetConsoleMode") < s.index("Say 'Recording has been")
+    assert s.index("(Recorders).Count -gt 0) {") < s.index("$others = From-App") < s.index("Move-Item")
+    assert "Stop-Process -Id $_.ProcessId" in s
+
+
+def test_the_window_can_tell_an_update_is_under_way(tmp_path: Path) -> None:
+    folders = ap.Folders(tmp_path / "Sentinel")
+    assert ap.in_progress(folders) is None
+    _pending(folders.app, None)
+    assert ap.in_progress(folders) == f"Updating to Sentinel {__version__}"
+    assert ap.in_progress(folders, now=folders.state.stat().st_mtime + 7200) is None      # stale: ignored
