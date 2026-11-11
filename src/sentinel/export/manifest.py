@@ -153,8 +153,9 @@ def _jl(v: str | None) -> Any:
 
 class ManifestBuilder:
     def __init__(self, batch: dict[str, Any], items: list[dict[str, Any]], segments: dict[str, dict[str, Any]],
-                 drive: dict[str, Any], tz: ZoneInfo) -> None:
+                 drive: dict[str, Any], tz: ZoneInfo, organization: str = "") -> None:
         self.batch = batch
+        self.organization = organization          # [site] organization; "" = not named
         self.items = [i for i in items if i["kind"] != "document"]
         self.segments = segments
         self.drive = drive
@@ -328,6 +329,7 @@ class ManifestBuilder:
         doc = {
             "format": FORMAT, "format_version": FORMAT_VERSION,
             "export_id": b["batch_id"], "purpose": b["purpose"], "camera_id": b["camera_id"],
+            **({"organization": self.organization} if self.organization else {}),
             "generated_utc": b["manifest_generated_utc"], "planned_utc": b["planned_utc"],
             "interval": {"start_utc": b["interval_start_utc"], "end_utc": b["interval_end_utc"],
                          "start_local": self._local(b["interval_start_utc"]),
@@ -414,7 +416,7 @@ small{{color:#555}}
 </style></head><body>
 <h1>Sentinel review drive &mdash; export summary</h1>
 <div class="box"><b>Recordings from {e(self._local(b['interval_start_utc']) or '')} to {e(self._local(b['interval_end_utc']) or '')}</b><br>
-Camera: {e(b['camera_id'])}. Every file listed was copied to this drive and then read back and checked.</div>
+{('Organisation: ' + e(self.organization) + '. ') if self.organization else ''}Camera: {e(b['camera_id'])}. Every file listed was copied to this drive and then read back and checked.</div>
 <h2>How to watch</h2>
 <p>Open the <b>Recordings</b> folder, then the folder for the day, and double-click a video. File names are the local
 start and end time followed by the time zone. A new file starts after every gap.</p>

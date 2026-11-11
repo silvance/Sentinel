@@ -89,6 +89,10 @@ class SetupPage(Page):
 
         gen = QGroupBox("This computer")
         g = QFormLayout(gen)
+        self.org = QLineEdit()
+        self.org.setMaxLength(100)
+        self.org.setPlaceholderText("optional; leave empty to name no organisation")
+        g.addRow("Organisation", self.org)
         self.name = QLineEdit("Camera 1")
         g.addRow("Camera label for reports", self.name)
         self.tz = QComboBox()
@@ -115,7 +119,8 @@ class SetupPage(Page):
         self.body.addLayout(row)
         self.body.addStretch(1)
         self._tasks: list[Task] = []
-        for w in (self.later, self.host, self.port, self.path, self.user, self.password, self.test_btn, self.name,
+        for w in (self.later, self.host, self.port, self.path, self.user, self.password, self.test_btn, self.org,
+                  self.name,
                   self.tz, self.storage, b, self.go):
             w.setEnabled(ctx.admin)
 
@@ -136,6 +141,7 @@ class SetupPage(Page):
         root = Path(self.storage.text().strip() or str(self.layout_.spool_dir.parent))
         default_root = self.layout_.spool_dir.parent
         common = dict(camera_name=self.name.text().strip() or "Camera 1", timezone=tz,
+                      organization=self.org.text().strip(),
                       storage_root=None if root == default_root else root)
         if self.later.isChecked():
             return SetupAnswers("", "", camera_later=True, **common)

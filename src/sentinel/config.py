@@ -171,6 +171,16 @@ class RetentionConfig:
 
 
 @dataclass(frozen=True)
+class SiteConfig:
+    """Where this recorder is used (owner request 2026-11-10). Optional: when ``organization`` is
+    empty the organisation is not named anywhere (window, reports, review exports)."""
+    organization: str = ""
+
+
+ORGANIZATION_MAX = 100
+
+
+@dataclass(frozen=True)
 class AppConfig:
     camera: CameraConfig
     recording: RecordingConfig
@@ -184,6 +194,7 @@ class AppConfig:
     retention: RetentionConfig = field(default_factory=RetentionConfig)
     schedule: ScheduleConfig = field(default_factory=ScheduleConfig)   # [schedule] (sentinel.schedule); off by default
     motion: MotionConfig = field(default_factory=MotionConfig)         # [motion]: used by schedule action "motion"
+    site: SiteConfig = field(default_factory=SiteConfig)               # [site]: optional organisation name
 
     @property
     def spool_path(self) -> Path:
@@ -404,16 +415,25 @@ def _build_drives(raw: Any) -> DrivePolicy:
         raise ConfigError(str(exc)) from None
 
 
+def _validate_site(site: SiteConfig) -> None:
+    org = site.organization
+    if not isinstance(org, str):
+        raise ConfigError("[site] organization must be text")
+    if org != org.strip() or len(org) > ORGANIZATION_MAX or any(ord(c) < 32 or ord(c) == 127 for c in org):
+        raise ConfigError(f"[site] organization must be one line of at most {ORGANIZATION_MAX} characters, "
+                          "without leading or trailing spaces")
+
+
 def load_config_dict(raw: dict[str, Any], base_dir: Path | None = None, source: str | None = None) -> AppConfig:
     base_dir = base_dir or Path.cwd()
     unknown = sorted(set(raw) - {"camera", "recording", "storage", "tools", "service", "export", "drives",
-                                 "archive", "retention", "schedule", "motion"})
+                                 "archive", "retention", "schedule", "motion", "site"})
     if unknown:
         raise ConfigError(f"unknown section(s): {', '.join(unknown)}")
     if "camera" not in raw:
         raise ConfigError("[camera] section is required")
     sections = {name: _table(raw, name) for name in ("camera", "recording", "storage", "tools", "service",
-                                                      "export", "archive", "retention", "motion")}
+                                                      "export", "archive", "retention", "motion", "site")}
     # Omitted keys fall back to the install layout (sentinel/paths.py): bundled FFmpeg next to a
     # frozen executable before PATH, and the per-machine data folders.
     storage_raw = {**default_storage_dirs(), **dict(sections["storage"] or {})}
@@ -437,7 +457,9 @@ def load_config_dict(raw: dict[str, Any], base_dir: Path | None = None, source: 
         archive=_build(ArchiveConfig, "archive", sections["archive"], base_dir),
         retention=_build(RetentionConfig, "retention", sections["retention"], base_dir),
         motion=_build(MotionConfig, "motion", sections["motion"], base_dir),
+        site=_build(SiteConfig, "site", sections["site"], base_dir),
     )
+    _validate_site(cfg.site)
     _validate(cfg)
     try:
         validate_motion(cfg.motion)

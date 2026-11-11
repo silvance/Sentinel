@@ -159,6 +159,7 @@ def build_report(cfg: AppConfig, reason: str = "requested", out_dir: Path | None
         "==========================",
         f"Created (UTC):      {iso_utc(time.time())}",
         f"Reason:             {reason}",
+        *([f"Organisation:       {cfg.site.organization}"] if cfg.site.organization else []),
         f"Camera:             {cfg.camera.id} {cfg.camera.name}".rstrip(),
         f"Host:               {socket.gethostname()}  ({pyplatform.platform()})",
         f"Sentinel version:   {__version__}",

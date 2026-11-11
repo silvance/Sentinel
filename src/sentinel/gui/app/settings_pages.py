@@ -683,3 +683,47 @@ class StoragePage(SettingsPage):
         drives.update(erase_enabled=self.erase_on.isChecked(), serial_confirm_chars=self.serial_chars.value(),
                       min_size_gb=round(self.min_size.value(), 1))
         return {"archive": archive, "retention": retention, "drives": drives}
+
+
+# --------------------------------------------------------------------------- general
+class GeneralPage(SettingsPage):
+    """The organisation using this recorder (optional) and the time zone times are shown in."""
+
+    key = "general"
+    title = "General"
+    description = "Organisation and time zone."
+    what = "these settings"
+
+    def __init__(self, ctx, parent=None) -> None:  # noqa: ANN001
+        super().__init__(ctx, parent)
+        from .setup_page import COMMON_ZONES
+
+        box = QGroupBox("This recorder")
+        f = QFormLayout(box)
+        self.org = self.editor(QLineEdit())
+        self.org.setMaxLength(100)
+        self.org.setPlaceholderText("optional; leave empty to name no organisation")
+        f.addRow("Organisation", self.org)
+        f.addRow("", muted("Shown in the window, on diagnostic reports and on review-drive summaries. "
+                           "Empty: the organisation is not named anywhere."))
+        self.tz = self.editor(QComboBox())
+        self.tz.setEditable(True)
+        self.tz.addItems(COMMON_ZONES)
+        f.addRow("Time zone for times shown", self.tz)
+        self.body.addWidget(capped(box))
+        self.body.addStretch(1)
+        self.finish_layout()
+
+    def load(self) -> None:
+        cfg = self.cfg
+        if cfg is None:
+            return
+        self.org.setText(cfg.site.organization)
+        self.tz.setEditText(cfg.recording.display_timezone)
+        self.result.clear()
+
+    def tables(self) -> dict[str, dict[str, Any]]:
+        raw = self.raw()
+        recording = dict(raw.get("recording", {}))
+        recording["display_timezone"] = self.tz.currentText().strip() or "UTC"
+        return {"site": {"organization": self.org.text().strip()}, "recording": recording}

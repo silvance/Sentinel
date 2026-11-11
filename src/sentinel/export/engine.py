@@ -849,7 +849,7 @@ class ReviewExporter:
         segments = {sid: self._seg(sid) for sid in seg_ids}
         drive_row = self.xl.query("SELECT identity FROM drives WHERE drive_id=?", (b["drive_id"],))
         drive = json.loads(drive_row[0]["identity"]) if drive_row else {}
-        mb = ManifestBuilder(dict(b), items, segments, drive, self.tz)
+        mb = ManifestBuilder(dict(b), items, segments, drive, self.tz, self.cfg.site.organization)
         mdir = layout.manifest_dir(b["stamp"], bid)
         docs: list[dict[str, Any]] = []
         docs.append(self._document(layout.README, mb.readme(), keep_existing=True))

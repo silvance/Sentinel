@@ -92,8 +92,9 @@ def _drain(app: QApplication, seconds: float = 0.2) -> None:
 def test_every_section_opens(app: QApplication, tmp_path: Path) -> None:
     w = _window(app, tmp_path, admin=True)
     names = w.section_names()
-    assert names == ["Status", "Recordings", "Camera", "Schedule", "Motion", "Storage", "Drives", "Export", "System"]
-    for key in ("recordings", "camera", "schedule", "motion", "storage", "export", "system", "status"):
+    assert names == ["Status", "Recordings", "General", "Camera", "Schedule", "Motion", "Storage", "Drives", "Export",
+                     "System"]
+    for key in ("recordings", "general", "camera", "schedule", "motion", "storage", "export", "system", "status"):
         w.navigate(key)
         app.processEvents()
         assert w.current_page().key == key
@@ -338,7 +339,7 @@ def test_setup_in_the_window_without_a_camera(app: QApplication, tmp_path: Path,
     assert configured == [_layout(tmp_path).config_file]
     cfg = load_config(configured[0])
     assert cfg.camera.pending and cfg.camera.name == "Gate"
-    assert len(w.section_names()) == 9 and w.ctx.cfg is not None                    # the full window now
+    assert len(w.section_names()) == 10 and w.ctx.cfg is not None                    # the full window now
     w.close()
 
 
@@ -453,4 +454,21 @@ def test_operator_can_request_an_archive_swap(app: QApplication, tmp_path: Path)
 
     assert (operator_request_dir(w.ctx.cfg) / "swap.request").is_file()
     assert "SAFE TO REMOVE" in page.log.toPlainText()
+    w.close()
+
+
+def test_general_page_sets_and_clears_the_organisation(app: QApplication, tmp_path: Path,
+                                                       monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(base, "restart_recorder", lambda p, c: "Restarted.")
+    w = _window(app, tmp_path, admin=True)
+    page = w.pages["general"]
+    assert page.org.text() == ""                                   # unnamed by default
+    page.org.setText("Bragg RA")
+    page.save()
+    _drain(app, 0.3)
+    assert load_config(w.ctx.cfg_path).site.organization == "Bragg RA"
+    page.org.setText("")
+    page.save()
+    _drain(app, 0.3)
+    assert load_config(w.ctx.cfg_path).site.organization == ""
     w.close()

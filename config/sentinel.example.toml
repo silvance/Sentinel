@@ -150,3 +150,8 @@ changed_percent = 1.0              # share of the picture that must change
 pixel_threshold = 25               # brightness change that counts (0-255)
 min_frames = 2                     # analysed frames in a row
 analysis_fps = 4                   # second stream only
+
+# Optional: the organisation using this recorder. Shown in the window, on diagnostic reports and on
+# review-drive summaries. Leave out (or empty) to name no organisation. One line, at most 100 characters.
+# [site]
+# organization = "Example Organisation"

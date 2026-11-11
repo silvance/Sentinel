@@ -42,7 +42,7 @@ def stylesheet(p: Palette) -> str:
     return f"""
     QWidget#navPanel {{ background: {p.surface}; border-right: 1px solid {p.border}; }}
     QListWidget#nav {{ background: transparent; border: none; outline: 0; }}
-    QListWidget#nav::item {{ padding: 6px 6px; border-radius: 4px; }}
+    QListWidget#nav::item {{ padding: 2px 6px; min-height: 26px; border-radius: 4px; }}
     QListWidget#nav::item:selected {{ background: {p.surface_alt}; color: {p.text};
                                       border-left: 3px solid {p.accent}; }}
     QListWidget#nav::item:hover:!selected {{ background: {p.surface_alt}; }}

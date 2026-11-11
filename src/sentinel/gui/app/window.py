@@ -105,15 +105,15 @@ class AppWindow(QMainWindow):
 
             return [SetupPage]
         from .drive_pages import DrivesPage, ExportPage
-        from .settings_pages import CameraPage, MotionPage, SchedulePage, StoragePage
+        from .settings_pages import CameraPage, GeneralPage, MotionPage, SchedulePage, StoragePage
         from .status_pages import RecordingsPage, StatusPage, SystemPage
 
-        return [StatusPage, RecordingsPage, CameraPage, SchedulePage, MotionPage, StoragePage, DrivesPage,
-                ExportPage, SystemPage]
+        return [StatusPage, RecordingsPage, GeneralPage, CameraPage, SchedulePage, MotionPage, StoragePage,
+                DrivesPage, ExportPage, SystemPage]
 
     # Sections are grouped as in other Windows administration tools.
     GROUPS = (("Monitor", ("status", "recordings")),
-              ("Settings", ("camera", "schedule", "motion", "storage")),
+              ("Settings", ("general", "camera", "schedule", "motion", "storage")),
               ("Maintenance", ("drives", "export", "system")),
               ("", ("setup",)))
 
@@ -133,8 +133,8 @@ class AppWindow(QMainWindow):
         nav_panel.setObjectName("navPanel")
         nav_panel.setFixedWidth(208)
         nv = QVBoxLayout(nav_panel)
-        nv.setContentsMargins(8, 12, 8, 10)
-        nv.setSpacing(8)
+        nv.setContentsMargins(8, 10, 8, 8)
+        nv.setSpacing(6)
         brand = QHBoxLayout()
         logo = QLabel()
         logo.setPixmap(brand_pixmap(28))
@@ -147,8 +147,13 @@ class AppWindow(QMainWindow):
         fnt.setBold(True)
         app_name.setFont(fnt)
         names.addWidget(app_name)
-        cam_label = QLabel(cam)
+        org = cfg.site.organization if cfg else ""
+        from html import escape
+
+        cam_label = QLabel(f"{escape(org)}<br>{escape(cam)}" if org else cam)
+        cam_label.setTextFormat(Qt.TextFormat.RichText if org else Qt.TextFormat.PlainText)
         cam_label.setObjectName("muted")
+        cam_label.setToolTip(f"Organisation: {org}" if org else "")
         names.addWidget(cam_label)
         brand.addLayout(names, 1)
         nv.addLayout(brand)
@@ -504,6 +509,8 @@ class AppWindow(QMainWindow):
         grid.addWidget(title, 0, 1)
         lines = ["Single-camera recorder with a hash-chained recording log.",
                  "Local only: no Internet services, no telemetry."]
+        if cfg is not None and cfg.site.organization:
+            lines.append(f"Used by: {cfg.site.organization}")
         if cfg is not None and self.ctx.cfg_path is not None:
             lines.append(f"Configuration: {self.ctx.cfg_path}")
             lines.append(f"Times shown in {self.ctx.tz.key} ({tf.utc_offset_text(self.ctx.tz, self.clock())})")
@@ -527,6 +534,9 @@ class AppWindow(QMainWindow):
             self.ctx.cfg_path = Path(cfg.source_path)
         self._cfg_mtime = self._mtime()
         self.ctx.tz = ZoneInfo(cfg.recording.display_timezone)
+        if not first and hasattr(self, "nav"):
+            cam = f"{cfg.camera.name} ({cfg.camera.id})" if cfg.camera.name else cfg.camera.id
+            self.setWindowTitle(f"{cam} — Sentinel" + ("" if self.ctx.admin else " (read-only)"))
         if first:
             self._rebuild()
             self.timer.start()

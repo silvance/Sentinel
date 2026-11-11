@@ -50,3 +50,8 @@ ffprobe = 'C:\Program Files\Sentinel\ffmpeg\ffprobe.exe'
 [service]
 log_level = "INFO"
 watchdog_timeout_s = 120           # recording loop silent this long => process restarts
+
+# Optional: the organisation using this recorder. Shown in the window, on diagnostic reports and on
+# review-drive summaries. Leave out (or empty) to name no organisation. One line, at most 100 characters.
+# [site]
+# organization = "Example Organisation"

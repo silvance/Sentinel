@@ -16,6 +16,7 @@ from PySide6.QtGui import QColor, QFont, QFontDatabase, QIcon, QPainter, QPainte
 GLYPHS = {
     "status": "\ue80f",      # Home
     "recordings": "\ue714",  # Video
+    "general": "\ue946",     # Info
     "camera": "\ue722",      # Camera
     "schedule": "\ue787",    # Calendar
     "motion": "\ue805",      # Walk

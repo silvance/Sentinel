@@ -58,6 +58,7 @@ class SetupAnswers:
     storage_root: Path | None = None        # None = the layout's default folders
     simulated_url: str | None = None        # developer use only: tcp:// simulator, marked SIMULATED
     camera_later: bool = False              # prepare everything now; "set-camera" adds the camera on site
+    organization: str = ""                  # optional: the organisation using this recorder ([site])
 
 
 def check_host(host: str) -> str:
@@ -123,7 +124,7 @@ def build_config(ans: SetupAnswers, layout: Layout, credentials_file: Path | Non
             storage["status_dir"] = str(root / "status")
     else:
         storage = layout.storage_defaults()
-    return {"camera": camera, "recording": {"display_timezone": check_timezone(ans.timezone)}, "storage": storage,
+    d = {"camera": camera, "recording": {"display_timezone": check_timezone(ans.timezone)}, "storage": storage,
             # Owner decision 2026-11-10: a deployed recorder copies to the archive drive and, when its
             # own storage runs low, removes recordings already verified on an archive drive that has
             # been taken away (drives swapped every 3-5 days). The code default stays OFF, so only a
@@ -132,6 +133,9 @@ def build_config(ans: SetupAnswers, layout: Layout, credentials_file: Path | Non
             "retention": {"enabled": True, "expected_swap_days": DEPLOYED_SWAP_DAYS},
             # Owner request 2026-11-10: mark motion in recordings for reviewers (sentinel.motion).
             "motion": {"markers": True}}
+    if ans.organization.strip():      # optional: unnamed unless the technician enters it
+        d["site"] = {"organization": ans.organization.strip()}
+    return d
 
 
 # ------------------------------------------------------------------ TOML writing (stdlib has no writer)
