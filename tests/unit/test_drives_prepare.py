@@ -12,15 +12,20 @@ from pathlib import Path
 
 import pytest
 from drive_fakes import (
+    TB,
     FakeInspector,
     FakeRunner,
     Sequence,
     blank_disk,
+    data_part,
     exfat_disk,
     foreign_disk,
+    msr_part,
     prepared_disk_like,
     protected_for,
     system_disk,
+    usb_disk,
+    vol,
 )
 
 from sentinel.db import Ledger
@@ -339,3 +344,63 @@ def test_write_read_back_test_bypasses_cache_on_this_host(tmp_path: Path) -> Non
     if sys.platform == "win32":
         assert res["uncached"] is True, res.get("uncached_error")
     assert list(tmp_path.iterdir()) == []
+
+
+# ---------------------------------------------------------------------------- two-bay dock (field report 2026-11-11)
+
+DOCK = "000000000000000000"   # Sabrent EC-HD2B: the same placeholder serial for both bays
+
+
+def _dock_world(ledger: Ledger, tmp_path: Path, helper_guid: str | None):
+    """Disk 4: archive drive SENTINEL_1. Disk 3: same model and size in the other bay, left with an empty
+    volume labelled SENTINEL_3 by a setup that did not finish (as on the laptop)."""
+    same = {"serial": DOCK, "unique_id": None, "model": "Dual SATA Bridge", "size": 2 * TB}
+    old_vol = vol("1a1a1a1a-0000-0000-0000-000000000001", label="SENTINEL_1", letter="E")
+    archive = usb_disk(disk_id="4", disk_guid="41414141-0000-0000-0000-000000000000",
+                       partitions=(msr_part(), data_part(2, old_vol, guid="41414141-0000-0000-0000-000000000002")),
+                       **same)
+    left_vol = vol("3c3c3c3c-0000-0000-0000-000000000001", label="SENTINEL_3", letter="F")
+    target = usb_disk(disk_id="3", disk_guid="31313131-0000-0000-0000-000000000000",
+                      partitions=(msr_part(), data_part(2, left_vol, guid="31313131-0000-0000-0000-000000000002")),
+                      **same)
+    new_vol = vol("5e5e5e5e-0000-0000-0000-000000000001", label="SENTINEL_2", letter="F")
+    after = replace(target, disk_guid="32323232-0000-0000-0000-000000000000",
+                    partitions=(msr_part(), data_part(2, new_vol, guid="32323232-0000-0000-0000-000000000002")))
+    roots = {old_vol.volume_id: tmp_path / "old", left_vol.volume_id: tmp_path / "left",
+             new_vol.volume_id: tmp_path / "new"}
+    for r in roots.values():
+        r.mkdir()
+    insp = lambda v: inspect_root(roots[v.volume_id]) if v.volume_id in roots else RootContents(readable=True)  # noqa: E731
+    enum = Sequence([archive, target, SYS], [archive, target, SYS])
+    res = {"ok": True, "step": "done"}
+    if helper_guid:
+        res["partition_guid"] = helper_guid
+    runner = FakeRunner(HelperResult(0, res), on_run=lambda plan: enum.snapshots.append([after, archive, SYS]) or
+                        setattr(enum, "calls", len(enum.snapshots) - 1))
+    ctx = PrepareContext(policy=DrivePolicy(erase_enabled=True), protected=protected_for(), enumerate=enum,
+                         runner=runner, audit=ledger, platform="windows", inspector=insp,
+                         root_for_volume=lambda v: str(roots[v.volume_id]), settle_s=0.0, work_dir=tmp_path / "work")
+    conf = Confirmation.for_classification(classify(target, DrivePolicy(erase_enabled=True), protected_for(),
+                                                    inspector=insp))
+    return ctx, conf, target, archive, roots[new_vol.volume_id]
+
+
+
+def test_second_bay_of_a_dock_is_found_again_by_its_new_partition(ledger: Ledger, tmp_path: Path) -> None:
+    ctx, conf, target, archive, new_root = _dock_world(ledger, tmp_path, "{32323232-0000-0000-0000-000000000002}")
+    assert target.identity.same_device(archive.identity)   # the dock makes both bays look the same
+    assert conf.drive_class is DriveClass.BLANK            # empty volume left by the failed setup
+    res = prepare_drive(ctx, "3", conf, OPERATOR)
+    # SENTINEL_3 was only on the disk being erased (never recorded as prepared): the next number is 2.
+    assert res.label == "SENTINEL_2" and res.disk_id == "3"
+    assert json.loads((new_root / MARKER_NAME).read_text(encoding="utf-8"))["label"] == "SENTINEL_2"
+    assert not (tmp_path / "old" / MARKER_NAME).exists()
+    assert len(_events(ledger, "drive_prepared")) == 1
+
+
+def test_without_the_new_partition_two_dock_bays_stay_ambiguous(ledger: Ledger, tmp_path: Path) -> None:
+    ctx, conf, _target, _archive, new_root = _dock_world(ledger, tmp_path, None)
+    with pytest.raises(PrepareFailed) as e:
+        prepare_drive(ctx, "3", conf, OPERATOR)
+    assert e.value.reason == "ambiguous_identity"
+    assert not (new_root / MARKER_NAME).exists()

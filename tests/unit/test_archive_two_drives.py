@@ -262,3 +262,27 @@ def test_window_lists_both_drives() -> None:
     text = archive_drives_text(arc)
     assert text.startswith("Full (swap it): ARCHIVE_A.") and "In use: ARCHIVE_B (" in text
     assert archive_drives_text({"drive_label": None}) == "Drive: none inserted."
+
+
+def test_status_heartbeat_continues_while_one_long_file_is_copied_and_read_back(env: Env, tmp_path: Path) -> None:
+    """Field report 2026-11-11: a one-hour file takes minutes to copy and read back; the status file must
+    stay fresh meanwhile, or the window says "Archive copying is not running" (A-007)."""
+    clock = [1000.0]
+
+    def mono() -> float:
+        clock[0] += 4.0          # every look at the clock is 4 s later: a slow copy
+        return clock[0]
+
+    w = ArchiveWorker(env.cfg, ledger=env.ledger, locator=Bays(), io=ArchiveIO(read_chunk=1024 * 1024),
+                      allow_same_volume=True, lower_own_priority=False, mono=mono)
+    beats: list[float] = []
+    real = w.status.write
+    w.status.write = lambda **f: beats.append(clock[0]) or real(**f)  # type: ignore[method-assign]
+    big = tmp_path / "hour.ts"
+    big.write_bytes(os.urandom(8 * 1024 * 1024))        # 8 chunks of 1 MiB
+    assert sum(len(b) for b in w._source_chunks(big)) == big.stat().st_size
+    copied = len(beats)
+    assert copied >= 2
+    w._read_hash(big)
+    assert len(beats) - copied >= 2
+    assert env.status()["heartbeat_epoch"] > 0

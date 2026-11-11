@@ -84,6 +84,8 @@ RESUME_REQUEST = "resume.request"
 SWAPPED_STATE = "swapped_drive.json"   # the drive made safe to remove, kept across a restart of the worker
 REQUEST_MAX_AGE_S = 900.0        # a swap/resume request older than this is stale and not acted on
 CONTROL_POLL_S = 1.0             # how often a copy in progress looks for a swap request
+HEARTBEAT_S = 10.0               # status heartbeat while one file is copied or read back (a one-hour file
+                                 # takes minutes; the window calls copying "not running" after 60 s)
 OPERATOR_REQUESTS = "requests"   # sub-folder of [storage] status_dir writable by operators (the window)
 OPERATOR_REQUEST_MAX_BYTES = 1024
 UNCERTAIN_MISSES = 10            # scans to wait for the attached drive while the volume list is unreadable
@@ -191,6 +193,7 @@ class ArchiveWorker:
         self._last_swapped: str | None = None       # drive last prepared for removal (session gone_how)
         self._att_missed = 0                        # consecutive scans that did not see the attached drive
         self._last_control_poll = float("-inf")
+        self._last_heartbeat = float("-inf")
         self._thread: threading.Thread | None = None
         self._last_publish = 0.0
         self._instance: str | None = None
@@ -976,7 +979,20 @@ class ArchiveWorker:
                 self.read_throttle.consume(len(b))
                 yield b
 
+    def _heartbeat(self) -> None:
+        """Keep the status file fresh during a long copy or read-back (field report 2026-11-11: with
+        one-hour files the window showed "Archive copying is not running" while a copy was going on)."""
+        now = self.mono()
+        if now - self._last_heartbeat < HEARTBEAT_S:
+            return
+        self._last_heartbeat = now
+        try:
+            self.status.write()
+        except Exception:  # noqa: BLE001 - a heartbeat must never stop a copy
+            log.exception("could not refresh the archive status heartbeat")
+
     def _should_abort(self) -> bool:
+        self._heartbeat()
         if self._stop.is_set():
             return True
         if not self._swap.is_set():
@@ -1002,6 +1018,7 @@ class ArchiveWorker:
             h.update(c)
             n += len(c)
             self.verify_throttle.consume(len(c))
+            self._heartbeat()
         return h.hexdigest(), n, method
 
     def _set_aside(self, dest: Path, rel: str, seg: Any, found: str) -> Path:

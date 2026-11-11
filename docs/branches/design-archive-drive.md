@@ -273,6 +273,9 @@ the number of files either. Instead:
   the archive drive when it is finished, so up to an hour later than before; it is on the laptop's disk
   meanwhile. The self-check measures "recordings being saved" from the later of the last saved file and the
   start of the current run (the first file of a run is open for up to an hour).
+  The worker refreshes its status heartbeat every 10 s while it copies or reads back one file
+  (0.3.6); before, a one-hour file took longer than the 60 s after which the window reports
+  "Archive copying is not running" (A-007; field report 2026-11-11).
 * **Fingerprints/** holds the per-frame sidecars, so a day folder shows only video.
 * **Playlists/** holds `<local date>.m3u` (display time zone), ASCII, CRLF, paths relative to the playlist
   with `/`. Built after every index write from the verified copies of this ledger and the carried-forward

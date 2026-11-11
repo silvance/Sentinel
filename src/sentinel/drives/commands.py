@@ -167,6 +167,7 @@ try {
     Set-Step 'initialize'
     $d = Get-Disk -Number $exp.disk_number
     Assert-Disk $d $false
+    if ((N $d.PartitionStyle) -ne 'RAW') { throw 'IDENTITY_MISMATCH not_cleared' }
     Initialize-Disk -InputObject $d -PartitionStyle GPT -Confirm:$false
     Set-Step 'partition'
     $d = Get-Disk -Number $exp.disk_number

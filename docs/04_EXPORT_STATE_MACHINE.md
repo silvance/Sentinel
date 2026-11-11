@@ -105,6 +105,13 @@ type and label, mount state, size, SMART, whether it holds the OS or spool):
   taken for SENTINEL_1 and could not be set up). Such drives are recognised by their contents only
   (marker, volume GUIDs, filesystem serials); consequence: a Sentinel drive reformatted outside
   Sentinel is not recognised in such a dock.
+* After erasing, the drive is found again by its hardware identity **and** the GUID of the partition
+  the elevated helper has just created (0.3.6). Before, two disks in one such dock matched the same
+  hardware identity, so setup erased and formatted the right disk but then stopped with "Two
+  connected drives look identical" (M-005) without writing its marker (field report 2026-11-11).
+  Such a half-set-up disk shows as blank; Erase and Set Up again fixes it, and the label number it
+  was given is reused because it was never recorded as prepared. The helper also checks that the disk
+  is empty (RAW) after clearing before it initialises it.
 * Action: GPT + one partition, approved filesystem (provisionally NTFS — risk C1), label
   `SENTINEL_<n>`, then `SENTINEL_DRIVE.json` (`drive_uuid`, label, prepared_utc, operator/admin id),
   a write/read-back test file, and an `audit` event recording drive identity and who pressed it.

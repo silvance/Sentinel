@@ -59,7 +59,7 @@ from .commands import (
 from .errors import IdentityChanged, PrepareFailed, PrepareRefused
 from .known import load_known
 from .marker import MARKER_FORMAT, MARKER_VERSION, inspect_volume, write_marker, write_read_back_test
-from .model import KIND_MSR, DiskInfo, DriveClass, VolumeInfo, confirm_text
+from .model import KIND_MSR, DiskInfo, DriveClass, VolumeInfo, confirm_text, norm_guid
 from .policy import DrivePolicy
 from .protected import ProtectedStorage
 
@@ -252,7 +252,9 @@ def prepare_drive(ctx: PrepareContext, disk_id: str, confirmation: Confirmation 
     c, disks = current_classification(ctx, disk_id)
     check_guards(c, confirmation, auth, ctx.policy)
     assert auth is not None and confirmation is not None  # narrowed by check_guards
-    label = next_label(ctx.policy, ctx.audit, disks)
+    # The disk being erased does not keep its number: a label left on it by a setup that did not finish
+    # (never recorded as drive_prepared) is free again (field report 2026-11-11).
+    label = next_label(ctx.policy, ctx.audit, [d for d in disks if d.disk_id != c.disk.disk_id])
     drive_uuid = str(uuid.uuid4())
     plan = build_plan(ctx, c.disk, label, drive_uuid)
     base = {"disk": c.disk.identity.to_dict(), "description": c.disk.describe(), "class": str(c.drive_class),
@@ -314,10 +316,16 @@ def _finish(ctx: PrepareContext, plan: PreparePlan, before: Classification, auth
         _audit(ctx, "drive_prepare_failed", f"Drive preparation could not be verified: {reason}", d, severity="error")
         return PrepareFailed(reason, msg, d)
 
+    # Find the disk again by its hardware AND by the partition the helper has just created. A two-bay
+    # dock that hides serials reports both disks with one hardware identity, so the new partition's GUID
+    # (freshly generated, unique) is what tells them apart (field report 2026-11-11, Sabrent EC-HD2B).
+    new_part = norm_guid(res.get("partition_guid"))
     disk = None
     deadline = time.monotonic() + max(ctx.settle_s, 0.0)
     while True:
         same = [d for d in ctx.enumerate() if d.identity.same_device(plan.identity)]
+        if new_part:
+            same = [d for d in same if any(p.guid == new_part for p in d.partitions)]
         if len(same) > 1:
             raise fail("ambiguous_identity", "Two connected drives look identical. Remove one and try again.")
         disk = same[0] if same else None
