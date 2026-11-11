@@ -342,8 +342,12 @@ Sentinel setup - for the installing technician
 
 You will need: the camera's IP address, the stream path from the camera's documentation,
 and the camera account the recorder should use (a viewer/least-privilege account).
+No camera yet? Type LATER as the camera address: everything else is set up now, and the
+camera is added on site with  Sentinel.exe set-camera  (run as administrator).
 Press Enter to accept the value shown in [brackets].
 """
+
+LATER = "LATER"
 
 
 CAMERA_LATER_INTRO = """\
@@ -369,9 +373,18 @@ def make_question(ask: Callable[[str], str], out: Callable[[str], None]) -> Call
 
 
 def ask_camera(question: Callable[..., str], ask_secret: Callable[[str], str], host: str = "",
-               path: str = "", port: int = 554) -> tuple[str, str, int, str, str]:
-    """The camera questions (setup and set-camera): host, stream path, port, user, password."""
-    host = question("Camera IP address or host name", host, check=check_host)
+               path: str = "", port: int = 554, allow_later: bool = False) -> tuple[str, str, int, str, str] | None:
+    """The camera questions (setup and set-camera): host, stream path, port, user, password.
+    With ``allow_later`` (first-run setup only) the answer LATER returns None: no camera yet."""
+    if allow_later:
+        def host_or_later(raw: str) -> None:
+            if raw.upper() != LATER:
+                check_host(raw)
+        host = question("Camera IP address or host name (or LATER)", host, check=host_or_later)
+        if host.upper() == LATER:
+            return None
+    else:
+        host = question("Camera IP address or host name", host, check=check_host)
     path = question("Camera stream path (from the camera documentation)", path, check=check_stream_path)
     port = int(question("Camera stream port", str(port), check=_check_port))
     user = question("Camera account user name (empty if none)")
@@ -398,7 +411,13 @@ def interactive_setup(layout: Layout, ask: Callable[[str], str] = input,
     elif camera_later:
         host, path, port, user, pw = "", "", 554, "", ""
     else:
-        host, path, port, user, pw = ask_camera(question, ask_secret)
+        answers = ask_camera(question, ask_secret, allow_later=True)
+        if answers is None:
+            camera_later = True
+            out("No camera added now: nothing is recorded, and the screen shows \"Not recording: camera\n"
+                "not added yet\" (P-002), until you run  Sentinel.exe set-camera  on site.")
+            answers = ("", "", 554, "", "")
+        host, path, port, user, pw = answers
     name = question("Camera label for reports", "Camera 1")
     tz = question("Local time zone (IANA name)", "UTC", check=check_timezone)
     default_root = layout.spool_dir.parent

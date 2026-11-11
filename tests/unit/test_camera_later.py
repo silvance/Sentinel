@@ -72,6 +72,25 @@ def test_interactive_camera_later_asks_no_camera_questions(tmp_path: Path) -> No
     assert ans.camera_later and not any("IP address" in q or "stream" in q or "password" in q for q in asked)
 
 
+def test_double_click_setup_accepts_later_for_the_camera(tmp_path: Path) -> None:
+    """Owner report 2026-11-10: double-click SETUP could not be finished without a camera."""
+    answers = iter(["later", "Front door", "America/Chicago", ""])
+    asked: list[str] = []
+
+    def ask(prompt: str) -> str:
+        asked.append(prompt)
+        return next(answers)
+
+    said: list[str] = []
+    ans = setup.interactive_setup(_layout(tmp_path), ask=ask, ask_secret=ask, out=said.append)
+    assert ans.camera_later and ans.camera_host == "" and ans.username == ""
+    assert "LATER" in said[0] and "(or LATER)" in asked[0]
+    assert not any("stream path" in q or "password" in q for q in asked)
+    path, _ = setup.write_setup(ans, _layout(tmp_path))
+    cfg = load_config(path)
+    assert cfg.camera.pending and cfg.camera.name == "Front door"
+
+
 # ---------------------------------------------------------------------- status
 def test_status_is_p002_not_an_outage() -> None:
     m = base_measurements(ffmpeg_running=False, media_seen_this_run=False, seconds_since_media_advance=None,
