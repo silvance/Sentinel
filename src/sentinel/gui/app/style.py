@@ -38,8 +38,27 @@ def qpalette(p: Palette) -> QPalette:
     return q
 
 
+def mix(a: str, b: str, t: float) -> str:
+    """Colour ``t`` of the way from ``a`` to ``b`` (both #RRGGBB)."""
+    ca, cb = QColor(a), QColor(b)
+    r, g, bl = (round(x + (y - x) * t) for x, y in ((ca.red(), cb.red()), (ca.green(), cb.green()),
+                                                    (ca.blue(), cb.blue())))
+    return QColor(r, g, bl).name()
+
+
+def selection_colour(p: Palette) -> str:
+    """A light tint of the accent behind the normal text colour (owner request 2026-11-11: the native
+    solid blue per cell made highlighted text nearly unreadable on the laptop)."""
+    return mix(p.surface, p.accent, 0.22 if p.dark else 0.18)
+
+
 def stylesheet(p: Palette) -> str:
+    sel = selection_colour(p)
     return f"""
+    QTableView, QTreeView {{ selection-background-color: {sel}; selection-color: {p.text}; }}
+    QTableView::item, QTreeView::item {{ border: none; padding: 0 4px; }}
+    QTableView::item:selected, QTreeView::item:selected {{ background: {sel}; color: {p.text}; }}
+    QTableView::item:hover:!selected, QTreeView::item:hover:!selected {{ background: {p.surface_alt}; }}
     QWidget#navPanel {{ background: {p.surface}; border-right: 1px solid {p.border}; }}
     QListWidget#nav {{ background: transparent; border: none; outline: 0; }}
     QListWidget#nav::item {{ padding: 2px 6px; min-height: 26px; border-radius: 4px; }}

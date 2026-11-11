@@ -43,7 +43,7 @@ class LiveView(QWidget):
         else:
             self.picture.setMinimumSize(320, 180)
             self.picture.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.picture.setStyleSheet(f"background: #000; color: #ccc; border-radius: 4px;")
+        self.picture.setStyleSheet("background: #000; color: #ccc; border-radius: 4px;")
         if fixed:
             lay.addWidget(self.picture, 0, Qt.AlignmentFlag.AlignLeft)
         else:

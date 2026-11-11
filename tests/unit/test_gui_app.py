@@ -761,3 +761,57 @@ def test_camera_problems_after_an_update_do_not_roll_back_by_themselves(app: QAp
                                    Check("Camera sends video", False, "no signal")]))
     assert not went_back and "usually not caused by the update" in shown[-1]
     w.close()
+
+
+# ---------------------------------------------------------------------- field report 2026-11-11 (laptop)
+def test_times_are_picked_from_a_list_and_can_be_typed(app: QApplication) -> None:
+    from sentinel.gui.app.settings_pages import MIDNIGHT, TimeCombo, normal_time
+
+    start = TimeCombo("07:00")
+    assert start.isEditable() and start.findData("07:15") >= 0 and start.value() == "07:00"
+    start.setEditText("7:43")                                    # a time not in the list, typed
+    assert start.value() == "07:43"
+    end = TimeCombo("00:00", end=True)
+    assert end.value() == MIDNIGHT and end.currentText() == "Midnight" and end.findData("00:00") == -1
+    end.set_value("24:00")
+    assert end.value() == MIDNIGHT
+    end.set_value("18:00")
+    assert end.value() == "18:00"
+    assert normal_time("0730") == "07:30" and normal_time("25:00") is None
+
+
+def test_each_schedule_row_has_its_own_remove_button(app: QApplication) -> None:
+    from PySide6.QtCore import QDate, QDateTime, QTime
+
+    from sentinel.gui.app.settings_pages import DatesTable, WeeklyTable
+
+    wt = WeeklyTable()
+    wt.add("record", {"mon"}, "07:00", "18:00")
+    wt.add("motion", {"sat"}, "13:03", "24:00")
+    wt.add("pause", {"sun"}, "01:00", "02:00")
+    wt.t.cellWidget(1, 4).click()                                # the middle row's cross
+    assert [(r["action"], r["start"], r["end"]) for r in wt.rows()] == [("record", "07:00", "18:00"),
+                                                                       ("pause", "01:00", "02:00")]
+    dt = DatesTable()
+    a = QDateTime(QDate(2026, 11, 12), QTime(0, 0))
+    dt.add("pause", a, a.addDays(6))
+    dt.add("pause", a.addDays(47), a.addDays(48))
+    dt.t.cellWidget(0, 3).click()
+    assert dt.rows() == [{"action": "pause", "start": "2026-12-29 00:00", "end": "2026-12-30 00:00"}]
+
+
+def test_highlighted_rows_keep_readable_text() -> None:
+    from PySide6.QtGui import QColor
+
+    from sentinel.gui.app.style import selection_colour
+    from sentinel.gui.theme import DARK, LIGHT
+
+    def lum(c: str) -> float:
+        q = QColor(c)
+        ch = [x / 255 for x in (q.red(), q.green(), q.blue())]
+        ch = [x / 12.92 if x <= 0.03928 else ((x + 0.055) / 1.055) ** 2.4 for x in ch]
+        return 0.2126 * ch[0] + 0.7152 * ch[1] + 0.0722 * ch[2]
+
+    for p in (LIGHT, DARK):
+        a, b = sorted((lum(selection_colour(p)), lum(p.text)), reverse=True)
+        assert (a + 0.05) / (b + 0.05) >= 7.0, p.dark                # WCAG AAA for normal text

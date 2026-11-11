@@ -9,10 +9,10 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from PySide6.QtCore import QDate, QDateTime, QTime
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QDateEdit, QDateTimeEdit, QDialog, QDialogButtonBox,
+from PySide6.QtCore import QDate, QDateTime, Qt, QTime
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QDateEdit, QDialog, QDialogButtonBox,
                                QDoubleSpinBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
-                               QPlainTextEdit, QPushButton, QSpinBox, QTableWidget, QTimeEdit,
+                               QPlainTextEdit, QPushButton, QSpinBox, QTableWidget,
                                QToolButton, QVBoxLayout, QWidget)
 
 from ...config import AppConfig
@@ -412,22 +412,99 @@ class DaysPicker(QWidget):
         return {k for k, b in self.buttons.items() if b.isChecked()}
 
 
-def _time_edit(text: str) -> QTimeEdit:
-    t = QTimeEdit()
-    t.setDisplayFormat("HH:mm")
-    hh, _, mm = (text or "00:00").partition(":")
-    try:
-        t.setTime(QTime(int(hh) % 24, int(mm[:2] or 0)))
-    except ValueError:
-        t.setTime(QTime(0, 0))
-    return t
+TIME_STEP_MIN = 15
+MIDNIGHT = "24:00"
+MIDNIGHT_TEXT = "Midnight"
+_TIME_RE = re.compile(r"^\s*([01]?\d|2[0-3])[:.]?([0-5]\d)\s*$")
 
 
-def _date_time_edit(value: QDateTime) -> QDateTimeEdit:
-    e = QDateTimeEdit(value)
-    e.setCalendarPopup(True)
-    e.setDisplayFormat("ddd d MMM yyyy  HH:mm")
-    return e
+def normal_time(text: str) -> str | None:
+    """'7:30' / '0730' / '07.30' -> '07:30'; None if it is not a time of day."""
+    m = _TIME_RE.match(text or "")
+    return f"{int(m.group(1)):02d}:{m.group(2)}" if m else None
+
+
+class TimeCombo(QComboBox):
+    """A time of day picked from a list (every 15 minutes) instead of a spin box (owner request
+    2026-11-11). Any other time can still be typed (07:43). ``end=True``: an "until" time, whose list
+    ends with "Midnight", the end of the day (stored as 24:00)."""
+
+    def __init__(self, value: str = "00:00", *, end: bool = False, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.end = end
+        self.setEditable(True)
+        self.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.setMaxVisibleItems(12)
+        self.setMinimumContentsLength(8)
+        self.setToolTip("Pick a time from the list, or type one (for example 07:45)")
+        for m in range(0, 24 * 60, TIME_STEP_MIN):
+            t = f"{m // 60:02d}:{m % 60:02d}"
+            if not (end and t == "00:00"):
+                self.addItem(t, t)
+        if end:
+            self.addItem(MIDNIGHT_TEXT, MIDNIGHT)
+        self.set_value(value)
+
+    def set_value(self, text: str) -> None:
+        t = (text or "").strip()
+        if self.end and t in (MIDNIGHT, "00:00", MIDNIGHT_TEXT):
+            self.setCurrentIndex(self.findData(MIDNIGHT))
+            return
+        norm = normal_time(t) or "00:00"
+        i = self.findData(norm)
+        if i >= 0:
+            self.setCurrentIndex(i)
+        else:
+            self.setEditText(norm)
+
+    def value(self) -> str:
+        text = self.currentText().strip()
+        if self.end and text in (MIDNIGHT_TEXT, MIDNIGHT, "00:00"):
+            return MIDNIGHT
+        norm = normal_time(text)
+        if norm is not None:
+            return norm
+        data = self.currentData()
+        return str(data) if data else ("24:00" if self.end else "00:00")
+
+
+class DateTimePicker(QWidget):
+    """A date from a calendar and a time from the list (owner request 2026-11-11: no spin boxes)."""
+
+    def __init__(self, value: QDateTime, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(2, 0, 2, 0)
+        lay.setSpacing(4)
+        self.date = QDateEdit(value.date())
+        self.date.setCalendarPopup(True)
+        self.date.setDisplayFormat("ddd d MMM yyyy")
+        self.time = TimeCombo(value.time().toString("HH:mm"))
+        lay.addWidget(self.date, 1)
+        lay.addWidget(self.time)
+
+    def dateTime(self) -> QDateTime:  # noqa: N802 - same name as QDateTimeEdit
+        hh, _, mm = self.time.value().partition(":")
+        return QDateTime(self.date.date(), QTime(int(hh) % 24, int(mm)))
+
+
+def _row_remove_button(table: QTableWidget, column: int, tip: str) -> QToolButton:
+    """A Remove button on its own row: it is always clear which period goes (owner request
+    2026-11-11: with "Remove selected" it was not visible which row was selected)."""
+    b = QToolButton()
+    b.setText("✕")                      # a cross: remove this row
+    b.setToolTip(tip)
+    b.setAccessibleName(tip)
+    b.setAutoRaise(True)
+
+    def remove() -> None:
+        for r in range(table.rowCount()):
+            if table.cellWidget(r, column) is b:
+                table.removeRow(r)
+                return
+
+    b.clicked.connect(remove)
+    return b
 
 
 def parse_date_value(text: str, is_end: bool) -> QDateTime:
@@ -447,28 +524,33 @@ def date_value(dt: QDateTime) -> str:
     return dt.toString("yyyy-MM-dd HH:mm")
 
 
+def _schedule_table(headers: list[str]) -> QTableWidget:
+    t = QTableWidget(0, len(headers))
+    t.setHorizontalHeaderLabels(headers)
+    t.verticalHeader().setVisible(False)
+    t.verticalHeader().setDefaultSectionSize(36)
+    # Rows are made of controls; there is nothing to select (each row has its own Remove button).
+    t.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
+    t.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+    t.setShowGrid(False)
+    return t
+
+
 class WeeklyTable(QWidget):
-    """Weekly periods: action, days (toggle buttons), start and end time (time pickers)."""
+    """Weekly periods: action, days (toggle buttons), from and until (time lists), Remove."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
-        self.t = QTableWidget(0, 4)
-        self.t.setHorizontalHeaderLabels(["Action", "Days", "From", "Until"])
-        self.t.verticalHeader().setVisible(False)
-        self.t.verticalHeader().setDefaultSectionSize(34)
-        self.t.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.t.horizontalHeader().setStretchLastSection(True)
+        self.t = _schedule_table(["Action", "Days", "From", "Until", ""])
         lay.addWidget(self.t)
         row = QHBoxLayout()
         self.add_btn = QPushButton("Add")
         self.add_btn.clicked.connect(lambda: self.add("record", set(DAY_KEYS[:5]), "07:00", "18:00"))
-        self.del_btn = QPushButton("Remove selected")
-        self.del_btn.clicked.connect(self._remove)
         row.addWidget(self.add_btn)
-        row.addWidget(self.del_btn)
-        row.addWidget(muted("Until 00:00 means until midnight. An end before the start runs past midnight."), 1)
+        row.addWidget(muted("✕ removes a period. An end before the start runs past midnight "
+                            "(for example 22:00 until 06:00)."), 1)
         lay.addLayout(row)
 
     def clear(self) -> None:
@@ -479,14 +561,10 @@ class WeeklyTable(QWidget):
         self.t.insertRow(r)
         self.t.setCellWidget(r, 0, _action_combo(action))
         self.t.setCellWidget(r, 1, DaysPicker(days))
-        self.t.setCellWidget(r, 2, _time_edit(start))
-        self.t.setCellWidget(r, 3, _time_edit("00:00" if end == "24:00" else end))
+        self.t.setCellWidget(r, 2, TimeCombo(start))
+        self.t.setCellWidget(r, 3, TimeCombo(end, end=True))
+        self.t.setCellWidget(r, 4, _row_remove_button(self.t, 4, "Remove this weekly period"))
         self.t.resizeColumnsToContents()
-
-    def _remove(self) -> None:
-        rows = sorted({i.row() for i in self.t.selectedIndexes()} | ({self.t.currentRow()} - {-1}), reverse=True)
-        for r in rows:
-            self.t.removeRow(r)
 
     def rows(self) -> list[dict[str, Any]]:
         out = []
@@ -496,45 +574,36 @@ class WeeklyTable(QWidget):
             picked = days.days() if isinstance(days, DaysPicker) else set()
             if not picked:
                 continue
-            e = end.time().toString("HH:mm") if isinstance(end, QTimeEdit) else "00:00"
             out.append({"action": str(action.currentData()) if isinstance(action, QComboBox) else "record",
                         "days": days_to_config(picked),
-                        "start": start.time().toString("HH:mm") if isinstance(start, QTimeEdit) else "00:00",
-                        "end": "24:00" if e == "00:00" else e})
+                        "start": start.value() if isinstance(start, TimeCombo) else "00:00",
+                        "end": end.value() if isinstance(end, TimeCombo) else MIDNIGHT})
         return out
 
     def set_enabled(self, on: bool) -> None:
         self.t.setEnabled(on)
         self.add_btn.setEnabled(on)
-        self.del_btn.setEnabled(on)
 
 
 class DatesTable(QWidget):
-    """One-off periods (holidays, leave): action, from, until (date-and-time pickers with a calendar)."""
+    """One-off periods (holidays, leave): action, from, until (calendar date and time list), Remove."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
-        self.t = QTableWidget(0, 3)
-        self.t.setHorizontalHeaderLabels(["Action", "From", "Until"])
-        self.t.verticalHeader().setVisible(False)
-        self.t.verticalHeader().setDefaultSectionSize(34)
-        self.t.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.t = _schedule_table(["Action", "From", "Until", ""])
         lay.addWidget(self.t)
         row = QHBoxLayout()
         self.leave_btn = QPushButton("Days off…")
         self.leave_btn.setToolTip("Stop recording for whole days (leave, holidays); recording starts again by itself")
         self.add_btn = QPushButton("Add period")
         self.add_btn.clicked.connect(self._add_default)
-        self.del_btn = QPushButton("Remove selected")
-        self.del_btn.clicked.connect(self._remove)
-        for b in (self.leave_btn, self.add_btn, self.del_btn):
+        for b in (self.leave_btn, self.add_btn):
             row.addWidget(b)
         row.addWidget(muted("These take priority over the weekly periods. The recorder keeps running and goes "
                             "back to the weekly plan by itself when a period ends."), 1)
         lay.addLayout(row)
-        self.t.horizontalHeader().setStretchLastSection(True)
 
     def _add_default(self) -> None:
         start = QDateTime(QDate.currentDate().addDays(1), QTime(0, 0))
@@ -547,20 +616,16 @@ class DatesTable(QWidget):
         r = self.t.rowCount()
         self.t.insertRow(r)
         self.t.setCellWidget(r, 0, _action_combo(action))
-        self.t.setCellWidget(r, 1, _date_time_edit(start))
-        self.t.setCellWidget(r, 2, _date_time_edit(end))
+        self.t.setCellWidget(r, 1, DateTimePicker(start))
+        self.t.setCellWidget(r, 2, DateTimePicker(end))
+        self.t.setCellWidget(r, 3, _row_remove_button(self.t, 3, "Remove this period"))
         self.t.resizeColumnsToContents()
-
-    def _remove(self) -> None:
-        rows = sorted({i.row() for i in self.t.selectedIndexes()} | ({self.t.currentRow()} - {-1}), reverse=True)
-        for r in rows:
-            self.t.removeRow(r)
 
     def rows(self) -> list[dict[str, Any]]:
         out = []
         for r in range(self.t.rowCount()):
             action, start, end = (self.t.cellWidget(r, c) for c in range(3))
-            if not isinstance(start, QDateTimeEdit) or not isinstance(end, QDateTimeEdit):
+            if not isinstance(start, DateTimePicker) or not isinstance(end, DateTimePicker):
                 continue
             out.append({"action": str(action.currentData()) if isinstance(action, QComboBox) else "pause",
                         "start": date_value(start.dateTime()), "end": date_value(end.dateTime())})
@@ -568,7 +633,7 @@ class DatesTable(QWidget):
 
     def set_enabled(self, on: bool) -> None:
         self.t.setEnabled(on)
-        for b in (self.leave_btn, self.add_btn, self.del_btn):
+        for b in (self.leave_btn, self.add_btn):
             b.setEnabled(on)
 
 

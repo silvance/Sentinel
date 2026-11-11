@@ -8,7 +8,7 @@ from typing import Any
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (QBoxLayout, QComboBox, QFormLayout, QFrame, QGridLayout, QGroupBox, QHBoxLayout,
-                               QLabel, QLineEdit, QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QSplitter, QTabWidget,
+                               QLabel, QLineEdit, QPlainTextEdit, QScrollArea, QSizePolicy, QTabWidget,
                                QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from .. import textfmt as tf
