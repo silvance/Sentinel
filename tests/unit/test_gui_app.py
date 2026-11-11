@@ -537,6 +537,30 @@ def test_operator_can_request_an_archive_swap(app: QApplication, tmp_path: Path)
     w.close()
 
 
+def test_cancel_swap_is_shown_only_while_a_swap_is_under_way(app: QApplication, tmp_path: Path) -> None:
+    """Owner request 2026-11-11: "Keep using this drive" was always shown though it only undoes a swap."""
+    from types import SimpleNamespace
+
+    w = _window(app, tmp_path, admin=True)
+    page = w.pages["drives"]
+    assert page.resume_btn.text().strip() == "Cancel swap"
+
+    def shown(arc: dict) -> bool:
+        page.on_status(SimpleNamespace(doc={"archive": arc}))
+        return not page.resume_btn.isHidden()
+
+    assert not shown({})
+    assert not shown({"running": True, "state": "UP_TO_DATE", "drive_label": "SENTINEL_1"})
+    assert not shown({"running": True, "state": "COPYING", "removal": None})
+    assert shown({"running": True, "state": "SWAP_PENDING"})
+    assert shown({"running": True, "state": "SAFE_TO_REMOVE"})
+    assert shown({"running": True, "state": "REMOVE_MANUALLY"})
+    # Two drives: the full one waits to be taken out while copying goes on to the other.
+    assert shown({"running": True, "state": "COPYING", "removal": {"label": "SENTINEL_1", "safe": True}})
+    assert not shown({"running": False, "state": "SWAP_PENDING"})   # copier not running: nothing to cancel
+    w.close()
+
+
 def test_general_page_sets_and_clears_the_organisation(app: QApplication, tmp_path: Path,
                                                        monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(base, "restart_recorder", lambda p, c: "Restarted.")

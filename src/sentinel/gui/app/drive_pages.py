@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QFileDialog
                                QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QVBoxLayout)
 
 from .. import textfmt as tf
+from ...archive.status import ST_REMOVE_MANUALLY, ST_SAFE, ST_SWAP_PENDING
 from ...drives.model import HIDDEN_SERIAL_WORD
 from ..ledger_view import load_exports
 from .base import CommandPanel, OutputLog, Page, ReadOnlyBar, capped, fill, icon_button, muted, selected_data, table
@@ -47,6 +48,15 @@ def _letters(d: dict[str, Any]) -> list[str]:
 
 
 _USE_WORDS = {"in_use": "In use", "full": "Full (swap it)", "standby": "Next", "take_out": "Ready to take out"}
+
+
+SWAP_STATES = (ST_SWAP_PENDING, ST_SAFE, ST_REMOVE_MANUALLY)
+
+
+def swap_under_way(arc: dict[str, Any]) -> bool:
+    """A swap is being prepared, or a drive was made safe to remove and is still waiting to be taken out
+    (with two drives, copying goes on meanwhile: the state is then COPYING and ``removal`` is set)."""
+    return bool(arc.get("running")) and (arc.get("state") in SWAP_STATES or bool(arc.get("removal")))
 
 
 def archive_drives_text(arc: dict[str, Any]) -> str:
@@ -148,7 +158,12 @@ class DrivesPage(Page):
         c = ctx.palette.text
         self.swap_btn = icon_button("Swap archive drive", "swap", c)
         self.swap_btn.setToolTip("Finish copying and prepare the drive for removal; wait for SAFE TO REMOVE")
-        self.resume_btn = icon_button("Keep using this drive", "play", c)
+        # Owner request 2026-11-11: "Keep using this drive" was always shown, though it only undoes a swap.
+        # Now "Cancel swap", shown only while a swap is being prepared or a drive waits to be taken out.
+        self.resume_btn = icon_button("Cancel swap", "play", c)
+        self.resume_btn.setToolTip("Stop the swap and keep copying to this drive; or keep using a drive that was "
+                                   "made safe to remove but has not been taken out")
+        self.resume_btn.setVisible(False)
         self.arc_status_btn = icon_button("Archive details", "info", c)
         self.problems_btn = icon_button("Archive problems", "warning", c)
         self.problems_btn.setToolTip("List copies on archive drives that could not be verified (A-006)")
@@ -209,6 +224,7 @@ class DrivesPage(Page):
 
     def on_status(self, read) -> None:  # noqa: ANN001
         arc = ((read.doc or {}).get("archive") or {}) if read is not None else {}
+        self.resume_btn.setVisible(swap_under_way(arc))
         if not arc:
             self.arc_text.setText("Archive copying is not enabled in the settings.")
             return
@@ -247,9 +263,10 @@ class DrivesPage(Page):
             return
         if kind == "swap":
             self.log.appendPlainText("── Swap requested. Copying finishes first: wait until this page says "
-                                     "SAFE TO REMOVE, then unplug the archive drive and insert the next one.\n")
+                                     "SAFE TO REMOVE, then unplug the archive drive and insert the next one. "
+                                     "To undo it, press Cancel swap.\n")
         else:
-            self.log.appendPlainText("── Keep using this drive: requested.\n")
+            self.log.appendPlainText("── Cancel swap: requested.\n")
 
     def _swap(self) -> None:
         if not self.ctx.admin:
@@ -263,7 +280,7 @@ class DrivesPage(Page):
             self._operator_request("resume")
             return
         cmd = Command(sentinel_argv("archive", "resume", "--config", self._cfg()), self)
-        self.log.appendPlainText("── Keep using this drive")
+        self.log.appendPlainText("── Cancel swap")
         cmd.output.connect(self.log.appendPlainText)
         cmd.finished.connect(lambda code: self.log.appendPlainText(
             f"── finished ({'OK' if code == 0 else f'exit code {code}'})\n"))
