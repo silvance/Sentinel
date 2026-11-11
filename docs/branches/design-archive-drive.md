@@ -294,6 +294,18 @@ the number of files either. Instead:
   bays share one USB bridge), the message for a swapped drive while another archive drive is inserted says
   to take out only that drive and not to use Safely Remove. Sentinel has written, read back and flushed
   everything on it by then, and Windows uses "quick removal" (no write cache) for USB disks by default.
-  **Not verified on the Sabrent EC-HD2B:** whether taking one disk out briefly resets the other bay. If it
-  does, the drive in use is seen as removed for a moment; the copy in flight is discarded (its `.partial`
-  is never claimed) and done again, and nothing on the laptop is touched (docs/09 step 5.5a).
+  **Field result on the Sabrent EC-HD2B (2026-11-11, 0.3.7, docs/09 step 5.5a): taking one disk out
+  drops BOTH bays.** Windows went on listing the removed disk for about a minute, then listed neither disk;
+  the disk left in the dock came back only when a disk was inserted (the shared USB-SATA bridge resets). No
+  recording is at risk (originals stay on the laptop until a copy is verified, and the swapped drive was
+  finished and flushed), but the drive left in the dock can be cut off in the middle of a write, the
+  operator sees a false "removed without preparing" (A-003) for it, its presence session is closed as
+  "removed" while it is still in the dock (the retention rule reads that as "has left the machine"), and
+  copying stops until a disk is inserted.
+* **Operating decision (owner, 2026-11-11): one archive drive at a time in this dock.** Swap with a single
+  drive (flush, Windows' Safely Remove Hardware, take it out, insert the next one; the whole-dock eject
+  does no harm with one disk in it). The spare drive is kept out of the dock. The two-drive code stays (it is
+  inactive with one drive inserted) for docks with a separate USB bridge per bay, or two single-bay
+  enclosures; it must not be used with the EC-HD2B. A considered alternative, not built: on a swap with
+  two drives, finish the current file, flush and pause both, expect the dock to drop out (no A-003, the
+  remaining drive's presence session kept open), and resume once the drives are back.

@@ -106,6 +106,13 @@ two connected drives look the same. Also in those builds: after ticking "Allow '
 in Settings › Storage, press **Refresh list** on the Drives page before erasing, or the page still
 answers "erase_disabled".
 
+**Sabrent EC-HD2B: one archive drive at a time.** Taking one disk out of this dual-bay dock
+disconnects both bays until a disk is inserted again (field result 2026-11-11, step 5.5a). Keep only
+the archive drive in use in the dock; keep the next one on the shelf. To swap: **Swap Archive Drive**,
+wait for the page to say what to do, use Windows' **Safely Remove Hardware** (with one disk in the
+dock it does no harm), take the drive out, insert the next one. Erasing and setting up a new drive is
+done the same way: take the archive drive out first, or set new drives up on another day.
+
 | # | Step | Expected | Result |
 |---|---|---|---|
 | 5.1 | Drives page › **Refresh list**; identify the archive drive **by serial number** (if the dock hides it: by model and size, with only that drive in the dock). | Only the external drive is offered; internal drives UNSUITABLE. | |
@@ -113,7 +120,7 @@ answers "erase_disabled".
 | 5.3 | Select it › **Use as archive drive…** (needs the drive prepared in 5.2). | Designated. | |
 | 5.4 | Wait until the first recording file is finished (files end on the hour; with 15- or 30-minute files at the next quarter or half hour), then Drives › **Archive details**. | Copying, then up to date; copies verified. On the drive: `Sentinel\<camera>\<date>\` holds only `.ts` files, `Fingerprints\` their `.framehash.txt`, `Playlists\` one `.m3u` per day. | |
 | 5.5 | Swap as an agent would (screen / `archive swap`), insert drive 2. Then `Sentinel.exe ledger head` (docs/07 checklist). | "SAFE TO REMOVE" before removal; drive 2 starts copying; chain head written on the custody form. | |
-| 5.5a | Two drives (0.3.5): put an archive drive in each bay of the dock. Fill the first one or use a small one, or watch it the next time it fills. | When it is full: Drives page shows "Full (swap it)" for it and "In use" for the other; copying continues without A-003. Press **Swap Archive Drive**: the page says the full drive is ready to be taken out. Take out **only that disk** (do not use Safely Remove Hardware). Record whether the other drive stays connected: if Archive details then shows "removed without preparing" for the drive in use, the dock resets both bays when one disk is taken out; note it, copying must still carry on by itself within a minute. | |
+| 5.5a | Two drives (0.3.5): put an archive drive in each bay of the dock. Fill the first one or use a small one, or watch it the next time it fills. | When it is full: Drives page shows "Full (swap it)" for it and "In use" for the other; copying continues without A-003. Press **Swap Archive Drive**: the page says the full drive is ready to be taken out. Take out **only that disk** (do not use Safely Remove Hardware). Record whether the other drive stays connected: if Archive details then shows "removed without preparing" for the drive in use, the dock resets both bays when one disk is taken out; note it, copying must still carry on by itself within a minute. | **Sabrent EC-HD2B, 2026-11-11, 0.3.7: both bays drop.** The removed disk stayed listed for about a minute, then neither disk was listed; the other disk came back only when a disk was inserted. Decision: one archive drive at a time in this dock (see the note above this table); skip 5.5a with this dock. |
 | 5.6 | On another PC, open recordings from drive 1, and open a day's playlist (`Sentinel\<camera>\Playlists\<date>.m3u`) in VLC and in Windows Media Player. | Files play; the playlist plays that local day back to back; the drive's manifest verifies. | |
 | 5.6a | Back on the recorder, as administrator: System › Check and history › **Check the log against a drive…** › drive 1 (or `Sentinel.exe ledger verify --anchors-from <drive>:\`). | "N saved fingerprint(s) found"; intact (exit 0). | |
 | 5.7 | Retention (optional, long): run with a small recording disk until it is low. | Only recordings verified on a **removed** drive and older than 24 h are deleted; ledger records each deletion. | |

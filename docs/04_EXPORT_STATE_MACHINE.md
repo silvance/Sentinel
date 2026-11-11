@@ -73,6 +73,12 @@ copying continues on the other one; the screen names the drive to take out and s
 Windows' "Safely Remove Hardware", which would stop both bays (docs/branches/design-archive-drive.md,
 "Two drives").
 
+**Not with the Sabrent EC-HD2B (field result 2026-11-11):** taking one disk out of that dock disconnects
+both bays until a disk is inserted again, so the drive left in it is cut off mid-copy and reported as
+"removed without preparing". Keep **one archive drive at a time** in that dock and swap it the
+single-drive way (Swap, Safely Remove Hardware, take it out, insert the next). The two-drive mode is
+only for docks with a separate USB connection per bay, or two single-bay enclosures.
+
 ## 4. Automatic drive detection and one-button preparation
 
 On insertion the drive is **classified automatically** (UDisks2/udev: partition table, filesystem
