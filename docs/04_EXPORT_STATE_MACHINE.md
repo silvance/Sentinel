@@ -91,8 +91,14 @@ type and label, mount state, size, SMART, whether it holds the OS or spool):
   `000000000000000000` for every disk). A placeholder serial (one character repeated, a counting
   run, or a filler word) counts as hidden: the list shows "hidden by the dock", the operator types
   `ERASE` instead of the serial's last characters (typing `0000` would prove nothing), and erasing
-  is refused while another connected disk has the same serial, model and size (`lookalike`):
-  one drive in the dock at a time.
+  is refused while another connected disk cannot be told apart from it: same serial, model and
+  size *and* the same partition and volume IDs, i.e. two empty identical disks (`lookalike`). A new
+  disk next to the current archive drive is fine (field report 2026-11-11).
+* In such a dock the serial and UniqueId identify the dock or bay, not the disk, so they are not
+  used to recognise drives Sentinel has used before (field report 2026-11-11: a brand-new disk was
+  taken for SENTINEL_1 and could not be set up). Such drives are recognised by their contents only
+  (marker, volume GUIDs, filesystem serials); consequence: a Sentinel drive reformatted outside
+  Sentinel is not recognised in such a dock.
 * Action: GPT + one partition, approved filesystem (provisionally NTFS — risk C1), label
   `SENTINEL_<n>`, then `SENTINEL_DRIVE.json` (`drive_uuid`, label, prepared_utc, operator/admin id),
   a write/read-back test file, and an `audit` event recording drive identity and who pressed it.

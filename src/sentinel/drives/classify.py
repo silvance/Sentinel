@@ -295,17 +295,20 @@ def classify_all(disks: list[DiskInfo], policy: DrivePolicy, protected: Protecte
 
 
 LOOKALIKE_MESSAGE = ("Another connected drive looks exactly like this one to the computer (the drive dock hides "
-                     "their serial numbers). Remove the other drive, then try again.")
+                     "their serial numbers and both are empty). Remove the other drive, then try again.")
 
 
 def _refuse_lookalike(c: Classification, disks: list[DiskInfo]) -> Classification:
-    """Erasing is refused while another connected disk has the same hardware key (C2: a dock that
-    reports one placeholder serial for both bays). Content identifiers would still differ, but an
-    empty disk has none, so 'one at a time' is enforced rather than assumed."""
+    """Erasing is refused while another connected disk has the same *full* identity: same serial,
+    model and size and the same partition table and volume IDs (C2: a dock that reports one
+    placeholder serial for both bays, with two blank disks of one model). Only then could the disk
+    confirmed and the disk erased be different ones without the identity check before erasing
+    noticing. A prepared drive (e.g. the current archive drive) next to a new one of the same model
+    differs in its partition and volume IDs, so it is no lookalike (field report 2026-11-10)."""
     if not c.can_prepare:
         return c
-    key = c.disk.identity.hardware_key
-    if not any(d.disk_id != c.disk.disk_id and d.identity.hardware_key == key for d in disks):
+    fp = c.disk.identity.fingerprint()
+    if not any(d.disk_id != c.disk.disk_id and d.identity.fingerprint() == fp for d in disks):
         return c
     return replace(c, can_prepare=False, refusal="lookalike", message=LOOKALIKE_MESSAGE,
-                   notes=(*c.notes, "another connected disk has the same serial, model and size"))
+                   notes=(*c.notes, "another connected disk cannot be told apart from this one"))

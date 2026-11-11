@@ -22,7 +22,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from .model import DiskInfo, norm_serial
+from .model import DiskInfo, norm_serial, serial_is_placeholder
 
 _DRIVES_TABLE_COLUMNS = {
     "drive_uuid": "uuid", "volume_id": "vol", "volume_guid": "vol", "fs_uuid": "fs", "filesystem_uuid": "fs",
@@ -48,6 +48,13 @@ class KnownDrives:
             why.append("known_volume")
         if any(v.fs_serial and v.fs_serial.lower() in self.fs_serials for v in disk.volumes):
             why.append("known_filesystem")
+        if serial_is_placeholder(disk.serial):
+            # Field report 2026-11-10: a dock that reports one placeholder serial (eighteen zeros) for
+            # every disk. Its serial and UniqueId identify the dock or bay, not the disk, so they would
+            # mark every new disk as a known Sentinel drive. Only the disk's own contents (marker,
+            # volume GUIDs, filesystem serials above) identify it. Consequence: a Sentinel drive that
+            # was reformatted outside Sentinel is not recognised in such a dock (docs/04 §4).
+            return why
         if disk.unique_id and disk.unique_id.lower() in self.unique_ids:
             why.append("known_hardware")
         elif disk.serial and ((disk.serial.lower(), (disk.model or "").lower(), disk.size_bytes) in self.hardware

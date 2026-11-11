@@ -87,3 +87,52 @@ def test_lookalike_does_not_hide_other_refusals() -> None:
     off = DrivePolicy(erase_enabled=False)
     classes, _ = classify_all([a, b, SYS], off, protected_for(), inspector=FakeInspector())
     assert all(c.refusal == "erase_disabled" for c in classes[:2])
+
+
+# ---------------------------------------------------------------------- field report 2026-11-11
+def _known_dock_drive(model: str = "WDC WD40EFRX-68N", size: int = 4 * 10**12) -> "KnownDrives":
+    """The ledger after SENTINEL_1 was set up in the dock: its serial was recorded as eighteen zeros."""
+    from sentinel.drives.known import KnownDrives
+
+    return KnownDrives(volume_ids=frozenset({"{c0ffee00-0000-0000-0000-00000000aaaa}"}),
+                       hardware=frozenset({(ZEROS, model.lower(), size)}), serials=frozenset({ZEROS}),
+                       unique_ids=frozenset({r"usbstor\disk&ven_dual&prod_sata\000000000000000000&0"}))
+
+
+def test_a_brand_new_disk_in_the_dock_is_not_taken_for_the_archive_drive() -> None:
+    """Sentinel had never seen the disk; it matched SENTINEL_1 only by the dock's placeholder serial."""
+    new = blank_disk(disk_id="3", serial=ZEROS, unique_id=r"USBSTOR\DISK&VEN_DUAL&PROD_SATA\000000000000000000&0",
+                     size=4 * 10**12)
+    c = classify(new, POL, protected_for(), inspector=FakeInspector(), known=_known_dock_drive())
+    assert c.drive_class is DriveClass.BLANK and c.can_prepare, (c.drive_class, c.reasons)
+
+
+def test_a_known_drive_in_the_dock_is_still_recognised_by_its_contents() -> None:
+    from drive_fakes import data_part, usb_disk, vol
+
+    v = vol("c0ffee00-0000-0000-0000-00000000aaaa", "ntfs", label="SENTINEL_1")
+    old = usb_disk(disk_id="4", serial=ZEROS, unique_id=None, partitions=(data_part(1, v),))
+    c = classify(old, POL, protected_for(), inspector=FakeInspector(), known=_known_dock_drive())
+    assert c.drive_class is DriveClass.SENTINEL_EVIDENCE and "known_volume" in c.reasons and not c.can_prepare
+
+
+def test_a_real_serial_still_identifies_a_known_drive() -> None:
+    from sentinel.drives.known import KnownDrives
+
+    d = blank_disk(serial="WD-WCC4E1234ABCD")
+    k = KnownDrives(hardware=frozenset({("wd-wcc4e1234abcd", d.model.lower(), d.size_bytes)}))
+    assert classify(d, POL, protected_for(), inspector=FakeInspector(), known=k).drive_class \
+        is DriveClass.SENTINEL_EVIDENCE
+
+
+def test_a_new_disk_next_to_the_current_archive_drive_of_the_same_model_can_be_set_up() -> None:
+    """Two bays, same model and placeholder serial: the archive drive has its own partition and volume
+    IDs, so the two can be told apart; only two *empty* identical disks cannot."""
+    from drive_fakes import data_part, usb_disk, vol
+
+    v = vol("c0ffee00-0000-0000-0000-00000000bbbb", "ntfs", label="SENTINEL_1")
+    archive = usb_disk(disk_id="4", serial=ZEROS, unique_id=None, partitions=(data_part(1, v),))
+    new = blank_disk(disk_id="3", serial=ZEROS, unique_id=None)
+    classes, _ = classify_all([archive, new, SYS], POL, protected_for(), inspector=FakeInspector())
+    by = {c.disk.disk_id: c for c in classes}
+    assert by["3"].can_prepare and by["3"].refusal is None
