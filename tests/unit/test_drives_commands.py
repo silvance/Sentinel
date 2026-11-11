@@ -108,13 +108,15 @@ def test_uac_launcher_argv() -> None:
 
 
 @WIN_ONLY
-def test_generated_script_parses_and_every_cmdlet_and_parameter_exists() -> None:
+def test_generated_script_parses_and_every_cmdlet_and_parameter_exists(tmp_path: Path) -> None:
     """Parse (do NOT run) the generated script with the real PowerShell parser, then check that every
     command it calls exists on this machine and that every named parameter exists on that command."""
     script = _script()
+    src = tmp_path / "helper.ps1"
+    src.write_text(script, encoding="utf-8")  # embedded, the checker got longer than a command line
     checker = r"""
 $ErrorActionPreference = 'Stop'
-$text = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('__S__'))
+$text = [System.IO.File]::ReadAllText('__S__', [System.Text.Encoding]::UTF8)
 $tokens = $null; $errors = $null
 $ast = [System.Management.Automation.Language.Parser]::ParseInput($text, [ref]$tokens, [ref]$errors)
 $funcs = @($ast.FindAll({ $args[0] -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true) | ForEach-Object { $_.Name })
@@ -128,7 +130,7 @@ foreach ($c in $ast.FindAll({ $args[0] -is [System.Management.Automation.Languag
     $out += [pscustomobject]@{ name = $name; found = [bool]$cmd; missing = $missing }
 }
 [pscustomobject]@{ errors = @($errors | ForEach-Object { $_.Message }); commands = $out } | ConvertTo-Json -Depth 4 -Compress
-""".replace("__S__", base64.b64encode(script.encode("utf-8")).decode("ascii"))
+""".replace("__S__", str(src).replace("'", "''"))
     from sentinel.drives.powershell import run_powershell
 
     res = json.loads(run_powershell(checker))
