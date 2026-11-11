@@ -20,13 +20,16 @@ from .. import textfmt as tf
 from .base import Ctx
 
 TICK_MS = 500
+PICTURE_W = 560          # logical pixels; Windows display scaling enlarges it on high-DPI screens
 REQUEST_EVERY_S = 5.0
 STALE_S = 6.0            # older than this: the caption says the picture is old
 NO_SERVICE_S = 15.0      # nothing at all after this long: the recorder is not providing a live view
 
 
 class LiveView(QWidget):
-    def __init__(self, ctx: Ctx, parent: QWidget | None = None, clock: Callable[[], float] = time.time) -> None:
+    def __init__(self, ctx: Ctx, parent: QWidget | None = None, clock: Callable[[], float] = time.time, *,
+                 fixed: bool = True) -> None:
+        """``fixed``: a 16:9 picture of PICTURE_W; False: the caller sizes the picture (Status page)."""
         super().__init__(parent)
         self.ctx, self.clock = ctx, clock
         lay = QVBoxLayout(self)
@@ -34,10 +37,17 @@ class LiveView(QWidget):
         lay.setSpacing(4)
         self.picture = QLabel()
         self.picture.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.picture.setMinimumSize(320, 180)
-        self.picture.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        if fixed:   # field report 2026-11-10: a stretching picture squeezed the camera form
+            self.picture.setFixedSize(PICTURE_W, PICTURE_W * 9 // 16)
+            self.picture.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        else:
+            self.picture.setMinimumSize(320, 180)
+            self.picture.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.picture.setStyleSheet(f"background: #000; color: #ccc; border-radius: 4px;")
-        lay.addWidget(self.picture, 1)
+        if fixed:
+            lay.addWidget(self.picture, 0, Qt.AlignmentFlag.AlignLeft)
+        else:
+            lay.addWidget(self.picture, 1)
         self.caption = QLabel()
         self.caption.setObjectName("muted")
         self.caption.setWordWrap(True)

@@ -39,6 +39,8 @@ class StatusPage(Page):
     sized by their content: alerts and details on the left, the live view on the right. Nothing is
     stretched to fill the window; free space stays below the content."""
 
+    scrolls = False                      # it has its own scroll area (horizontal scrolling off)
+
     key = "status"
     title = "Status"
     description = "What the recorder is doing now."
@@ -172,7 +174,7 @@ class StatusPage(Page):
         right.addWidget(lt)
         from .liveview import LiveView
 
-        self.live = LiveView(ctx)
+        self.live = LiveView(ctx, fixed=False)
         self.live.picture.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         right.addWidget(self.live)
         right.addStretch(1)

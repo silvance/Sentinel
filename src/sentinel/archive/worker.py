@@ -87,9 +87,9 @@ SOURCE_RETRY_S = 3600.0          # retry a local recording that could not be rea
 REVIEW_LAYOUT = ("README_FIRST.txt", "Recordings", "Manifests", "Originals")
 
 MSG_FULL = ("Do not unplug the archive drive yet. It is full: press Swap Archive Drive and wait for SAFE TO "
-            "REMOVE, then insert an empty archive drive. Recording continues.")
+            "REMOVE, then insert an empty archive drive.")
 MSG_REMOVED = ("The archive drive was removed without preparing it. No recordings were lost; copying will "
-               "continue when a drive is inserted. Recording continues.")
+               "continue when a drive is inserted.")
 
 
 class LocalReadError(OSError):
@@ -401,12 +401,11 @@ class ArchiveWorker:
             if self.att.copies_since_index and self.mono() - self.att.last_index_mono >= self.acfg.index_every_s:
                 self._write_index("hourly")
             if self._skip or self.source_failed:
-                self._set(ST_ATTENTION, "Some recordings could not be copied to the archive drive. "
-                                        "Recording continues.")
+                self._set(ST_ATTENTION, "Some recordings could not be copied to the archive drive.")
             else:
-                self._set(ST_UP_TO_DATE, "Archive drive connected. All recordings are copied. Recording continues.")
+                self._set(ST_UP_TO_DATE, "Archive drive connected. All recordings are copied.")
             return "idle"
-        self._set(ST_COPYING, "Copying recordings to the archive drive. Do not unplug it. Recording continues.")
+        self._set(ST_COPYING, "Copying recordings to the archive drive. Do not unplug it.")
         self._archive_segment(pending[0])
         if self.att is not None and (self.att.footage_since_index >= self.acfg.index_every_s
                                      or (self.att.copies_since_index
@@ -420,15 +419,15 @@ class ArchiveWorker:
             self._clear_swap()
         if scan.unusable:
             self.unusable_reason = "; ".join(r for _root, r in scan.unusable)[:500]
-            self._set(ST_UNUSABLE, "The inserted drive cannot be used as an archive drive. Recording continues.")
+            self._set(ST_UNUSABLE, "The inserted drive cannot be used as an archive drive.")
             return "unusable"
         self.unusable_reason = None
         if self.after_swap:
-            self._set(ST_ABSENT, "Insert the next archive drive. Recording continues.")
+            self._set(ST_ABSENT, "Insert the next archive drive.")
         elif self.removed_unexpectedly:
             self._set(ST_ABSENT, MSG_REMOVED)
         else:
-            self._set(ST_ABSENT, "No archive drive is connected. Recording continues.")
+            self._set(ST_ABSENT, "No archive drive is connected. Recordings stay on this computer until one is inserted.")
         return "absent"
 
     def _detached(self, unexpected: bool) -> None:
@@ -449,7 +448,7 @@ class ArchiveWorker:
         self.unusable_reason = reason
         self._event("warning", "archive_drive_unusable", "Archive drive refused",
                     {"reason": reason, "identity": target.identity})
-        self._set(ST_UNUSABLE, "The inserted drive cannot be used as an archive drive. Recording continues.")
+        self._set(ST_UNUSABLE, "The inserted drive cannot be used as an archive drive.")
         return False
 
     def _attach(self, target: ExportTarget) -> bool:
@@ -714,7 +713,7 @@ class ArchiveWorker:
     def _do_swap(self) -> str:
         att = self.att
         assert att is not None
-        self._set(ST_SWAP_PENDING, "Preparing the archive drive for removal. Do not unplug it yet. Recording continues.")
+        self._set(ST_SWAP_PENDING, "Preparing the archive drive for removal. Do not unplug it yet.")
         self._publish(force=True)
         root = Path(att.target.root)
         for p in self.io.stray_partials(root / layout.ROOT):
@@ -741,15 +740,15 @@ class ArchiveWorker:
     def _waiting_for_removal(self) -> None:
         ejected = bool(self._swap_result and self._swap_result[0])
         if ejected:
-            self._set(ST_SAFE, "SAFE TO REMOVE ARCHIVE DRIVE. Recording continues.")
+            self._set(ST_SAFE, "SAFE TO REMOVE ARCHIVE DRIVE.")
         elif os.name == "nt":
             self._set(ST_REMOVE_MANUALLY, "Do not unplug the archive drive yet. Click the \"Safely Remove "
                                           "Hardware\" icon near the clock, choose this drive, and unplug it only "
-                                          "after Windows says it is safe to remove. Recording continues.")
+                                          "after Windows says it is safe to remove.")
         else:
             self._set(ST_REMOVE_MANUALLY, "Do not unplug the archive drive yet. Use the \"Eject\" or \"Safely "
                                           "remove\" option for this drive and unplug it only after it has "
-                                          "disappeared. Recording continues.")
+                                          "disappeared.")
 
     # ================================================================== copying
     def _expire_source_failures(self) -> None:
@@ -858,8 +857,7 @@ class ArchiveWorker:
         self._last_control_poll = now
         if self._take_request(SWAP_REQUEST):
             self.request_swap()
-            self._set(ST_SWAP_PENDING, "Preparing the archive drive for removal. Do not unplug it yet. "
-                                       "Recording continues.")
+            self._set(ST_SWAP_PENDING, "Preparing the archive drive for removal. Do not unplug it yet.")
 
     def _read_hash(self, path: Path) -> tuple[str, int, str]:
         h = hashlib.sha256()

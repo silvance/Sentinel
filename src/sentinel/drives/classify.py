@@ -31,7 +31,7 @@ cannot be confused with the export action **Prepare Review Drive** (U4).
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from .known import KnownDrives
@@ -111,7 +111,7 @@ class Classification:
             "fingerprint": d.identity.fingerprint(), "drive_uuid": (self.marker or {}).get("drive_uuid"),
             "label": (self.marker or {}).get("label"), "notes": list(self.notes),
             # For the window's drive list (where a prepared drive can be opened).
-            "size_bytes": d.size_bytes, "model": d.model, "serial": d.serial,
+            "size_bytes": d.size_bytes, "model": d.model, "serial": d.serial, "serial_hidden": d.serial_hidden,
             "mount_paths": [p for v in d.volumes for p in v.mount_paths],
             # The marker's role: "archive" for the archive drive (sentinel.archive.locator adds it),
             # None for a prepared drive without one (review drives), so the window can tell them apart.
@@ -290,4 +290,22 @@ def classify_all(disks: list[DiskInfo], policy: DrivePolicy, protected: Protecte
     known = known or KnownDrives()
     if known.error:
         problems = [*problems, f"ledger: {known.error}"]
-    return [classify(d, policy, protected, inspector=inspector, protection_ok=ok, known=known) for d in disks], problems
+    classes = [classify(d, policy, protected, inspector=inspector, protection_ok=ok, known=known) for d in disks]
+    return [_refuse_lookalike(c, disks) for c in classes], problems
+
+
+LOOKALIKE_MESSAGE = ("Another connected drive looks exactly like this one to the computer (the drive dock hides "
+                     "their serial numbers). Remove the other drive, then try again.")
+
+
+def _refuse_lookalike(c: Classification, disks: list[DiskInfo]) -> Classification:
+    """Erasing is refused while another connected disk has the same hardware key (C2: a dock that
+    reports one placeholder serial for both bays). Content identifiers would still differ, but an
+    empty disk has none, so 'one at a time' is enforced rather than assumed."""
+    if not c.can_prepare:
+        return c
+    key = c.disk.identity.hardware_key
+    if not any(d.disk_id != c.disk.disk_id and d.identity.hardware_key == key for d in disks):
+        return c
+    return replace(c, can_prepare=False, refusal="lookalike", message=LOOKALIKE_MESSAGE,
+                   notes=(*c.notes, "another connected disk has the same serial, model and size"))

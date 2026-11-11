@@ -12,6 +12,10 @@ the identity and never used to decide whether a disk is safe to erase.
 Caveat C2: some USB-SATA bridges (docks) report their own serial number instead of the disk's.
 Two different disks in the same dock may then look alike by serial; model, size and partition
 GUIDs still differ in practice, which is why the identity compares all of them.
+Some docks go further and report a placeholder (the Sabrent EC-HD2B reports eighteen zeros). Such a
+serial says nothing about the disk: ``serial_is_placeholder`` spots it, the operator confirms an erase
+by typing ``HIDDEN_SERIAL_WORD`` instead of a serial tail, and erasing is refused while another
+connected disk looks the same (classify.classify_all).
 """
 
 from __future__ import annotations
@@ -69,14 +73,43 @@ def norm_serial(value: Any) -> str | None:
     return s or None
 
 
-def serial_tail(serial: str | None, n: int = 4) -> str | None:
-    """Last ``n`` letters/digits of the serial (what the operator must type for FOREIGN_DATA)."""
+HIDDEN_SERIAL_WORD = "ERASE"
+_PLACEHOLDER_WORDS = {"NONE", "NULL", "DEFAULT", "UNKNOWN", "TOBEFILLEDBYOEM", "DEFAULTSTRING", "SERIAL",
+                      "SERIALNUMBER", "NOTAVAILABLE", "NA"}
+
+
+def serial_is_placeholder(serial: str | None) -> bool:
+    """True for a serial that a dock or bridge fills in instead of the disk's own: one character
+    repeated (000000000000000000, FFFFFFFF), a counting run (0123456789AB, 123456789) or a filler word.
+    An absent serial is not a placeholder; it is simply absent."""
     if not serial:
+        return False
+    alnum = "".join(c for c in serial if c.isalnum()).upper()
+    if not alnum:
+        return True
+    if len(set(alnum)) == 1 or alnum in _PLACEHOLDER_WORDS:
+        return True
+    run = "0123456789ABCDEF"
+    return len(alnum) >= 6 and (alnum in run or alnum in run[1:] + "0")
+
+
+def serial_tail(serial: str | None, n: int = 4) -> str | None:
+    """Last ``n`` letters/digits of the serial (what the operator must type for FOREIGN_DATA).
+    None for a placeholder serial: typing "0000" proves nothing (see ``confirm_text``)."""
+    if not serial or serial_is_placeholder(serial):
         return None
     alnum = [c for c in serial if c.isalnum()]
     if len(alnum) < n:
         return None
     return "".join(alnum[-n:]).upper()
+
+
+def confirm_text(serial: str | None, n: int = 4) -> str | None:
+    """What the operator types to confirm erasing: the serial's last ``n`` characters from the drive's
+    label, or ``HIDDEN_SERIAL_WORD`` when the dock hides the serial. None: nothing would do."""
+    if serial_is_placeholder(serial):
+        return HIDDEN_SERIAL_WORD
+    return serial_tail(serial, n)
 
 
 FS_DISPLAY = {
@@ -172,8 +205,7 @@ class DriveIdentity:
     def same_device(self, other: DriveIdentity) -> bool:
         """Same physical disk, ignoring its current contents (used *after* preparing, when the
         partition table and partitions have been replaced)."""
-        return (self.serial, self.unique_id, self.model, self.size_bytes, self.bus_type) == (
-            other.serial, other.unique_id, other.model, other.size_bytes, other.bus_type)
+        return self.hardware_key == other.hardware_key
 
     def differences(self, other: DriveIdentity) -> list[str]:
         a, b = self.to_dict(), other.to_dict()
@@ -182,6 +214,12 @@ class DriveIdentity:
     @property
     def has_hardware_identity(self) -> bool:
         return bool(self.serial or self.unique_id)
+
+    @property
+    def hardware_key(self) -> tuple[Any, ...]:
+        """What the hardware says, without the contents: two connected disks with the same key cannot
+        be told apart by Sentinel (same dock placeholder serial, same model and size)."""
+        return (self.serial, self.unique_id, self.model, self.size_bytes, self.bus_type)
 
 
 @dataclass(frozen=True)
@@ -243,8 +281,14 @@ class DiskInfo:
     def describe(self) -> str:
         """Plain words for a confirmation screen: model, size, serial."""
         model = self.model or "Unknown model"
+        if serial_is_placeholder(self.serial):
+            return f"{model}, {human_size(self.size_bytes)}, serial hidden by the drive dock"
         serial = self.serial or "no serial number"
         return f"{model}, {human_size(self.size_bytes)}, serial {serial}"
+
+    @property
+    def serial_hidden(self) -> bool:
+        return serial_is_placeholder(self.serial)
 
 
 class DriveClass(StrEnum):

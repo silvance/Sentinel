@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QFileDialog
                                QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QVBoxLayout)
 
 from .. import textfmt as tf
+from ...drives.model import HIDDEN_SERIAL_WORD
 from ..ledger_view import load_exports
 from .base import CommandPanel, OutputLog, Page, ReadOnlyBar, capped, fill, icon_button, muted, selected_data, table
 from .procs import Command, sentinel_argv
@@ -73,6 +74,9 @@ class DriveList:
 
 
 class EraseDialog(QDialog):
+    """Who is erasing, and proof it is the drive in hand: the serial's last characters from the drive's
+    label, or the word ERASE when the dock hides the serial (it reports a placeholder such as zeros)."""
+
     def __init__(self, d: dict[str, Any], chars: int, parent=None) -> None:  # noqa: ANN001
         super().__init__(parent)
         self.setWindowTitle("Erase and set up drive")
@@ -86,11 +90,21 @@ class EraseDialog(QDialog):
         self.who = QLineEdit(_who())
         f.addRow("Your name or ID (recorded)", self.who)
         self.tail = QLineEdit()
-        self.tail.setPlaceholderText(f"last {chars} characters of the serial number")
-        f.addRow(f"Serial number, last {chars} characters", self.tail)
+        self.hidden = bool(d.get("serial_hidden"))
+        if self.hidden:
+            self.expected_len = len(HIDDEN_SERIAL_WORD)
+            self.tail.setPlaceholderText(HIDDEN_SERIAL_WORD)
+            f.addRow(f"Type {HIDDEN_SERIAL_WORD} to confirm", self.tail)
+            note = ("The drive dock hides this drive's serial number, so it cannot be checked against the label. "
+                    "Make sure this is the only drive in the dock.")
+        else:
+            self.expected_len = chars
+            self.tail.setPlaceholderText(f"last {chars} characters of the serial number")
+            f.addRow(f"Serial number, last {chars} characters", self.tail)
+            note = ("The serial number is printed on the drive's label and shown in the list. "
+                    "Type it from the drive itself, to be sure it is the drive in your hand.")
         lay.addLayout(f)
-        lay.addWidget(muted("The serial number is printed on the drive's label and shown in the list. "
-                            "Type it from the drive itself, to be sure it is the drive in your hand."))
+        lay.addWidget(muted(note))
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
         self.ok = bb.addButton("Erase drive", QDialogButtonBox.ButtonRole.DestructiveRole)
         self.ok.clicked.connect(self.accept)
@@ -167,12 +181,12 @@ class DrivesPage(Page):
             b.setEnabled(operator_ok)
             if not operator_ok:
                 b.setToolTip("Needs an administrator on this computer (no operator request folder is set up)")
-        self._loaded = False
+        self._after_load: Any = None
 
     def on_show(self) -> None:
-        if not self._loaded:
-            self._loaded = True
-            self.list.refresh()
+        # Always re-read: a drive may have been plugged in, or a setting (such as allowing erasing)
+        # changed since the page was last open. Field report 2026-11-10: the list kept 'erase_disabled'.
+        self.list.refresh()
 
     def on_status(self, read) -> None:  # noqa: ANN001
         arc = ((read.doc or {}).get("archive") or {}) if read is not None else {}
@@ -246,10 +260,14 @@ class DrivesPage(Page):
     def _show_drives(self) -> None:
         rows = [[d.get("disk_id"), _what(d),
                  tf.size(d["size_bytes"]) if isinstance(d.get("size_bytes"), (int, float)) else "",
-                 d.get("bus_type") or "", d.get("model") or "", d.get("serial") or "", ", ".join(_letters(d)),
+                 d.get("bus_type") or "", d.get("model") or "",
+                 "hidden by the dock" if d.get("serial_hidden") else (d.get("serial") or ""), ", ".join(_letters(d)),
                  d.get("message") or d.get("refusal") or ""] for d in self.list.drives]
         fill(self.table, rows, self.list.drives, empty="No drives found. Connect a drive and press Refresh list.")
         self.problems.setText(("Erasing is blocked: " + "; ".join(self.list.problems)) if self.list.problems else "")
+        then, self._after_load = self._after_load, None
+        if then is not None:
+            then()
 
     def _selected(self) -> dict[str, Any] | None:
         d = selected_data(self.table)
@@ -258,30 +276,61 @@ class DrivesPage(Page):
         return d
 
     def _erase(self) -> None:
-        d = self._selected()
+        self._erase_disk(self._selected())
+
+    def _erase_disk(self, d: dict[str, Any] | None, *, fresh: bool = False) -> None:
         cfg = self.cfg
         if d is None or cfg is None:
             return
+        if not fresh and d.get("refusal") == "erase_disabled" and cfg.drives.erase_enabled:
+            # The row predates the setting being turned on: read the list again, then decide.
+            want = d.get("disk_id")
+            self._after_load = lambda: self._erase_disk(
+                next((x for x in self.list.drives if x.get("disk_id") == want), None), fresh=True)
+            self.list.refresh()
+            return
         if not d.get("can_prepare"):
-            self.problem(f"This drive cannot be erased and set up: {d.get('refusal') or d.get('message')}.\n\n"
-                         "Nothing was erased.")
+            self._cannot_erase(d)
             return
         chars = cfg.drives.serial_confirm_chars
         dlg = EraseDialog(d, chars, self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         who, tail = dlg.who.text().strip(), dlg.tail.text().strip().upper()
-        if not who or len(tail) != chars:
-            self.problem(f"Enter your name and exactly {chars} characters of the serial number. Nothing was erased.")
+        if not who or len(tail) != dlg.expected_len:
+            what = f"the word {HIDDEN_SERIAL_WORD}" if dlg.hidden else f"exactly {chars} characters of the serial number"
+            self.problem(f"Enter your name and {what}. Nothing was erased.")
             return
         self.log.run(sentinel_argv("drives", "prepare", "--config", self._cfg(), "--disk", str(d["disk_id"]),
                                    "--who", who, "--admin", "--yes", "--serial-tail", tail),
                      f"Erase and set up disk {d['disk_id']}", busy=[self.erase_btn],
                      on_done=lambda _c, _cmd: self.list.refresh())
 
+    def _cannot_erase(self, d: dict[str, Any]) -> None:
+        """Why 'Erase and set up' is refused, in plain words, with the way forward where there is one."""
+        if d.get("refusal") != "erase_disabled":
+            self.problem(f"This drive cannot be erased and set up.\n\n{d.get('message') or ''}\n\nNothing was erased.")
+            return
+        text = ("Erasing drives is turned off on this computer, so Sentinel cannot set up this drive yet.\n\n"
+                "An administrator can turn it on: Settings › Storage › \"Allow 'Erase and set up'\", then Save.")
+        if not self.ctx.admin:
+            self.problem(text + "\n\nNothing was erased.")
+            return
+        box = QMessageBox(QMessageBox.Icon.Information, "Sentinel", text, QMessageBox.StandardButton.Close, self)
+        go = box.addButton("Open Storage settings", QMessageBox.ButtonRole.AcceptRole)
+        box.setDefaultButton(go)
+        box.exec()
+        if box.clickedButton() is go:
+            self.ctx.navigate("storage")
+
     def _designate(self) -> None:
         d = self._selected()
         if d is None:
+            return
+        if d.get("class") != "READY":
+            self.problem("Sentinel has not set up this drive, so it cannot be the archive drive yet. "
+                         "Select it and press Erase and set up first.\n\n(Formatting it in Disk Management is "
+                         "not enough: setting up also records the drive's identity and checks it can be written.)")
             return
         letters = _letters(d)
         if not letters:

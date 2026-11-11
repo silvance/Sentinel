@@ -95,10 +95,21 @@ left on, or set back to `false` on any failure), or mark 5.2–5.6 "not run: era
 is not a FAIL, but the laptop cannot be deployed with archive drives until it is done. Never switch
 `erase_enabled` on just for this checklist.
 
+**Known issue in builds before 2026-11-10 (commit 973f3b8 and earlier): docks that hide the serial.**
+The Sabrent EC-HD2B dual-bay dock (and other "toaster" docks with a cheap USB-SATA bridge) reports
+`000000000000000000` as the serial of every disk, so Sentinel never sees the disk's real serial.
+Those builds still ask for "the serial's last 4 characters", and the only answer they accept is
+`0000`. That confirms nothing about which disk is in the dock. With such a build, keep exactly
+one drive in the dock and check the model and size on screen before typing `0000`. Later builds
+show "hidden by the dock" in the Serial column, ask for `ERASE` instead, and refuse to erase while
+two connected drives look the same. Also in those builds: after ticking "Allow 'Erase and set up'"
+in Settings › Storage, press **Refresh list** on the Drives page before erasing, or the page still
+answers "erase_disabled".
+
 | # | Step | Expected | Result |
 |---|---|---|---|
-| 5.1 | Drives page › **Refresh list**; identify the archive drive **by serial number**. | Only the external drive is offered; internal drives UNSUITABLE. | |
-| 5.2 | Select it › **Erase and set up…**, enter your name and the serial's last characters. | With the dock test passed (`erase_enabled = true`): drive prepared; audit entry. Otherwise: refused with M-010 "Nothing was erased" — record it and skip to section 6. | |
+| 5.1 | Drives page › **Refresh list**; identify the archive drive **by serial number** (if the dock hides it: by model and size, with only that drive in the dock). | Only the external drive is offered; internal drives UNSUITABLE. | |
+| 5.2 | Select it › **Erase and set up…**, enter your name and the serial's last characters (or `ERASE` when the list says the dock hides the serial). | With the dock test passed (`erase_enabled = true`): drive prepared; audit entry. Otherwise: refused with M-010 "Nothing was erased" — record it and skip to section 6. | |
 | 5.3 | Select it › **Use as archive drive…** (needs the drive prepared in 5.2). | Designated. | |
 | 5.4 | Wait 30 minutes; Drives › **Archive details**. | Copying, then up to date; copies verified. | |
 | 5.5 | Swap as an agent would (screen / `archive swap`), insert drive 2. Then `Sentinel.exe ledger head` (docs/07 checklist). | "SAFE TO REMOVE" before removal; drive 2 starts copying; chain head written on the custody form. | |

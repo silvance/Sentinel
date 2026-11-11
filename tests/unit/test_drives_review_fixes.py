@@ -268,7 +268,8 @@ def test_identical_model_swap_with_dock_serial_refused(ledger: Ledger, tmp_path:
                          runner=runner, audit=ledger, platform="windows", inspector=insp, settle_s=0)
     c = classify(confirmed, DrivePolicy(erase_enabled=True), protected_for(), inspector=insp)
     with pytest.raises(IdentityChanged):
-        prepare_drive(ctx, "6", Confirmation.for_classification(c, "0000"), ADMIN)
+        # The dock reports a placeholder serial: confirmed with the word, never "0000" (2026-11-10).
+        prepare_drive(ctx, "6", Confirmation.for_classification(c, "ERASE"), ADMIN)
     assert runner.plans == []
 
 

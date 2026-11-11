@@ -59,7 +59,7 @@ from .commands import (
 from .errors import IdentityChanged, PrepareFailed, PrepareRefused
 from .known import load_known
 from .marker import MARKER_FORMAT, MARKER_VERSION, inspect_volume, write_marker, write_read_back_test
-from .model import KIND_MSR, DiskInfo, DriveClass, VolumeInfo, serial_tail
+from .model import KIND_MSR, DiskInfo, DriveClass, VolumeInfo, confirm_text
 from .policy import DrivePolicy
 from .protected import ProtectedStorage
 
@@ -163,15 +163,19 @@ def check_guards(c: Classification, confirmation: Confirmation | None, auth: Aut
                               "Nothing was erased.", {"confirmed": str(confirmation.drive_class),
                                                        "now": str(c.drive_class)})
     if not c.can_prepare:
+        if c.refusal == "lookalike":
+            raise PrepareRefused("lookalike", f"{c.message} Nothing was erased.")
         raise PrepareRefused(c.refusal or "not_allowed", "Erasing drives that contain other files is not "
                              "allowed on this system. Nothing was erased.")
     if c.needs_admin and not auth.administrator:
         raise PrepareRefused("admin_required", "An administrator must approve erasing this drive. Nothing was erased.")
     if c.needs_serial:
-        want = serial_tail(c.disk.serial, policy.serial_confirm_chars)
+        # A dock that hides the serial (placeholder such as all zeros) is confirmed with a word instead:
+        # typing "0000" would prove nothing. The lookalike refusal covers the second bay.
+        want = confirm_text(c.disk.serial, policy.serial_confirm_chars)
         typed = (confirmation.typed_serial_tail or "").strip().upper()
         if want is None or typed != want:
-            raise PrepareRefused("serial_mismatch", "The serial number characters typed do not match this drive. "
+            raise PrepareRefused("serial_mismatch", "The confirmation typed does not match this drive. "
                                  "Nothing was erased.")
     gaps = c.disk.identity_gaps()
     if gaps:

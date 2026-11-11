@@ -33,7 +33,7 @@ from .classify import Classification, classify_all
 from .errors import DriveError, PrepareFailed, PrepareRefused
 from . import installed as _installed
 from .known import KnownDrives, load_known
-from .model import DiskInfo, DriveClass, human_size, serial_tail
+from .model import HIDDEN_SERIAL_WORD, DiskInfo, DriveClass, confirm_text, human_size
 from .policy import DrivePolicy
 from .protected import ProtectedStorage, default_paths, resolve
 
@@ -225,7 +225,7 @@ def cmd_prepare(env: _Env, args: argparse.Namespace, *, reader: Callable[[str], 
                 print("--admin was given but this account is not a computer administrator. Nothing was erased.")
                 return EXIT_REFUSED
             admin = True
-        want = serial_tail(c.disk.serial, env.policy.serial_confirm_chars)
+        want = confirm_text(c.disk.serial, env.policy.serial_confirm_chars)
         if not interactive or args.yes:
             if not (args.yes and args.serial_tail):
                 print("Refusing to erase without a person confirming: give both --yes and --serial-tail. "
@@ -233,8 +233,11 @@ def cmd_prepare(env: _Env, args: argparse.Namespace, *, reader: Callable[[str], 
                 return EXIT_REFUSED
             typed = args.serial_tail.strip().upper()
             if typed != want:
-                print("The serial number characters given do not match this drive. Nothing was erased.")
+                print("The confirmation given does not match this drive. Nothing was erased.")
                 return EXIT_REFUSED
+        elif c.needs_serial and c.disk.serial_hidden:
+            print("The drive dock hides this drive's serial number, so it cannot be checked against the label.")
+            typed = _ask(f"Type {HIDDEN_SERIAL_WORD} to erase the drive described above: ", reader).upper()
         elif c.needs_serial:
             typed = _ask(f"Type the last {env.policy.serial_confirm_chars} characters of the serial number "
                          "shown above to erase it: ", reader).upper()
@@ -315,7 +318,7 @@ def build_parser() -> argparse.ArgumentParser:
             p.add_argument("--who", help="name/ID of the person erasing the drive (recorded in the audit trail)")
             p.add_argument("--admin", action="store_true", help="act as administrator (verified against the OS)")
             p.add_argument("--yes", action="store_true", help="non-interactive confirmation (needs --serial-tail)")
-            p.add_argument("--serial-tail", help="last characters of the drive's serial number")
+            p.add_argument("--serial-tail", help="last characters of the drive's serial number (ERASE when the dock hides the serial)")
             p.add_argument("--dry-run", action="store_true", help="print the elevated script; change nothing")
         if name == "eject":
             p.add_argument("--verbose", action="store_true")

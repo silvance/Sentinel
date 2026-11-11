@@ -441,8 +441,14 @@ class AppWindow(QMainWindow):
         elif not arc.get("running"):
             self.sb_archive.setText("Archive: copying not running")
         else:
-            self.sb_archive.setText(f"Archive: {arc.get('drive_label') or 'no drive'}"
-                                    + (f" · {arc.get('state')}" if arc.get("state") else ""))
+            from ...archive.status import ST_ABSENT, state_words
+
+            words = state_words(arc.get("state"))
+            label = arc.get("drive_label")
+            if label and arc.get("state") != ST_ABSENT:
+                self.sb_archive.setText(f"Archive: {label} · {words}" if words else f"Archive: {label}")
+            else:
+                self.sb_archive.setText(f"Archive: {words or 'no drive inserted'}")
         self.sb_updated.setText(v.updated)
 
     # ------------------------------------------------------------------ actions

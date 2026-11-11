@@ -30,6 +30,16 @@ ST_STARTING, ST_ABSENT, ST_UNUSABLE, ST_COPYING, ST_UP_TO_DATE = "STARTING", "AB
 ST_FULL, ST_SWAP_PENDING, ST_SAFE, ST_REMOVE_MANUALLY = "FULL", "SWAP_PENDING", "SAFE_TO_REMOVE", "REMOVE_MANUALLY"
 ST_ATTENTION, ST_STOPPED = "ATTENTION", "STOPPED"
 
+# What the window shows for each state (status bar), instead of the machine token.
+STATE_WORDS = {ST_STARTING: "starting", ST_ABSENT: "no drive inserted", ST_UNUSABLE: "drive cannot be used",
+               ST_COPYING: "copying", ST_UP_TO_DATE: "up to date", ST_FULL: "drive full, swap it",
+               ST_SWAP_PENDING: "preparing for removal", ST_SAFE: "safe to remove",
+               ST_REMOVE_MANUALLY: "remove with Windows", ST_ATTENTION: "needs attention", ST_STOPPED: "stopped"}
+
+
+def state_words(state: str | None) -> str:
+    return STATE_WORDS.get(state or "", (state or "").replace("_", " ").lower())
+
 
 def backlog_text(seconds: float) -> str:
     """'Not yet archived: 0 h' / '0.4 h' / '26 h' (recorded footage not yet on an archive drive)."""

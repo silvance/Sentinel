@@ -9,6 +9,8 @@ characters and goes through the same command as the command line; setup works in
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import os
 import sys
 import time
@@ -320,6 +322,78 @@ def test_erasing_needs_name_and_serial_and_uses_the_checked_command(app: QApplic
     n = len(runs)
     page._erase()
     assert len(runs) == n and "cannot be erased" in said[-1]
+    w.close()
+
+
+def test_hidden_serial_is_confirmed_with_the_word(app: QApplication, tmp_path: Path,
+                                                    monkeypatch: pytest.MonkeyPatch) -> None:
+    """Field report 2026-11-10: the dock reports 000000000000000000; the dialog asks for ERASE."""
+    w = _window(app, tmp_path, admin=True)
+    page = w.pages["drives"]
+    runs: list[list[str]] = []
+    monkeypatch.setattr(page.log, "run", lambda argv, *a, **k: runs.append(argv))
+    page.list.drives = [{"disk_id": "3", "class": "BLANK", "can_prepare": True, "serial": "0" * 18,
+                         "serial_hidden": True, "description": "Dual SATA Bridge", "size_bytes": 2 * 10**12}]
+    page._show_drives()
+    assert page.table.item(0, 5).text() == "hidden by the dock"
+    page.table.selectRow(0)
+
+    def fake_exec(dlg: QDialog) -> int:
+        assert dlg.hidden and dlg.expected_len == 5
+        dlg.who.setText("Tech 7")
+        dlg.tail.setText("erase")
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(drive_pages.EraseDialog, "exec", fake_exec)
+    page._erase()
+    argv = runs[-1]
+    assert argv[argv.index("--serial-tail") + 1] == "ERASE"
+    w.close()
+
+
+def test_erase_turned_off_says_how_to_turn_it_on_and_rechecks_a_stale_row(app: QApplication, tmp_path: Path,
+                                                                          monkeypatch: pytest.MonkeyPatch) -> None:
+    """Field report 2026-11-10: the dialog said 'erase_disabled', and after turning erasing on the
+    page still used the list it had read before."""
+    w = _window(app, tmp_path, admin=True)
+    page = w.pages["drives"]
+    shown: list[str] = []
+    monkeypatch.setattr(drive_pages.QMessageBox, "exec", lambda box: shown.append(box.text()) or 0)
+    monkeypatch.setattr(page.list, "refresh", lambda: None)
+    row = {"disk_id": "3", "class": "BLANK", "can_prepare": False, "refusal": "erase_disabled",
+           "message": "This drive is empty. Setting up drives is not enabled.", "serial": "S1234"}
+    page.list.drives = [row]
+    page._show_drives()
+    page.table.selectRow(0)
+    page._erase()
+    assert "Settings › Storage" in shown[-1] and "erase_disabled" not in shown[-1]
+    # Erasing turned on since the list was read: the page reads it again before deciding.
+    w.ctx.cfg = replace(w.ctx.cfg, drives=replace(w.ctx.cfg.drives, erase_enabled=True))
+    refreshed: list[int] = []
+    monkeypatch.setattr(page.list, "refresh", lambda: refreshed.append(1))
+    opened: list[dict] = []
+    monkeypatch.setattr(drive_pages, "EraseDialog", lambda d, *_a: opened.append(d) or _Rejecting())
+    page._erase()
+    assert refreshed and not opened                       # waits for the fresh list
+    page.list.drives = [dict(row, can_prepare=True, refusal=None)]
+    page._show_drives()                                   # the fresh list arrives
+    assert opened and opened[0]["can_prepare"]
+    w.close()
+
+
+class _Rejecting:
+    def exec(self) -> int:
+        return QDialog.DialogCode.Rejected
+
+
+def test_pages_scroll_instead_of_squeezing(app: QApplication, tmp_path: Path) -> None:
+    w = _window(app, tmp_path, admin=True)
+    for key in ("camera", "drives", "storage", "schedule"):
+        page = w.pages[key]
+        assert page.scrolls and page.scroll.widgetResizable()
+    assert not w.pages["status"].scrolls
+    cam = w.pages["camera"].live.picture
+    assert cam.width() * 9 == cam.height() * 16
     w.close()
 
 

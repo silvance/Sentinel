@@ -87,6 +87,12 @@ type and label, mount state, size, SMART, whether it holds the OS or spool):
 * BLANK / WRONG_FORMAT (nothing to lose): a single **Erase and Prepare** confirmation.
 * FOREIGN_DATA: requires **administrator authorization** (default; see open decision below) and
   typing the last 4 characters of the drive serial shown on screen.
+* Docks that hide the serial (field report 2026-11-10: the Sabrent EC-HD2B reports
+  `000000000000000000` for every disk). A placeholder serial (one character repeated, a counting
+  run, or a filler word) counts as hidden: the list shows "hidden by the dock", the operator types
+  `ERASE` instead of the serial's last characters (typing `0000` would prove nothing), and erasing
+  is refused while another connected disk has the same serial, model and size (`lookalike`):
+  one drive in the dock at a time.
 * Action: GPT + one partition, approved filesystem (provisionally NTFS — risk C1), label
   `SENTINEL_<n>`, then `SENTINEL_DRIVE.json` (`drive_uuid`, label, prepared_utc, operator/admin id),
   a write/read-back test file, and an `audit` event recording drive identity and who pressed it.

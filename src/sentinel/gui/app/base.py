@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (QAbstractItemView, QFrame, QHBoxLayout, QHeaderView, QLabel, QMessageBox,
-                               QPlainTextEdit, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
+                               QPlainTextEdit, QPushButton, QScrollArea, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
 from ...config import AppConfig
 from ..theme import Palette
@@ -39,6 +39,10 @@ class Page(QWidget):
     key = ""
     title = ""
     description = ""
+    # Everything below the title scrolls when the window is too short for it, instead of controls
+    # being squeezed on top of each other (field report 2026-11-10: laptop at 150 % scaling). A page
+    # with its own scroll area sets this to False.
+    scrolls = True
 
     def __init__(self, ctx: Ctx, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -70,7 +74,17 @@ class Page(QWidget):
         outer.addLayout(head)
         self.body = QVBoxLayout()
         self.body.setSpacing(8)
-        outer.addLayout(self.body, 1)
+        if self.scrolls:
+            content = QWidget()
+            content.setLayout(self.body)
+            self.body.setContentsMargins(0, 0, 6, 0)          # room for the scroll bar
+            self.scroll = QScrollArea()
+            self.scroll.setWidgetResizable(True)
+            self.scroll.setFrameShape(QFrame.Shape.NoFrame)
+            self.scroll.setWidget(content)
+            outer.addWidget(self.scroll, 1)
+        else:
+            outer.addLayout(self.body, 1)
 
     def command(self, text: str, icon: str, slot: Callable[[], Any], tip: str = "",
                 enabled: bool = True) -> QPushButton:
@@ -266,6 +280,7 @@ def table(headers: list[str], stretch_last: bool = True) -> QTableWidget:
     t.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
     t.verticalHeader().setVisible(False)
     t.verticalHeader().setDefaultSectionSize(26)
+    t.setMinimumHeight(30 + 4 * 26)          # header and four rows, even in a short window
     t.setAlternatingRowColors(True)
     t.setShowGrid(False)
     t.setWordWrap(False)

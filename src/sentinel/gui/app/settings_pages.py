@@ -171,7 +171,8 @@ class CameraPage(SettingsPage):
         ll = QVBoxLayout(lbox)
         self.live = LiveView(ctx)
         ll.addWidget(self.live)
-        self.body.addWidget(capped(lbox), 1)
+        self.body.addWidget(capped(lbox))
+        self.body.addStretch(1)
         self.tested_ok_for: str | None = None
         self.saved_user = ""
         self.finish_layout()
