@@ -651,6 +651,12 @@ class SystemPage(Page):
             b.setEnabled(ctx.admin)
         tabs.addTab(hist, "Check and history")
 
+        # --- updates (owner request 2026-11-10)
+        from .update_page import UpdatesTab
+
+        self.updates = UpdatesTab(ctx)
+        tabs.addTab(self.updates, "Updates")
+
         # --- configuration file
         conf = QWidget()
         cl = QVBoxLayout(conf)
@@ -773,6 +779,7 @@ class SystemPage(Page):
         read = self.ctx.read
         self.raw.setPlainText(pretty_json(read.doc) if read is not None and read.doc else "No status available.")
         self._load_history()
+        self.updates.refresh()
         try:
             self.config_text.setPlainText(Path(self._cfgp()).read_text(encoding="utf-8"))
         except OSError as exc:

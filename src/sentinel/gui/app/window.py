@@ -104,6 +104,9 @@ class AppWindow(QMainWindow):
         self.refresh()
         if auto_refresh and cfg is not None:
             self.timer.start()
+        self._closing_for_update = False
+        if auto_refresh:
+            QTimer.singleShot(500, self.show_update_result)
 
     # ------------------------------------------------------------------ layout
     def _sections(self) -> list[type[Page]]:
@@ -636,13 +639,16 @@ class AppWindow(QMainWindow):
                 pass
         return rep
 
-    def watch_after_change(self) -> None:
+    def watch_after_change(self, mode: str = "settings") -> None:
         """After a save or restore: if the recorder does not work within 3 minutes, put the last
-        known good settings back (owner request 2026-11-10: a change must not leave the tool broken)."""
+        known good settings back (owner request 2026-11-10: a change must not leave the tool broken).
+        ``mode="update"``: after a version update; if the recorder does not run, go back to the
+        previous version instead."""
         if self.ctx.cfg is None or not self.ctx.admin:
             return
-        self._watch = {"started": self.clock(), "passes": 0, "last": None}
-        self.statusBar().showMessage("Checking the recorder with the new settings (up to 3 minutes)…")
+        self._watch = {"started": self.clock(), "passes": 0, "last": None, "mode": mode}
+        what = "new version" if mode == "update" else "new settings"
+        self.statusBar().showMessage(f"Checking the recorder with the {what} (up to 3 minutes)…")
         self.watch_timer.start()
 
     def watching(self) -> bool:
@@ -662,6 +668,10 @@ class AppWindow(QMainWindow):
         if w["passes"] >= WATCH_PASSES:
             self.watch_timer.stop()
             self._watch = None
+            if w.get("mode") == "update":
+                self._update_watch_done()
+                self.statusBar().showMessage("New version checked: the recorder works.", 20000)
+                return
             self.statusBar().showMessage("New settings checked: the recorder works. Saved as the last known "
                                          "good settings.", 20000)
             return
@@ -669,6 +679,9 @@ class AppWindow(QMainWindow):
             return
         self.watch_timer.stop()
         self._watch = None
+        if w.get("mode") == "update":
+            self._update_watch_failed(rep)
+            return
         path = self.ctx.cfg_path
         good = good_path(path) if path is not None else None
         if good is not None and good.is_file() and not same_settings(good, path):
@@ -723,6 +736,11 @@ class AppWindow(QMainWindow):
     def closeEvent(self, e) -> None:  # noqa: ANN001, N802
         """Closing stops child commands and background work (review 2026-11-10): a restart must
         finish (the recorder would stay stopped); other work needs a confirmation."""
+        if getattr(self, "_closing_for_update", False):   # the update checked busy_work() before handing over
+            self.timer.stop()
+            self._save_geometry()
+            e.accept()
+            return
         work = self.busy_work()
         if any(w in ("restarting the recorder", "starting the recorder") for w in work):
             QMessageBox.information(self, "Sentinel", "Wait until the recorder has been restarted, then close "
@@ -738,6 +756,74 @@ class AppWindow(QMainWindow):
         self.timer.stop()
         self._save_geometry()
         e.accept()
+
+    # ------------------------------------------------------------------ updates (owner request 2026-11-10)
+    def _update_folders(self):  # noqa: ANN202
+        from ...paths import app_dir
+        from ...update.apply import Folders
+
+        app = app_dir()
+        return Folders(app) if app is not None else None
+
+    def close_for_update(self) -> None:
+        """The update (in its own console) replaces the program folder: close without questions."""
+        self._closing_for_update = True
+        self.watch_timer.stop()
+        self._watch = None
+        self.close()
+
+    def show_update_result(self, folders=None) -> dict | None:  # noqa: ANN001
+        """After Sentinel reopens from an update or rollback: say what happened (once), and watch the
+        recorder for 3 minutes after an update."""
+        from ...update.apply import mark_result, read_result
+
+        if not self.ctx.admin:
+            return None
+        folders = folders or self._update_folders()
+        res = read_result(folders) if folders is not None else None
+        if not res or res.get("shown"):
+            return res
+        try:
+            mark_result(folders, shown=True)
+        except OSError:
+            pass
+        good = (res.get("outcome"), res.get("action")) in (("updated", "update"), ("rolled_back", "rollback"))
+        (QMessageBox.information if good else QMessageBox.warning)(self, "Sentinel", str(res.get("message", "")))
+        if res.get("outcome") == "updated" and res.get("watch") and self.ctx.cfg is not None:
+            self._update_folders_override = folders
+            self.watch_after_change(mode="update")
+        return res
+
+    def _update_watch_done(self) -> None:
+        from ...update.apply import mark_result
+
+        folders = getattr(self, "_update_folders_override", None) or self._update_folders()
+        if folders is not None:
+            try:
+                mark_result(folders, watch=False)
+            except OSError:
+                pass
+
+    def _update_watch_failed(self, rep) -> None:  # noqa: ANN001
+        """The recorder did not work for 3 minutes after an update. If it does not run at all (or the
+        settings do not load), that is the new version's fault: go back by itself. Other problems
+        (camera, disk) are not caused by an update: say so and offer going back."""
+        from ...update.apply import folder_version
+
+        self._update_watch_done()
+        folders = getattr(self, "_update_folders_override", None) or self._update_folders()
+        prev = folder_version(folders.previous) if folders is not None else None
+        broken = {c.name for c in rep.failures} & {"Settings file", "Recorder running"}
+        system = self.pages.get("system")
+        tab = getattr(system, "updates", None)
+        if broken and prev and tab is not None:
+            QMessageBox.warning(self, "Sentinel", f"The recorder does not work with Sentinel {__version__}:\n\n"
+                                f"{rep.summary()}\n\nSentinel now goes back to version {prev}.")
+            tab.go_back(reason=f"the recorder did not work after the update: {rep.summary()}", ask=False)
+            return
+        QMessageBox.warning(self, "Sentinel", f"The recorder reports a problem since the update:\n\n{rep.summary()}"
+                            "\n\nThis is usually not caused by the update (camera, drive). To go back to the "
+                            "previous version anyway: System › Updates.")
 
     def _rebuild(self) -> None:
         self.pages.clear()

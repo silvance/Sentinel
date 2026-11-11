@@ -15,3 +15,5 @@ logs/
 .venv-build-linux/
 # third-party binaries (FFmpeg build bundled at packaging time; not committed)
 third_party/
+# releases: recorded builds and their signed update files (packaging/release.py; keep with third_party/sources)
+releases/

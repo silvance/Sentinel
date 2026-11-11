@@ -494,3 +494,51 @@ instead of `sentinel.sim.camera`); `sentinel stop` stopped it gracefully via SIG
 segment FINALIZED, status STOPPED). Unit suite on Linux: 102 passed, 1 skipped (Windows-only).
 **Not executed on Linux:** systemd, a desktop session / `.desktop` double-click,
 `install-desktop-entry.sh`, a static FFmpeg build, the integration suite, Python 3.12.
+
+## 10. Version updates from a single file (owner request 2026-11-10)
+
+Installing a whole program folder (about 355 MB, of which FFmpeg is 252 MB) for every change is not
+needed. From version **0.3.0** on, a release comes with one **update file**,
+`Sentinel-update-<version>.sntu`, that moves any earlier release (from its `min_version` up) to the
+new version. A code-only change is a few MB: Python code lives inside `Sentinel.exe` and
+`SentinelService.exe`, and FFmpeg and Qt are carried only when they change. **0.3.0 itself must be
+installed as a full folder** (older builds cannot apply updates).
+
+**Applying (administrator):** System › Updates › *Apply update file…*, or drop the file onto
+`Sentinel.exe`, or `Sentinel.exe update apply FILE`. `Sentinel.exe update info FILE` shows what a file
+contains without changing anything; `update status` shows the installed and previous version and
+the last result.
+
+| Step | What happens | If it fails |
+|---|---|---|
+| Check | Signature (Ed25519, release key in `src/sentinel/update/keys.py`), product, platform, newer than installed, installed ≥ `min_version`, file list and payload consistent, paths safe | Refused; nothing changed |
+| Stage | Complete new folder `<app>.update-<version>` built next to the program folder from unchanged installed files + carried files; every file hash-checked against the signed list; files someone added to the program folder (e.g. a portable `sentinel.toml`) carried over. Recording continues | Refused; staging removed |
+| Stop | Recorder and archive copier stopped gracefully (services or background processes; current segment closed) | Cancelled; recording restarted |
+| Swap | A PowerShell window outside the program folder waits until nothing runs from it, copies the folder's permissions, renames `<app>` → `<app>.previous` and the new folder → `<app>` | Folders put back; old version restarts recording |
+| Check | The **new** version: every file matches its build manifest, the version matches, the settings load, FFmpeg runs, the recorder starts again | Folders swapped back; old version restarts recording and records why |
+| Watch | The reopened window checks the recorder for 3 minutes (as after a settings change) | Recorder not running or settings unreadable → goes back to the previous version by itself; camera or drive problems → reported, going back offered |
+
+Every update, rollback and failure is an `audit` event (category `software`) in the recording log,
+with the versions and the update file's SHA-256, so the log shows which version recorded what.
+`<app>.previous` keeps the version before; *Go back to the previous version…* (or
+`Sentinel.exe update rollback`) swaps back the same way, and the newer version becomes the previous
+one. Work files (state, swap script, log, last result) are in `<app>.updates`; next to the program
+folder they get its permissions (under Program Files: only administrators may change them).
+
+**Making releases (build computer):**
+
+1. Once: `python packaging/release.py keygen` writes the private key to
+   `%USERPROFILE%\.sentinel-release\update-signing.key` (this account only) and adds its public key
+   to `keys.py`. Key `ff5f219ae91aa82a` was created 2026-11-10. **Back the private key file up
+   offline**: without it no further update file can be made, and every computer would need the full
+   folder again. Anyone holding it can make update files these computers accept.
+2. Per release: set `__version__` (X.Y.Z), commit, build (`build.ps1`), then
+   `python packaging/release.py make --notes "what changed"`. It records the build in `releases/<version>/`
+   (git-ignored; keep it with `third_party/sources/`) and writes the update file there. The first
+   release has nothing to update (full install). `--min-version` raises the oldest version an update
+   file serves (smaller files); `release.py list` shows what is recorded.
+3. Give people the `.sntu` file (and its SHA-256, printed by `make`, for the custody record).
+
+Signing uses Ed25519 in pure Python (`src/sentinel/update/ed25519.py`, RFC 8032 section 6; checked
+against the RFC test vectors and the `cryptography` package in the unit tests), so the program
+folder needs no extra library. Not done yet: updates on Linux (Windows only so far).

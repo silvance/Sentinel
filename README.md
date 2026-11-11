@@ -15,6 +15,9 @@ Linux or against the real camera. See [docs/PHASE2_REPORT.md](docs/PHASE2_REPORT
   and clock changes; retries forever; plain-language operator alerts with fixed error codes
   that escalate to "Recording stopped … Contact technical support and provide diagnostic report",
   plus an automatic diagnostic report.
+* Version updates from one signed file (`Sentinel-update-<version>.sntu`, from 0.3.0): staged next to
+  the program, swapped in, checked, and rolled back by itself if the new version does not work
+  ([docs/08 §10](docs/08_PACKAGING.md)).
 
 ## Also built (merged 2026-11-10; see docs/INTEGRATION.md and docs/branches/)
 Review-drive export, continuous archive drive with swap workflow, drive detection with a guarded

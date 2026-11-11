@@ -430,6 +430,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--seconds", type=float, default=60.0)
     p = add("diagnostics", "write a diagnostic report for support")
     p.add_argument("--out")
+    sub.add_parser("update", help="apply a version update file, go back, or show update status (administrator)")
     p = add("about", "version, folders, bundled tools and build manifest")
     p.add_argument("--verify", action="store_true", help="check installed files against the build manifest")
     return ap
@@ -437,6 +438,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    if len(argv) == 1 and argv[0].lower().endswith(".sntu"):
+        argv = ["update", "apply", argv[0]]      # an update file dropped onto Sentinel.exe (or opened with it)
+    if argv[:1] == ["update"]:
+        from ..update.cli import main as update_main
+
+        return update_main(argv[1:])
     if argv[:1] == ["ledger"]:   # forwarded whole, so "ledger --help" / "ledger --config X head" work too
         return cmd_ledger(argv[1:])
     args = build_parser().parse_args(argv or ["launch"])

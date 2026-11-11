@@ -34,7 +34,10 @@ HIDDEN_IMPORTS = ["sentinel.platform.windows", "sentinel.platform.posix", "senti
                   "sentinel.archive.__main__", "sentinel.export.__main__",
                   "sentinel.drives.cli",
                   # "Sentinel.exe ledger head|verify" (review 2026-11-10: the deployed build has no Python)
-                  "sentinel.ledgerchain"]
+                  "sentinel.ledgerchain",
+                  # "Sentinel.exe update ..." and update files dropped onto Sentinel.exe (2026-11-10)
+                  "sentinel.update.cli", "sentinel.update.apply", "sentinel.update.package",
+                  "sentinel.update.ed25519", "sentinel.update.keys"]
 
 # LGPL-3.0 section 4(d)(1) (review 2026-11-10): the PySide6/shiboken6 Python packages are collected
 # as .py files in _internal\ (not sealed in the PYZ inside Sentinel.exe), so a recipient can

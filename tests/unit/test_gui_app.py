@@ -665,3 +665,99 @@ def test_a_working_change_becomes_the_new_known_good(app: QApplication, tmp_path
     assert not w.watching()
     assert load_config(good_path(w.ctx.cfg_path)).motion.keep_recording_s == 600
     w.close()
+
+
+# ---------------------------------------------------------------------- updates (owner request 2026-11-10)
+def test_update_file_is_checked_then_handed_to_its_own_window(app: QApplication, tmp_path: Path,
+                                                               monkeypatch: pytest.MonkeyPatch) -> None:
+    from sentinel.gui.app import update_page
+    from sentinel.update import package
+    from sentinel.update.package import UpdateRefused
+
+    w = _window(app, tmp_path, admin=True)
+    tab = w.pages["system"].updates
+    monkeypatch.setattr(update_page, "app_dir", lambda: tmp_path / "Sentinel")
+    started: list[list[str]] = []
+    tab._popen = lambda argv, **kw: started.append(argv)
+    said: list[str] = []
+    monkeypatch.setattr(update_page.QMessageBox, "warning", lambda _p, _t, text: said.append(text))
+
+    def refuse(*_a, **_k):  # noqa: ANN002, ANN003, ANN202
+        raise UpdateRefused("bad_signature", "The update file is damaged.")
+
+    monkeypatch.setattr(package, "read_package", refuse)
+    tab.apply_file(str(tmp_path / "u.sntu"))
+    assert started == [] and "damaged" in said[-1] and w.isVisible()
+
+    class Pkg:
+        def summary(self) -> str:
+            return "Sentinel 0.3.1 (updates 0.3.0 or later)"
+
+    monkeypatch.setattr(package, "read_package", lambda *_a, **_k: Pkg())
+    monkeypatch.setattr(update_page.QMessageBox, "question", lambda *_a, **_k: update_page.QMessageBox.StandardButton.Yes)
+    tab.apply_file(str(tmp_path / "u.sntu"))
+    argv = started[-1]
+    assert argv[argv.index("update"):argv.index("update") + 2] == ["update", "apply"] and "--yes" in argv
+    assert argv[argv.index("--config") + 1] == str(w.ctx.cfg_path)
+    app.processEvents()
+    assert not w.isVisible()                               # closed without asking, for the swap
+
+
+def test_after_an_update_the_window_reports_once_and_goes_back_if_the_recorder_does_not_run(
+        app: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from sentinel.selfcheck import Check, Report
+    from sentinel.gui.app import window as winmod
+    import json
+
+    from sentinel.update import apply as ap
+
+    monkeypatch.undo()                                     # the real watch_after_change
+    monkeypatch.setattr(winmod, "admin_config_problem", lambda _p, _c: "")
+    w = _window(app, tmp_path, admin=True)
+    prog = tmp_path / "Sentinel"
+    folders = ap.Folders(prog)
+    (folders.previous).mkdir(parents=True)
+    (folders.previous / "BUILD-MANIFEST.json").write_text('{"version": "0.3.0"}', "utf-8")
+    ap.write_result(folders, "updated", None, "Sentinel updated from 0.3.0 to 0.3.1.", watch=True)
+    doc = json.loads(folders.result.read_text("utf-8"))
+    doc["action"] = "update"
+    folders.result.write_text(json.dumps(doc), "utf-8")
+    monkeypatch.setattr(w, "_update_folders", lambda: folders)
+    shown: list[str] = []
+    monkeypatch.setattr(winmod.QMessageBox, "information", lambda _p, _t, text: shown.append(text))
+    monkeypatch.setattr(winmod.QMessageBox, "warning", lambda _p, _t, text: shown.append("WARN " + text))
+    w.show_update_result()
+    assert shown == ["Sentinel updated from 0.3.0 to 0.3.1."] and w.watching() and w._watch["mode"] == "update"
+    assert ap.read_result(folders)["shown"]
+    w.show_update_result()
+    assert len(shown) == 1                                 # only once
+    went_back: list[tuple[str, bool]] = []
+    monkeypatch.setattr(w.pages["system"].updates, "go_back", lambda reason="", ask=True: went_back.append((reason, ask)))
+    bad = Report([Check("Settings file", True, "valid"), Check("Recorder running", False, "no status")])
+    monkeypatch.setattr(w, "check_now", lambda require_saved_file=True: bad)
+    t = [0.0]
+    w.clock = lambda: t[0]
+    w._watch["started"] = 0.0
+    t[0] = winmod.WATCH_LIMIT_S + 1
+    w._watch_tick()
+    assert went_back and not went_back[0][1] and "did not work" in went_back[0][0]
+    assert shown[-1].startswith("WARN") and "goes back to version 0.3.0" in shown[-1]
+    assert not ap.read_result(folders)["watch"]
+    w._closing_for_update = True
+    w.close()
+
+
+def test_camera_problems_after_an_update_do_not_roll_back_by_themselves(app: QApplication, tmp_path: Path,
+                                                                        monkeypatch: pytest.MonkeyPatch) -> None:
+    from sentinel.selfcheck import Check, Report
+    from sentinel.gui.app import window as winmod
+
+    w = _window(app, tmp_path, admin=True)
+    went_back: list[str] = []
+    monkeypatch.setattr(w.pages["system"].updates, "go_back", lambda reason="", ask=True: went_back.append(reason))
+    shown: list[str] = []
+    monkeypatch.setattr(winmod.QMessageBox, "warning", lambda _p, _t, text: shown.append(text))
+    w._update_watch_failed(Report([Check("Recorder running", True, "answering"),
+                                   Check("Camera sends video", False, "no signal")]))
+    assert not went_back and "usually not caused by the update" in shown[-1]
+    w.close()

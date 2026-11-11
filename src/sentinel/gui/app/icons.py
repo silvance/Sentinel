@@ -43,6 +43,7 @@ GLYPHS = {
     "test": "\ue9d9",        # Diagnostic
     "erase": "\ue74d",       # Delete
     "time": "\ue823",        # Clock
+    "download": "\ue896",    # Download (update file)
 }
 FONT_FAMILIES = ("Segoe Fluent Icons", "Segoe MDL2 Assets")
 
