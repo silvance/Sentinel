@@ -46,7 +46,10 @@ The drive always carries its own index of what is on it.
 * **Order:** oldest first by ledger insertion order (never wall-clock text). Per segment: media
   file, then its per-frame sidecar; sidecars that the deferred content hasher produces later are
   picked up in a later pass. CORRUPT segments go to `Sentinel/<camera>/Quarantine/`.
-* **Layout:** `Sentinel/<camera>/<YYYY-MM-DD>/<HHMMSS>Z_<HHMMSS>Z_<seg8>.ts` (+ `.framehash.txt`),
+* **Layout:** `Sentinel/<camera>/<YYYY-MM-DD>/<HHMMSS>Z_<HHMMSS>Z_<seg8>.ts`; since 0.3.5 the sidecar
+  is `Sentinel/<camera>/Fingerprints/<YYYY-MM-DD>/<same name>.framehash.txt` (before: next to the
+  video; copies made then keep their recorded path) and `Sentinel/<camera>/Playlists/<local date>.m3u`
+  plays a local day's verified originals in order (not evidence, not in SHA256SUMS; see §Two drives),
   **UTC** names (no DST ambiguity; the reviewer-friendly local names are the review export's job),
   `<seg8>` = first 8 hex digits of the segment id (unique even for two segments in the same second).
 * **Self-describing drive:** `Sentinel/<camera>/INDEX/archive_index.json` (`format: sentinel-archive-index`,
@@ -255,3 +258,39 @@ Tests after the QA fixes (this host): `tests/unit` → **138 passed** (90 export
 which 18 are new regression tests for the findings); `tests/integration/test_archive_drive.py` → **3
 passed** (107 s; while archiving: lag −0.019..0.016 s, max progress interval 1.016 s, no gap, one run);
 `tests/integration/test_review_export.py` → **26 passed** (83 s).
+
+## Two drives, one-hour files and playlists (owner request 2026-11-11)
+
+The owner found hundreds of 5-minute files per day on the archive drive hard to handle, and asked
+whether Sentinel should instead record straight onto a drive in the two-bay dock and pause while drives
+are changed. Decision: keep recording on the laptop's own disk and copying verified files to the drive.
+Recording straight to the dock would turn every USB or dock reset into a gap or a damaged file, would make
+every drive change a gap, and would leave a single copy on the least reliable part; it would not reduce
+the number of files either. Instead:
+
+* **One file per clock hour** (`[recording] segment_seconds` default 3600, aligned to the clock; the
+  window's Settings › General offers 15 / 30 / 60 minutes). 24 files a day instead of 288. A file reaches
+  the archive drive when it is finished, so up to an hour later than before; it is on the laptop's disk
+  meanwhile. The self-check measures "recordings being saved" from the later of the last saved file and the
+  start of the current run (the first file of a run is open for up to an hour).
+* **Fingerprints/** holds the per-frame sidecars, so a day folder shows only video.
+* **Playlists/** holds `<local date>.m3u` (display time zone), ASCII, CRLF, paths relative to the playlist
+  with `/`. Built after every index write from the verified copies of this ledger and the carried-forward
+  entries; quarantined files and sidecars are left out. Only changed playlists are rewritten; a failure is
+  logged and never stops archiving.
+* **Rollover:** with two archive drives inserted, the drive with the lowest key is used first. When it is
+  full (attach probe, space check before a copy, or ENOSPC), its index is written and read back, the
+  recording-log fingerprint is appended, it is flushed, and copying moves on to the other drive without the
+  "removed without preparing" warning (event `archive_drive_rollover`). A full drive is not chosen again
+  while another has room; it is looked at again after 10 minutes or once it has been taken out. With every
+  drive full the status stays FULL (A-002).
+* **Swap with two drives:** while a full drive waits in the dock, Swap prepares that one (flush, recorded
+  as `archive_swap_ready` with `full: true`) and copying continues on the other. The status file gains
+  `drives[]` (label, `use` = in_use | full | standby | take_out, free bytes) and `removal`; the window's
+  Drives page lists every drive. Because Windows' "Safely Remove Hardware" ejects the whole dock (both
+  bays share one USB bridge), the message for a swapped drive while another archive drive is inserted says
+  to take out only that drive and not to use Safely Remove. Sentinel has written, read back and flushed
+  everything on it by then, and Windows uses "quick removal" (no write cache) for USB disks by default.
+  **Not verified on the Sabrent EC-HD2B:** whether taking one disk out briefly resets the other bay. If it
+  does, the drive in use is seen as removed for a moment; the copy in flight is discarded (its `.partial`
+  is never claimed) and done again, and nothing on the laptop is touched (docs/09 step 5.5a).

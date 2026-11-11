@@ -4,8 +4,8 @@ Status: **Phase 2 prototype (recording engine).** Not forensically validated. No
 Linux or against the real camera. See [docs/PHASE2_REPORT.md](docs/PHASE2_REPORT.md).
 
 ## What works today
-* Continuous recording from one camera with FFmpeg (`-c copy`, no re-encoding) into ~5-minute
-  MPEG-TS segments on local storage; audio excluded unless explicitly enabled.
+* Continuous recording from one camera with FFmpeg (`-c copy`, no re-encoding) into MPEG-TS
+  files of one clock hour each (15 or 30 minutes selectable) on local storage; audio excluded unless explicitly enabled.
 * Every segment validated (ffprobe), SHA-256 hashed, sealed read-only and recorded in a SQLite
   ledger; a low-priority worker adds a container-independent decoded-frame hash and per-frame
   hashes; a rolling audit re-verifies stored originals.

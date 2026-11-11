@@ -9,6 +9,7 @@ import pytest
 
 from gui_support import base_measurements, status_doc
 from sentinel import selfcheck
+from sentinel.clock import iso_utc
 from sentinel.config import ConfigError, load_config
 from sentinel.launcher import setup
 from sentinel.paths import Layout
@@ -39,13 +40,31 @@ def test_each_failure_is_named(tmp_path: Path, problem: str) -> None:
     now = time.time()
     doc = {"not_running": None,
            "error": status_doc(base_measurements(component_errors=["C-001"]), now),
-           "no_files": status_doc(base_measurements(), now, last_segment_end=now - 3600),
+           "no_files": status_doc(base_measurements(), now, last_segment_end=now - 3 * 3600),   # 1 h files
            "critical": status_doc(base_measurements(storage_level=__import__("sentinel.models", fromlist=["x"])
                                                     .StorageLevel.CRITICAL, ffmpeg_running=False,
                                                     media_seen_this_run=False, seconds_since_media_advance=None),
                                   now)}[problem]
     rep = selfcheck.run_checks(_cfg(tmp_path), _reader(doc), now)
     assert not rep.ok and rep.failures
+
+
+def test_first_file_of_a_new_run_is_not_due_until_its_period_ends(tmp_path: Path) -> None:
+    """One-hour files (owner request 2026-11-11): after a reconnect the last saved file can be hours old
+    while the current one is still open; that is measured from the start of the current run."""
+    now = time.time()
+    cfg = _cfg(tmp_path)
+    doc = status_doc(base_measurements(), now, last_segment_end=now - 5 * 3600)
+    doc["recording"]["run_started_utc"] = iso_utc(now - 40 * 60)
+    rep = selfcheck.run_checks(cfg, _reader(doc), now)
+    assert rep.ok, rep.summary()
+    doc["recording"]["run_started_utc"] = iso_utc(now - 3 * 3600)
+    assert not selfcheck.run_checks(cfg, _reader(doc), now).ok
+    doc = status_doc(base_measurements(), now)
+    doc["last_segment"] = None
+    doc["recording"]["run_started_utc"] = iso_utc(now - 10 * 60)
+    rep = selfcheck.run_checks(cfg, _reader(doc), now)
+    assert rep.ok and any("still open" in c.detail for c in rep.checks)
 
 
 def test_files_are_not_required_right_after_a_restart(tmp_path: Path) -> None:

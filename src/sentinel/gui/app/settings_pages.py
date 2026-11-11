@@ -973,12 +973,15 @@ class StoragePage(SettingsPage):
 
 
 # --------------------------------------------------------------------------- general
+SEGMENT_CHOICES = (("15 minutes", 900), ("30 minutes", 1800), ("1 hour", 3600))
+
+
 class GeneralPage(SettingsPage):
     """The organisation using this recorder (optional) and the time zone times are shown in."""
 
     key = "general"
     title = "General"
-    description = "Organisation and time zone."
+    description = "Organisation, time zone and recording file length."
     what = "these settings"
 
     def __init__(self, ctx, parent=None) -> None:  # noqa: ANN001
@@ -997,6 +1000,10 @@ class GeneralPage(SettingsPage):
         self.tz.setEditable(True)
         self.tz.addItems(COMMON_ZONES)
         f.addRow("Time zone for times shown", self.tz)
+        self.seglen = self.editor(QComboBox())
+        f.addRow("Length of each recording file", self.seglen)
+        f.addRow("", muted("Each recording file covers this much time and starts on the clock (for one hour: "
+                           "14:00 to 15:00). A file is copied to the archive drive once it is finished."))
         self.body.addWidget(capped(box))
         self.body.addStretch(1)
         self.finish_layout()
@@ -1007,10 +1014,21 @@ class GeneralPage(SettingsPage):
             return
         self.org.setText(cfg.site.organization)
         self.tz.setEditText(cfg.recording.display_timezone)
+        self.seglen.clear()
+        current = int(round(cfg.recording.segment_seconds))
+        for text, secs in SEGMENT_CHOICES:
+            self.seglen.addItem(text, secs)
+        if current not in [secs for _t, secs in SEGMENT_CHOICES]:
+            words = f"{current // 60} minutes" if current % 60 == 0 else f"{current} seconds"
+            self.seglen.addItem(f"{words} (current)", current)
+        self.seglen.setCurrentIndex(self.seglen.findData(current))
         self.result.clear()
 
     def tables(self) -> dict[str, dict[str, Any]]:
         raw = self.raw()
         recording = dict(raw.get("recording", {}))
         recording["display_timezone"] = self.tz.currentText().strip() or "UTC"
+        secs = self.seglen.currentData()
+        if isinstance(secs, int):
+            recording["segment_seconds"] = secs
         return {"site": {"organization": self.org.text().strip()}, "recording": recording}

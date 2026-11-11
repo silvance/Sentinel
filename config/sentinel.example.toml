@@ -14,7 +14,7 @@ credentials_file = "/etc/sentinel/camera.secret"   # 0600, owned by the sentinel
 include_audio = false              # change only after a documented collection-scope decision
 
 [recording]
-segment_seconds = 300              # approximately; cuts occur at the next keyframe
+segment_seconds = 3600             # one file per clock hour; cuts occur at the next keyframe
 align_to_clock = true              # cut at :00, :05, :10 ... of the host clock
 connect_timeout_s = 20
 stall_timeout_s = 15               # stream time not advancing for this long => restart

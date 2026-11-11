@@ -5,8 +5,10 @@
     Sentinel/
       README_ARCHIVE.txt                                   plain-language description (written once)
       <camera>/<YYYY-MM-DD>/<HHMMSS>Z_<HHMMSS>Z_<seg8>.ts   sealed originals, unchanged (FINALIZED / INTERRUPTED)
-      <camera>/<YYYY-MM-DD>/<HHMMSS>Z_<HHMMSS>Z_<seg8>.framehash.txt   per-frame SHA-256 sidecar
-      <camera>/Quarantine/<YYYY-MM-DD>/...                 CORRUPT originals (kept for examination)
+      <camera>/Fingerprints/<YYYY-MM-DD>/<same name>.framehash.txt     per-frame SHA-256 sidecar
+      <camera>/Playlists/<local YYYY-MM-DD>.m3u            plays a local day's originals in time order
+      <camera>/Quarantine/<YYYY-MM-DD>/...                 CORRUPT originals (kept for examination;
+                                                           their sidecars in Quarantine/Fingerprints/)
       <camera>/INDEX/archive_index.json | archive_index.csv | gaps.csv | SHA256SUMS.txt   rolling index
       <camera>/INDEX/verified_journal.csv                  append-only, one line per verified file
       <camera>/INDEX/chain_heads.log                       append-only recording-log fingerprints (tamper evidence)
@@ -24,6 +26,10 @@ Design choices (docs/branches/design-archive-drive.md):
   segments start in the same second (e.g. around a reconnect), and ties the file to its ledger row.
 * A segment without a start time (possible for CORRUPT ones) is named after its run and
   sequence number under ``undated/``.
+* (owner request 2026-11-11) Sidecars live in ``Fingerprints/`` so a day folder shows only video,
+  and ``Playlists/`` holds one small ``.m3u`` per *local* day that plays the verified originals on
+  the drive back to back (VLC, Windows Media Player), without any extra copy of the footage. Copies
+  made before this change keep the path recorded for them (the index lists each file's path).
 """
 
 from __future__ import annotations
@@ -52,7 +58,10 @@ def index_files(camera_id: str) -> dict[str, str]:
     return {"json": f"{d}/archive_index.json", "csv": f"{d}/archive_index.csv", "gaps": f"{d}/gaps.csv",
             "sums": f"{d}/SHA256SUMS.txt", "journal": f"{d}/verified_journal.csv"}
 QUARANTINE = "Quarantine"
+FINGERPRINTS = "Fingerprints"
+PLAYLISTS = "Playlists"
 FRAMEHASH_SUFFIX = ".framehash.txt"
+PLAYLIST_SUFFIX = ".m3u"
 
 KIND_ORIGINAL, KIND_QUARANTINE, KIND_FRAMEHASH = "original", "quarantine", "framehash"
 MEDIA_KINDS = (KIND_ORIGINAL, KIND_QUARANTINE)
@@ -74,16 +83,22 @@ def media_kind(state: str) -> str:
     return KIND_QUARANTINE if state == "CORRUPT" else KIND_ORIGINAL
 
 
-def base_rel_path(seg: Any) -> str:
-    """Path of the segment's media file on the drive, without extension (``seg`` = ledger row)."""
+def _top_and_name(seg: Any) -> tuple[str, str, str]:
+    """(camera or quarantine folder, day folder, file name without extension)."""
     cam = safe(seg["camera_id"])
     sid8 = str(seg["segment_id"]).replace("-", "")[:8]
     start, end = _parse(seg["start_utc"]), _parse(seg["end_utc"])
     top = f"{ROOT}/{cam}/{QUARANTINE}" if seg["state"] == "CORRUPT" else f"{ROOT}/{cam}"
     if start is None:
-        return f"{top}/undated/{safe(str(seg['run_id']))}_seq{int(seg['seq']):06d}_{sid8}"
+        return top, "undated", f"{safe(str(seg['run_id']))}_seq{int(seg['seq']):06d}_{sid8}"
     e = end.strftime("%H%M%SZ") if end is not None else "open"
-    return f"{top}/{start.strftime('%Y-%m-%d')}/{start.strftime('%H%M%SZ')}_{e}_{sid8}"
+    return top, start.strftime("%Y-%m-%d"), f"{start.strftime('%H%M%SZ')}_{e}_{sid8}"
+
+
+def base_rel_path(seg: Any) -> str:
+    """Path of the segment's media file on the drive, without extension (``seg`` = ledger row)."""
+    top, day, name = _top_and_name(seg)
+    return f"{top}/{day}/{name}"
 
 
 def media_rel_path(seg: Any) -> str:
@@ -92,7 +107,17 @@ def media_rel_path(seg: Any) -> str:
 
 
 def framehash_rel_path(seg: Any) -> str:
-    return base_rel_path(seg) + FRAMEHASH_SUFFIX
+    """Sidecars sit in ``Fingerprints/<day>/`` beside the day folders, under the same name as the video."""
+    top, day, name = _top_and_name(seg)
+    return f"{top}/{FINGERPRINTS}/{day}/{name}{FRAMEHASH_SUFFIX}"
+
+
+def playlist_dir(camera_id: str) -> str:
+    return f"{ROOT}/{safe(camera_id)}/{PLAYLISTS}"
+
+
+def playlist_rel_path(camera_id: str, local_day: str) -> str:
+    return f"{playlist_dir(camera_id)}/{safe(local_day)}{PLAYLIST_SUFFIX}"
 
 
 def rel_path_for(seg: Any, kind: str) -> str:

@@ -402,7 +402,9 @@ def test_rename_rolled_back_by_unplug_is_restored_not_deleted(env: Env) -> None:
     os.chmod(p1, stat.S_IREAD | stat.S_IWRITE)
     os.rename(p1, p1.with_name(p1.name + ".partial"))
     with open(p1.with_name(p1.name + ".partial"), "r+b") as fh:  # ...and this one was damaged too
-        fh.write(b"\xff")
+        first = fh.read(1)
+        fh.seek(0)
+        fh.write(bytes([first[0] ^ 0xFF]))      # flip, not overwrite: random content may already be 0xff
     w = env.worker(SwitchLocator(a))
     w.step()                                                    # attach: reconcile, then copy again
     assert p0.is_file() and sha_file(p0) == rows[0]["sha256"]   # restored

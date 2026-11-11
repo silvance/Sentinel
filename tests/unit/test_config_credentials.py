@@ -54,7 +54,7 @@ def test_unknown_section_rejected(tmp_path: Path) -> None:
 def test_example_config_parses() -> None:
     example = Path(__file__).resolve().parents[2] / "config" / "sentinel.example.toml"
     cfg = load_config(example)
-    assert cfg.recording.segment_seconds == 300
+    assert cfg.recording.segment_seconds == 3600          # one file per clock hour (0.3.5)
     assert "@" not in cfg.camera.url
 
 

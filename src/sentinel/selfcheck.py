@@ -98,11 +98,20 @@ def run_checks(cfg_path: Path, read_status: Callable[[], tuple[dict[str, Any] | 
     if recording and require_saved_file:
         last = (doc.get("last_segment") or {}).get("end_utc")
         due = cfg.recording.segment_seconds * 1.5 + 120
+        # The first file of a recording run is finished only at the end of its period (up to an hour):
+        # measure from the later of the last saved file and the start of the current run.
+        run_start = (doc.get("recording") or {}).get("run_started_utc")
+        try:
+            started = parse_iso_utc(run_start) if run_start else None
+        except ValueError:
+            started = None
         if last:
-            age = now - parse_iso_utc(last)
+            age = now - max(parse_iso_utc(last), started or 0.0)
             rep.checks.append(Check("Recordings being saved", age <= due,
-                                    f"last file saved {int(age)} s ago" if age <= due else
+                                    f"last file saved {int(now - parse_iso_utc(last))} s ago" if age <= due else
                                     f"no file saved for {int(age // 60)} min"))
+        elif started is not None and now - started <= due:
+            rep.checks.append(Check("Recordings being saved", True, "the first file of this recording is still open"))
         else:
             rep.checks.append(Check("Recordings being saved", False, "no recording file saved yet"))
     critical = [a for a in doc.get("alerts") or [] if isinstance(a, dict) and a.get("severity") == 3]

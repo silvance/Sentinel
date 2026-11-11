@@ -67,6 +67,12 @@ Unexpected removal → copy stops, `.partial` files are ignored on the next inse
 only verified copies; operator sees "Archive drive removed without preparing. No recordings were
 lost; copying will continue when a drive is inserted."
 
+**Two drives in a two-bay dock (0.3.5):** when the drive in use fills up, its index is written and
+copying moves on to the other archive drive by itself. Swap then prepares the *full* drive while
+copying continues on the other one; the screen names the drive to take out and says not to use
+Windows' "Safely Remove Hardware", which would stop both bays (docs/branches/design-archive-drive.md,
+"Two drives").
+
 ## 4. Automatic drive detection and one-button preparation
 
 On insertion the drive is **classified automatically** (UDisks2/udev: partition table, filesystem

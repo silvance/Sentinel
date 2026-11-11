@@ -348,7 +348,13 @@ class StatusPage(Page):
             self._fact("archive", "copying not running", "warning")
         else:
             bk = (arc.get("backlog") or {}).get("text") or ""
-            self._fact("archive", f"{arc.get('drive_label') or 'no drive'}" + (f" · {bk}" if bk else ""),
+            label = arc.get("drive_label") or "no drive"
+            uses = {d.get("use") for d in arc.get("drives") or [] if isinstance(d, dict)}
+            if "take_out" in uses:
+                label += " · a drive is ready to be taken out"
+            elif "full" in uses:
+                label += " · a full drive is waiting to be swapped"
+            self._fact("archive", label + (f" · {bk}" if bk else ""),
                        "" if arc.get("drive_label") else "warning")
         last = (doc.get("last_segment") or {}).get("end_utc")
         le = _ep(last)

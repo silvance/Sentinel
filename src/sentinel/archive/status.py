@@ -5,7 +5,9 @@ Written atomically by the archive process. The recorder service reads it (see
 one status. Fields: ``state``, ``drive`` (present | absent | full | unusable), ``message``
 (plain language), ``backlog`` (``seconds``, ``segments``, ``bytes``, ``oldest_start_utc``,
 ``text`` = "Not yet archived: N h"), ``alerts`` (A-0xx), ``heartbeat_epoch``,
-``throughput`` (last file), ``priority`` (what lowering was applied).
+``throughput`` (last file), ``priority`` (what lowering was applied), ``drives`` (every archive drive
+inserted: label, use = in_use | full | standby | take_out, free_bytes), ``removal`` (the drive prepared
+for removal, or null).
 
 States: STARTING, ABSENT, UNUSABLE, COPYING, UP_TO_DATE, FULL, SWAP_PENDING, SAFE_TO_REMOVE,
 REMOVE_MANUALLY, ATTENTION, STOPPED.
@@ -195,5 +197,6 @@ class RecorderArchiveView:
             except (KeyError, ValueError):
                 continue
         view = {"running": True, "state": doc.get("state"), "drive": doc.get("drive"), "message": doc.get("message"),
-                "backlog": doc.get("backlog") or backlog, "drive_label": doc.get("drive_label")}
+                "backlog": doc.get("backlog") or backlog, "drive_label": doc.get("drive_label"),
+                "drives": doc.get("drives") or [], "removal": doc.get("removal")}
         return view, _merge(alerts)

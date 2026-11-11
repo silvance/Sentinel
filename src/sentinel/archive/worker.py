@@ -30,6 +30,11 @@ Mechanism (design choice, see docs/branches/design-archive-drive.md):
   request file is also looked for while a copy is in progress, and a request older than 15 minutes is
   ignored. Operators (the window) ask through ``<status_dir>/requests/`` (untrusted, see
   :meth:`ArchiveWorker._take_operator`).
+* Two drives (owner request 2026-11-11, two-bay dock): when the drive in use is full and another
+  archive drive with room is inserted, its index is written and copying moves on to the other drive
+  by itself ("rollover"); nothing is lost and recording is never paused. Swap then prepares the FULL
+  drive for removal while copying continues on the other one. The status lists every archive drive
+  inserted (``drives``) and the drive waiting to be taken out (``removal``).
 
 Runs as its own process in production (``python -m sentinel.archive run``) — see
 :mod:`sentinel.archive.__main__` for why — and as a thread in tests (:meth:`start`).
@@ -88,6 +93,7 @@ REVIEW_LAYOUT = ("README_FIRST.txt", "Recordings", "Manifests", "Originals")
 
 MSG_FULL = ("Do not unplug the archive drive yet. It is full: press Swap Archive Drive and wait for SAFE TO "
             "REMOVE, then insert an empty archive drive.")
+FULL_RECHECK_S = 600.0           # a full drive left in the dock is looked at again after this long
 MSG_REMOVED = ("The archive drive was removed without preparing it. No recordings were lost; copying will "
                "continue when a drive is inserted.")
 
@@ -177,7 +183,10 @@ class ArchiveWorker:
         self._swap = threading.Event()
         self._swap_deadline: float | None = None
         self._swapped_drive: str | None = None
+        self._swapped_label: str | None = None
         self._swapped_absent_polls = 0
+        self._present: dict[str, ExportTarget] = {}  # archive drives inserted (last scan), the swapped one excluded
+        self._full_drives: dict[str, float] = {}    # drive_id -> mono time it was found full
         self._swap_result: tuple[bool, str] | None = None
         self._last_swapped: str | None = None       # drive last prepared for removal (session gone_how)
         self._att_missed = 0                        # consecutive scans that did not see the attached drive
@@ -313,12 +322,30 @@ class ArchiveWorker:
                 else:
                     swapped_present = True
         usable = {k: t for k, t in by_key.items() if k != self._swapped_drive}
-        if self.att is not None and self.att.drive_id in usable:
+        self._present = usable
+        now = self.mono()
+        for k in list(self._full_drives):
+            # forget a full drive once it has been taken out; one left in the dock is measured again now and
+            # then (space may have been freed on it) and stays "full" while it has no room
+            if k not in by_key:
+                del self._full_drives[k]
+            elif (now - self._full_drives[k] >= FULL_RECHECK_S and (self.att is None or k != self.att.drive_id)):
+                if self._has_room(by_key[k]):
+                    del self._full_drives[k]
+                else:
+                    self._full_drives[k] = now
+        if self.att is not None and self.att.drive_id in usable and self.att.drive_id not in self._full_drives:
             return usable[self.att.drive_id], swapped_present
         if not usable:
             return None, swapped_present
-        if len(usable) > 1:
-            log.warning("%d archive drives attached; using %s", len(usable), sorted(usable)[0])
+        room = sorted(k for k in usable if k not in self._full_drives)
+        if room:
+            if self.att is None and len(usable) > 1:
+                log.info("%d archive drives inserted; using %s", len(usable), room[0])
+            return usable[room[0]], swapped_present
+        # every inserted drive is full: stay on the one in use (status FULL)
+        if self.att is not None and self.att.drive_id in usable:
+            return usable[self.att.drive_id], swapped_present
         return usable[sorted(usable)[0]], swapped_present
 
     def step(self) -> str:
@@ -380,7 +407,10 @@ class ArchiveWorker:
         self._att_missed = 0
         if self.att is None or self.att.drive_id != key:
             if self.att is not None:
-                self._detached(unexpected=True)
+                if self.att.drive_id in self._present:   # still inserted, but full: move on to the next drive
+                    self._roll_over(target)
+                else:
+                    self._detached(unexpected=True)
             if not self._attach(target):
                 return "unusable"
         assert self.att is not None and self.al is not None
@@ -391,9 +421,11 @@ class ArchiveWorker:
             if self.att is None:
                 return "absent"
         if self.full and not self._space_available():
+            self._full_drives.setdefault(self.att.drive_id, self.mono())
             self._set(ST_FULL, MSG_FULL)
             return "full"
         self.full = False
+        self._full_drives.pop(self.att.drive_id, None)
         self._expire_source_failures()
         pending = self.al.pending_segments(self.att.drive_id, limit=1,
                                            exclude=frozenset(self._skip | set(self.source_failed)))
@@ -494,6 +526,8 @@ class ArchiveWorker:
         self.removed_unexpectedly = self.after_swap = False
         self.unusable_reason = None
         self.full = full
+        if full:
+            self._full_drives.setdefault(drive_id, self.mono())
         self._skip.clear()
         self._verify_attempts.clear()
         try:
@@ -671,10 +705,12 @@ class ArchiveWorker:
         return True
 
     # ------------------------------------------------------------------ swapped drive (persistent)
-    def _set_swapped(self, drive_id: str | None) -> None:
+    def _set_swapped(self, drive_id: str | None, label: str | None = None) -> None:
         """The drive made safe to remove is kept in a small file so that a restart of the archive process
         before it is unplugged does not start writing to it again (review 2026-11-10)."""
         self._swapped_drive = drive_id
+        self._swapped_label = label if drive_id is not None else None
+        self._last_publish = float("-inf")     # the drives shown changed: publish at the next chance
         p = self.control_dir / SWAPPED_STATE
         try:
             if drive_id is None:
@@ -682,7 +718,7 @@ class ArchiveWorker:
             else:
                 self.control_dir.mkdir(parents=True, exist_ok=True)
                 tmp = p.with_name(p.name + PARTIAL)
-                tmp.write_text(json.dumps({"drive_id": drive_id, "swapped_utc": iso_utc(time.time()),
+                tmp.write_text(json.dumps({"drive_id": drive_id, "label": label, "swapped_utc": iso_utc(time.time()),
                                            "ejected": bool(self._swap_result and self._swap_result[0])}), "utf-8")
                 os.replace(tmp, p)
         except OSError:
@@ -701,6 +737,8 @@ class ArchiveWorker:
         if not isinstance(drive_id, str) or not drive_id:
             return
         self._swapped_drive = self._last_swapped = drive_id
+        label = doc.get("label")
+        self._swapped_label = label if isinstance(label, str) and label else None
         self._swapped_absent_polls = 0
         self._swap_result = (bool(doc.get("ejected")), "prepared for removal before the archive process restarted")
         self.after_swap = True
@@ -710,7 +748,32 @@ class ArchiveWorker:
         self._swap.clear()
         self._swap_deadline = None
 
+    def _has_room(self, t: ExportTarget) -> bool:
+        """Room on a drive that is not in use for the next recording (at least one file at the measured rate)."""
+        try:
+            free = self.io.free_bytes(Path(t.root))
+        except OSError:
+            return False
+        need = 0
+        if self.al is not None:
+            nxt = self.al.pending_segments(t.drive_key, limit=1)
+            need = int(nxt[0]["size_bytes"] or 0) if nxt else 0
+            rate = self.al.recording_rate()
+            if rate:
+                need = max(need, int(rate * self.cfg.recording.segment_seconds))
+        return free >= max(need, 1) + self.reserve
+
+    def _idle_full(self) -> ExportTarget | None:
+        """A full archive drive still in the dock while copying goes to another one."""
+        for k in sorted(self._present):
+            if k in self._full_drives and (self.att is None or k != self.att.drive_id):
+                return self._present[k]
+        return None
+
     def _do_swap(self) -> str:
+        idle = self._idle_full()
+        if idle is not None and self.att is not None and not self.full:
+            return self._swap_idle(idle)
         att = self.att
         assert att is not None
         self._set(ST_SWAP_PENDING, "Preparing the archive drive for removal. Do not unplug it yet.")
@@ -727,7 +790,9 @@ class ArchiveWorker:
         res = self.remover.eject(att.target)
         self._clear_swap()
         self._swap_result = (res.ejected, res.detail)
-        self._set_swapped(att.drive_id)
+        self._set_swapped(att.drive_id, att.target.label)
+        self._full_drives.pop(att.drive_id, None)
+        self._present.pop(att.drive_id, None)
         self._last_swapped = att.drive_id
         self._swapped_absent_polls = 0
         self.after_swap = True
@@ -737,10 +802,54 @@ class ArchiveWorker:
         self._waiting_for_removal()
         return "swapped"
 
+    def _swap_idle(self, t: ExportTarget) -> str:
+        """Swap with two drives: prepare the FULL drive (its index was written when copying moved on) for
+        removal; copying carries on to the drive in use."""
+        key = t.drive_key
+        self._set(ST_SWAP_PENDING, f"Preparing {t.label or 'the full archive drive'} for removal.")
+        self.remover.flush(t)
+        res = self.remover.eject(t)
+        self._clear_swap()
+        self._swap_result = (res.ejected, res.detail)
+        self._set_swapped(key, t.label)
+        self._full_drives.pop(key, None)
+        self._present.pop(key, None)
+        self._last_swapped = key
+        self._swapped_absent_polls = 0
+        self._event("audit", "archive_swap_ready", "Archive drive prepared for removal",
+                    {"drive_id": key, "ejected": res.ejected, "detail": res.detail, "full": True,
+                     "copying_continues_on": self.att.drive_id if self.att else None})
+        if self.att is not None:          # copying carries on: show that, plus which drive to take out
+            self._set(ST_COPYING, "Copying recordings to the archive drive. Do not unplug it.")
+        self._publish(force=True)
+        return "swapped"
+
+    def _removal_text(self) -> str | None:
+        """What to do with the drive prepared for removal, while another drive may be in use."""
+        if self._swapped_drive is None:
+            return None
+        name = self._swapped_label or "The archive drive"
+        if self._swap_result and self._swap_result[0]:
+            return f"{name} is safe to remove."
+        if self.att is not None or self._present:
+            return (f"{name} is ready to be taken out: Sentinel has finished writing to it. Take out only that "
+                    f"drive. Do not use Windows' \"Safely Remove Hardware\" for it: in a two-bay dock that would "
+                    "also stop the other drive.")
+        return None
+
+    def _rollover_text(self) -> str | None:
+        idle = self._idle_full()
+        if idle is None or self.att is None:
+            return None
+        return (f"{idle.label or 'One archive drive'} is full; copying continues on "
+                f"{self.att.target.label or 'the other drive'}. Press Swap Archive Drive to take the full drive out.")
+
     def _waiting_for_removal(self) -> None:
         ejected = bool(self._swap_result and self._swap_result[0])
         if ejected:
             self._set(ST_SAFE, "SAFE TO REMOVE ARCHIVE DRIVE.")
+        elif self._present:
+            self._set(ST_REMOVE_MANUALLY, self._removal_text() or "Take out the archive drive.")
         elif os.name == "nt":
             self._set(ST_REMOVE_MANUALLY, "Do not unplug the archive drive yet. Click the \"Safely Remove "
                                           "Hardware\" icon near the clock, choose this drive, and unplug it only "
@@ -821,7 +930,33 @@ class ArchiveWorker:
             self._event("warning", "archive_drive_full", "Archive drive is full",
                         {"drive_id": self.att.drive_id if self.att else None, "detail": detail})
         self.full = True
+        if self.att is not None:
+            self._full_drives.setdefault(self.att.drive_id, self.mono())
         self._set(ST_FULL, MSG_FULL)
+
+    def _roll_over(self, nxt: ExportTarget) -> None:
+        """The drive in use is full and another archive drive with room is inserted: finish the full drive
+        (index written and read back, recording-log fingerprint, flush) and leave it, without treating it as
+        removed. It stays in the dock until the operator swaps it."""
+        att = self.att
+        assert att is not None
+        try:
+            self._write_index("full")
+        except Exception:  # noqa: BLE001 - the next drive must still be used
+            log.exception("could not write the index of the full archive drive")
+        if self.att is not None:
+            try:
+                self.remover.flush(att.target)
+            except Exception:  # noqa: BLE001
+                log.exception("could not flush the full archive drive")
+        self._event("info", "archive_drive_rollover", "Archive drive full; copying continues on the next archive "
+                    "drive", {"full_drive_id": att.drive_id, "full_label": att.target.label,
+                              "next_drive_id": nxt.drive_key, "next_label": nxt.label,
+                              "copies_this_attach": att.copies_this_attach})
+        log.info("archive drive %s is full; moving on to %s", att.drive_id, nxt.drive_key)
+        self._last_publish = float("-inf")
+        if self.att is not None:
+            self._detached(unexpected=False)
 
     def _source_chunks(self, src: Path) -> Iterator[bytes]:
         try:
@@ -1034,7 +1169,23 @@ class ArchiveWorker:
         att.stale_index = False
         log.info("archive index generation %d written to %s (%s, %d files)", gen, att.drive_id, reason, len(copies))
         self._anchor_on_drive(root, reason)
+        self._write_playlists(root, [dict(c) for c in copies] + carried)
         return True
+
+    def _write_playlists(self, root: Path, entries: list[dict[str, Any]]) -> None:
+        """One playlist per local day (owner request 2026-11-11). A playlist only points at verified copies
+        on this drive; it is not evidence, so a failure is logged and never stops archiving. Unchanged
+        playlists are not rewritten."""
+        try:
+            files = idx.build_playlists(self.camera_id, entries, self.tz)
+            if files:
+                self.io.makedirs(root / layout.playlist_dir(self.camera_id))
+            for rel, data in files.items():
+                if self._read_drive_file(root / rel) == data:
+                    continue
+                self.io.replace_file(root / rel, data, verify=lambda p: self._read_hash(p)[0])
+        except Exception as exc:  # noqa: BLE001 - playlists are a convenience
+            log.warning("could not write the archive playlists: %s", exc)
 
     def _anchor_on_drive(self, root: Path, reason: str) -> None:
         """Copy the recording log's fingerprint (chain head) onto the archive drive, append-only, every
@@ -1102,8 +1253,15 @@ class ArchiveWorker:
             "unusable" if self.state == ST_UNUSABLE else "absent")
         text = backlog_text(risk.seconds)
         st = self.stats
+        notes = [] if self.state in (ST_SAFE, ST_REMOVE_MANUALLY) else [
+            x for x in (self._removal_text(), self._rollover_text()) if x]
+        message = " ".join(notes + [f"{self.message} {text}."])
         self.status.write(
-            state=self.state, drive=drive, message=f"{self.message} {text}.", camera_id=self.camera_id,
+            state=self.state, drive=drive, message=message, camera_id=self.camera_id,
+            drives=self._drives_status(),
+            removal=None if self._swapped_drive is None else {
+                "drive_id": self._swapped_drive, "label": self._swapped_label,
+                "safe": bool(self._swap_result and self._swap_result[0]), "text": self._removal_text()},
             drive_id=self.att.drive_id if self.att else self._swapped_drive,
             drive_label=self.att.target.label if self.att else None, policy=self.acfg.resume_policy,
             backlog={"text": text, "seconds": round(risk.seconds, 1), "segments": risk.segments, "bytes": risk.bytes,
@@ -1121,6 +1279,26 @@ class ArchiveWorker:
                       "source_unreadable": sorted(self.source_failed)[:20], "unusable_reason": self.unusable_reason,
                       "other_drives": [r for _root, r in (self._last_scan[0].ignored if self._last_scan[0] else [])][:10]},
             priority=self.priority, cpu_process_s=round(time.process_time(), 2))
+
+    def _drives_status(self) -> list[dict[str, Any]]:
+        """Every archive drive inserted: in use, full (waiting to be swapped) or standing by."""
+        out: list[dict[str, Any]] = []
+        present = dict(self._present)
+        if self.att is not None:
+            present[self.att.drive_id] = self.att.target
+        for k, t in sorted(present.items()):
+            in_use = self.att is not None and k == self.att.drive_id
+            try:
+                free: int | None = int(self.io.free_bytes(Path(t.root)))
+            except (OSError, ValueError):
+                free = None
+            out.append({"drive_id": k, "label": t.label, "use": "in_use" if in_use else (
+                "full" if k in self._full_drives else "standby"),
+                "full": k in self._full_drives or (in_use and self.full), "free_bytes": free})
+        if self._swapped_drive is not None:
+            out.append({"drive_id": self._swapped_drive, "label": self._swapped_label, "use": "take_out",
+                        "full": False, "free_bytes": None})
+        return out
 
     def _event(self, severity: str, code: str, message: str, detail: dict[str, Any] | None) -> None:
         try:

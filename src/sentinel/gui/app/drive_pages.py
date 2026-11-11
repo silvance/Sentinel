@@ -45,6 +45,25 @@ def _letters(d: dict[str, Any]) -> list[str]:
     return [p for p in d.get("mount_paths") or [] if len(p) == 3 and p[1:] == ":\\"] or list(d.get("mount_paths") or [])
 
 
+
+_USE_WORDS = {"in_use": "In use", "full": "Full (swap it)", "standby": "Next", "take_out": "Ready to take out"}
+
+
+def archive_drives_text(arc: dict[str, Any]) -> str:
+    """Every archive drive inserted, from the archive status (owner request 2026-11-11: two-bay dock),
+    e.g. "In use: SENTINEL_2 (1.2 TB free). Full (swap it): SENTINEL_1."."""
+    drives = [d for d in arc.get("drives") or [] if isinstance(d, dict)]
+    if not drives:
+        return f"Drive: {arc.get('drive_label') or 'none inserted'}."
+    parts = []
+    for d in drives:
+        name = str(d.get("label") or "unnamed archive drive")
+        words = _USE_WORDS.get(str(d.get("use")), "Inserted")
+        free = d.get("free_bytes")
+        extra = f" ({tf.size(free)} free)" if d.get("use") == "in_use" and isinstance(free, (int, float)) else ""
+        parts.append(f"{words}: {name}{extra}.")
+    return " ".join(parts)
+
 class DriveList:
     """Runs ``drives list --json`` and keeps the result."""
 
@@ -199,7 +218,7 @@ class DrivesPage(Page):
         if not arc.get("running"):
             drive = "Drive: unknown (archive copying is not running)."
         else:
-            drive = f"Drive: {arc.get('drive_label') or 'none inserted'}."
+            drive = archive_drives_text(arc)
         parts = [drive, msg] + ([backlog] if backlog and backlog not in msg else [])
         self.arc_text.setText(" ".join(x for x in parts if x))
 

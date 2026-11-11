@@ -105,7 +105,7 @@ guessed — docs/02 risk A1); the stream port (default 554); the camera account 
 password (hidden input); a camera label; the display time zone (IANA name, validated); the folder
 for recordings (default `%ProgramData%\Sentinel`). Each answer is validated and re-asked when
 wrong; the complete configuration is then validated by `sentinel.config` before anything is
-written. Everything else keeps the tested defaults (5-minute segments, audio excluded, …),
+written. Everything else keeps the tested defaults (one-hour files since 0.3.5, audio excluded, …),
 except that archive copying and local retention are written ON (owner decision 2026-11-10,
 docs/branches/design-local-retention.md §7); the file's header says how to switch retention off.
 

@@ -57,7 +57,9 @@ class CameraConfig:
 
 @dataclass(frozen=True)
 class RecordingConfig:
-    segment_seconds: float = 300.0
+    # One file per clock hour by default (owner request 2026-11-11: 5-minute files were too many to
+    # handle); the window offers 15 / 30 / 60 minutes.
+    segment_seconds: float = 3600.0
     align_to_clock: bool = True
     connect_timeout_s: float = 20.0
     stall_timeout_s: float = 15.0

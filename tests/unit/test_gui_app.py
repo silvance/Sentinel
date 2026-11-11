@@ -554,6 +554,28 @@ def test_general_page_sets_and_clears_the_organisation(app: QApplication, tmp_pa
     w.close()
 
 
+def test_general_page_sets_the_recording_file_length(app: QApplication, tmp_path: Path,
+                                                     monkeypatch: pytest.MonkeyPatch) -> None:
+    """Owner request 2026-11-11: one file per hour by default instead of hundreds of 5-minute files."""
+    monkeypatch.setattr(base, "restart_recorder", lambda p, c: "Restarted.")
+    w = _window(app, tmp_path, admin=True)
+    page = w.pages["general"]
+    assert page.seglen.currentText() == "1 hour" and page.seglen.currentData() == 3600
+    assert [page.seglen.itemText(i) for i in range(page.seglen.count())] == ["15 minutes", "30 minutes", "1 hour"]
+    page.seglen.setCurrentIndex(page.seglen.findData(900))
+    page.save()
+    _drain(app, 0.3)
+    assert load_config(w.ctx.cfg_path).recording.segment_seconds == 900
+    # a length set by hand in the file stays selectable and is not changed by saving
+    text = w.ctx.cfg_path.read_text("utf-8").replace("segment_seconds = 900", "segment_seconds = 300")
+    w.ctx.cfg_path.write_text(text, "utf-8")
+    w.ctx.config_changed(load_config(w.ctx.cfg_path))
+    page.load()
+    assert page.seglen.currentText() == "5 minutes (current)"
+    assert page.tables()["recording"]["segment_seconds"] == 300
+    w.close()
+
+
 def test_schedule_days_are_picked_not_typed_and_round_trip(app: QApplication, tmp_path: Path,
                                                           monkeypatch: pytest.MonkeyPatch) -> None:
     from sentinel.gui.app.settings_pages import days_from_config, days_to_config

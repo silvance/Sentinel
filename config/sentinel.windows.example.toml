@@ -24,7 +24,7 @@ credentials_file = 'C:\ProgramData\Sentinel\config\camera.secret'
 include_audio = false
 
 [recording]
-segment_seconds = 300
+segment_seconds = 3600
 align_to_clock = true
 display_timezone = "America/New_York"
 

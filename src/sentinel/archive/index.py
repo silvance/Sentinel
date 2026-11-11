@@ -32,11 +32,12 @@ from __future__ import annotations
 import csv
 import io
 import json
+import posixpath
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from ..clock import parse_iso_utc
-from ..export.layout import local_text
+from ..export.layout import local_text, to_local
 from . import layout
 
 FORMAT = "sentinel-archive-index"
@@ -50,8 +51,13 @@ README_TEXT = """SENTINEL ARCHIVE DRIVE
 
 This drive holds archive copies of recordings made by Sentinel recording systems.
 
+* Sentinel/<camera>/Playlists/ has one playlist per day, named by the local date. Open one in
+  VLC or Windows Media Player to watch that day's recordings back to back. Playlists only point
+  at the recording files; they are not evidence and are rewritten as recordings are added.
 * Sentinel/<camera>/<date>/ contains the original recording files, unchanged, named by their
-  UTC start and end time. Files ending in .framehash.txt list a fingerprint for every picture.
+  UTC start and end time (UTC dates and times; the playlists use local time).
+* Sentinel/<camera>/Fingerprints/<date>/ lists a fingerprint for every picture of each recording
+  (.framehash.txt, same name as the recording).
 * Sentinel/<camera>/Quarantine/ holds recordings that were damaged when they were made.
 * Sentinel/<camera>/INDEX/ describes the files of that camera on this drive:
   archive_index.csv (one line per file), gaps.csv (times with no recording, and recordings kept
@@ -187,6 +193,44 @@ def build_index(*, camera_id: str, generation: int, generated_utc: str, ledger_i
 
     files[names["sums"]] = "".join(f"{e['sha256']}  {e['path']}\n" for e in entries + carried).encode("utf-8")
     return files
+
+
+def build_playlists(camera_id: str, entries: list[dict[str, Any]], tz: ZoneInfo) -> dict[str, bytes]:
+    """{relative path: bytes}: one ``.m3u`` per local day (display time zone) listing that day's verified
+    originals on this drive in time order (owner request 2026-11-11). Quarantined (damaged) recordings
+    and files without a start time are left out. Paths inside are relative to the playlist, with ``/``
+    separators; the text is ASCII. Entries: index entries or ledger rows with path, kind, start_utc,
+    end_utc, duration_s."""
+    days: dict[str, list[tuple[float, str, str, float]]] = {}
+    seen: set[str] = set()
+    for e in entries:
+        if e.get("kind") != layout.KIND_ORIGINAL or not e.get("start_utc") or not e.get("path"):
+            continue
+        if e["path"] in seen:
+            continue
+        seen.add(e["path"])
+        try:
+            start = parse_iso_utc(e["start_utc"])
+            end = parse_iso_utc(e["end_utc"]) if e.get("end_utc") else None
+        except (TypeError, ValueError):
+            continue
+        a = to_local(start, tz)
+        title = a.strftime("%H:%M:%S")
+        if end is not None:
+            title += "-" + to_local(end, tz).strftime("%H:%M:%S")
+        title += f" {a.tzname()}"
+        dur = float(e.get("duration_s") or ((end - start) if end is not None else 0) or 0)
+        days.setdefault(a.strftime("%Y-%m-%d"), []).append((start, e["path"], title, dur))
+    out: dict[str, bytes] = {}
+    pdir = layout.playlist_dir(camera_id)
+    for day, items in sorted(days.items()):
+        lines = ["#EXTM3U", f"#PLAYLIST:{layout.safe(camera_id)} {day} ({tz.key})"]
+        for _start, path, title, dur in sorted(items):
+            lines.append(f"#EXTINF:{max(0, round(dur))},{camera_id} {day} {title}")
+            lines.append(posixpath.relpath(path, pdir))
+        text = "\r\n".join(lines) + "\r\n"
+        out[layout.playlist_rel_path(camera_id, day)] = text.encode("ascii", "replace")
+    return out
 
 
 def journal_line(verified_utc: str, camera_id: str, segment_id: str, kind: str, sha256: str, size: int,
