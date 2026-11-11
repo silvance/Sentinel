@@ -188,6 +188,14 @@ def test_finisher_script_quotes_paths_and_goes_back_on_failure(tmp_path: Path) -
                  "--outcome aborted", "Get-Acl -LiteralPath $app | Set-Acl -LiteralPath $staged"):
         assert step in s, step
     assert s.index("update finish") < s.index("--outcome rolled_back")
+    # the version kept from before is set aside, restored if the new one fails, deleted only after success
+    assert "Move-Item -LiteralPath $prev -Destination $prevOld" in s
+    assert s.count("Move-Item -LiteralPath $prevOld -Destination $prev") == 2       # swap failed / check failed
+    assert s.rindex("Remove-Item -LiteralPath $prevOld") > s.index("update finish")
+    assert "Remove-Item -LiteralPath $staged" in s                    # an update removes its staging when cancelled
+    back = ap.Pending("rollback", "0.3.1", "0.3.0", str(app), str(folders.previous), str(folders.previous), None,
+                      asdict(ap.RecordingState()))
+    assert "Remove-Item -LiteralPath $staged" not in ap.finisher_script(back, folders, None)  # never the kept version
     p.reopen = False
     assert "Start-Process -FilePath $exe" not in ap.finisher_script(p, folders, None)
 

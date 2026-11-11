@@ -376,6 +376,7 @@ def finisher_script(p: Pending, folders: Folders, window_pid: int | None) -> str
     itself; swaps back and restarts the old version if anything fails. Runs in a visible window."""
     app, staged, prev = Path(p.app), Path(p.staged), Path(p.previous)
     hold = app.parent / f"{app.name}.swap-hold"
+    prev_old = app.parent / f"{app.name}.previous-old"
     failed = app.parent / f"{app.name}.failed-{p.to_version}"
     exe = app / "Sentinel.exe"
     what = (f"Updating Sentinel {p.from_version} to {p.to_version}" if p.action == "update"
@@ -384,6 +385,7 @@ def finisher_script(p: Pending, folders: Folders, window_pid: int | None) -> str
 $ErrorActionPreference = 'Stop'
 $Host.UI.RawUI.WindowTitle = 'Sentinel update - do not close'
 $app = {_ps(app)}; $staged = {_ps(staged)}; $prev = {_ps(prev)}; $hold = {_ps(hold)}; $failed = {_ps(failed)}
+$prevOld = {_ps(prev_old)}
 $exe = {_ps(exe)}; $state = {_ps(folders.state)}; $logf = {_ps(folders.log)}; $result = {_ps(folders.result)}
 function Say($m) {{ $line = (Get-Date).ToString('s') + '  ' + $m; Write-Host $m; Add-Content -LiteralPath $logf -Value $line -Encoding UTF8 }}
 function Fail-Plain($m) {{
@@ -403,9 +405,10 @@ $left = From-App
 if ($left.Count -gt 0) {{
   $rec = @($left | Where-Object {{ $_.CommandLine -match '\\b(recorder|archive|host)\\b' -or $_.Name -like 'SentinelService*' }})
   if ($rec.Count -gt 0) {{
-    Say 'The recorder is still running; the update is cancelled and recording continues on the installed version.'
+    Say 'The recorder is still running; this is cancelled and recording continues on the installed version.'
     & $exe update restart --state $state --outcome aborted --reason 'the recorder did not stop'
-    Remove-Item -LiteralPath $staged -Recurse -Force -ErrorAction SilentlyContinue
+    {"Remove-Item -LiteralPath $staged -Recurse -Force -ErrorAction SilentlyContinue" if p.action == "update"
+     else "# (going back: $staged is the kept previous version; it stays)"}
     Start-Sleep -Seconds 5; exit 1
   }}
   Say ('Closing ' + $left.Count + ' Sentinel window(s) still open.')
@@ -416,16 +419,20 @@ try {{
   try {{ Get-Acl -LiteralPath $app | Set-Acl -LiteralPath $staged }} catch {{ Say ('Note: permissions not copied: ' + $_.Exception.Message) }}
   if (Test-Path -LiteralPath $hold) {{ Remove-Item -LiteralPath $hold -Recurse -Force }}
   Move-Item -LiteralPath $staged -Destination $hold
-  if (Test-Path -LiteralPath $prev) {{ Remove-Item -LiteralPath $prev -Recurse -Force }}
+  # The version kept from before is set aside, not deleted, until the new one has passed its check.
+  if (Test-Path -LiteralPath $prevOld) {{ Remove-Item -LiteralPath $prevOld -Recurse -Force }}
+  if (Test-Path -LiteralPath $prev) {{ Move-Item -LiteralPath $prev -Destination $prevOld }}
   Move-Item -LiteralPath $app -Destination $prev
   try {{ Move-Item -LiteralPath $hold -Destination $app }}
   catch {{ Move-Item -LiteralPath $prev -Destination $app; throw }}
 }} catch {{
+  if ((Test-Path -LiteralPath $prevOld) -and -not (Test-Path -LiteralPath $prev)) {{ Move-Item -LiteralPath $prevOld -Destination $prev }}
+  if (Test-Path -LiteralPath $hold) {{ Move-Item -LiteralPath $hold -Destination $staged -ErrorAction SilentlyContinue }}
   Fail-Plain ('The program folders could not be swapped: ' + $_.Exception.Message + '. The installed version is unchanged.')
   & $exe update restart --state $state --outcome aborted --reason 'the program folders could not be swapped'
   Start-Sleep -Seconds 10; exit 1
 }}
-Say 'Checking the new version...'
+Say {_ps(f"Checking Sentinel {p.to_version}...")}
 & $exe update finish --state $state
 $rc = $LASTEXITCODE
 if ($rc -ne 0) {{
@@ -434,12 +441,16 @@ if ($rc -ne 0) {{
     if (Test-Path -LiteralPath $failed) {{ Remove-Item -LiteralPath $failed -Recurse -Force }}
     Move-Item -LiteralPath $app -Destination $failed
     Move-Item -LiteralPath $prev -Destination $app
+    if (Test-Path -LiteralPath $prevOld) {{ Move-Item -LiteralPath $prevOld -Destination $prev }}
   }} catch {{
     Fail-Plain ('Going back failed: ' + $_.Exception.Message + '. Call technical support; the previous version is in ' + $prev)
     Start-Sleep -Seconds 30; exit 2
   }}
   & $exe update restart --state $state --outcome rolled_back --reason 'the new version did not pass its check'
-}} else {{ Say 'Done.' }}
+}} else {{
+  if (Test-Path -LiteralPath $prevOld) {{ Remove-Item -LiteralPath $prevOld -Recurse -Force -ErrorAction SilentlyContinue }}
+  Say 'Done.'
+}}
 Remove-Item -LiteralPath $state -Force -ErrorAction SilentlyContinue
 {"Start-Process -FilePath $exe" if p.reopen else "# (the window is not reopened)"}
 Start-Sleep -Seconds 3

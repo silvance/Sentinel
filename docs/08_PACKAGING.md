@@ -524,6 +524,15 @@ with the versions and the update file's SHA-256, so the log shows which version 
 `Sentinel.exe update rollback`) swaps back the same way, and the newer version becomes the previous
 one. Work files (state, swap script, log, last result) are in `<app>.updates`; next to the program
 folder they get its permissions (under Program Files: only administrators may change them).
+A version that failed its check is left as `<app>.failed-<version>` for technical support (delete it
+when done); the version kept from before an update is set aside and restored if the update fails.
+
+**End-to-end test (2026-11-10, real builds, scratch folder, no recorder):** a real 0.3.0 build was
+updated to a 0.3.1 test build with a 6.8 MB update file (4 of 1,170 files carried): swapped and
+checked, `about --verify` clean. Going back restored 0.3.0 (0.3.1 kept as previous). An update whose
+staged `python314.dll` was damaged (the new version cannot even start) was undone by itself: 0.3.0
+in use and verified, the kept 0.3.1 preserved, the broken copy left as `Sentinel.failed-0.3.1`. Not
+yet run: with the Windows services installed and recording, and from the window on the laptop.
 
 **Making releases (build computer):**
 
