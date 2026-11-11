@@ -215,6 +215,11 @@ powershell -ExecutionPolicy Bypass -File packaging\windows\build.ps1 -FfmpegDir 
 * Creates `.venv-build` and installs `requirements/build.txt` with `--require-hashes --no-deps`
   (PyInstaller 6.22.3, hooks-contrib 2026.10, altgraph, packaging, setuptools, pefile,
   pywin32-ctypes, tzdata 2025.2). Nothing is installed system-wide.
+* Before replacing `dist/Sentinel`, the build stops any program running from that folder (a test
+  run of the window leaves the recorder and archive copier running there, and Windows cannot
+  replace a running program's files): first `Sentinel.exe stop` (the recorder saves its current
+  file), then it ends what is left, listing each one. Copies installed elsewhere (for example
+  `C:\Program Files\Sentinel`) are never touched.
 * `packaging/build.py` refuses an uncommitted source tree, untracked files included, and a tree
   whose git commit cannot be read (unless `--allow-dirty`, which the manifest records), inspects the given FFmpeg (`-version`: version and configure flags →
   licence class; `--enable-nonfree` builds are refused), runs PyInstaller with

@@ -28,6 +28,7 @@ import json
 import os
 import platform as pyplatform
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -225,6 +226,79 @@ def inspect_ffmpeg(folder: Path, allow_gpl_internal_use: bool = False) -> dict:
             "ffprobe_version": probe_line.removeprefix("ffprobe version ").split(" Copyright")[0],
             "configuration": configuration, "license": lic["license"], "licence_block": lic, "notices": notices}
 
+def _list_processes() -> list[tuple[int, str]]:
+    """(pid, executable path) of every running process this account can see."""
+    out: list[tuple[int, str]] = []
+    if IS_WIN:
+        cmd = ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+               "Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath } | "
+               "ForEach-Object { '{0}|{1}' -f $_.ProcessId, $_.ExecutablePath }"]
+        try:
+            text = subprocess.run(cmd, capture_output=True, text=True, timeout=60, check=False).stdout
+        except (OSError, subprocess.TimeoutExpired):
+            return out
+        for line in text.splitlines():
+            pid, _, exe = line.strip().partition("|")
+            if pid.isdigit() and exe:
+                out.append((int(pid), exe))
+        return out
+    for d in Path("/proc").glob("[0-9]*"):
+        try:
+            out.append((int(d.name), os.readlink(d / "exe")))
+        except OSError:
+            continue
+    return out
+
+
+def running_from(folder: Path, processes: list[tuple[int, str]] | None = None) -> list[tuple[int, str]]:
+    """Processes whose program file is inside ``folder`` (the build output being replaced)."""
+    root = os.path.normcase(str(folder.resolve())) + os.sep
+    procs = _list_processes() if processes is None else processes
+    return [(pid, exe) for pid, exe in procs if os.path.normcase(os.path.abspath(exe)).startswith(root)]
+
+
+def stop_running_copies(app: Path, wait_s: float = 15.0, *, processes=None, kill=None,  # noqa: ANN001
+                        graceful=None, sleep=time.sleep) -> list[int]:  # noqa: ANN001
+    """Stop Sentinel programs that run from the folder about to be rebuilt (a test run of the
+    window starts the recorder and the archive copier there, and Windows cannot replace files of
+    a running program). Only that folder is touched, never an installed copy elsewhere. First
+    ``Sentinel stop`` (the recorder closes and saves its current file), then whatever is left is
+    ended. Returns the process ids that were stopped; raises BuildError if any survive."""
+    listing = (lambda: running_from(app)) if processes is None else processes
+    found = listing()
+    if not found:
+        return []
+    print(f"stopping {len(found)} Sentinel program(s) running from {app}:")
+    for pid, exe in found:
+        print(f"  {pid}  {exe}")
+    exe = app / f"{'Sentinel' if IS_WIN else 'sentinel'}{EXE_SUFFIX}"
+    if graceful is None:
+        def graceful() -> None:
+            if exe.is_file():
+                try:
+                    subprocess.run([str(exe), "stop"], capture_output=True, timeout=120, check=False)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+    graceful()
+    if kill is None:
+        def kill(pid: int) -> None:
+            try:
+                os.kill(pid, signal.SIGTERM)          # TerminateProcess on Windows
+            except OSError:
+                pass
+    deadline = time.monotonic() + wait_s
+    left = listing()
+    for pid, _ in left:
+        kill(pid)
+    while left and time.monotonic() < deadline:
+        sleep(0.5)
+        left = listing()
+    if left:
+        raise BuildError("these programs are still running from the build folder and could not be stopped: "
+                         + ", ".join(f"{pid} {exe}" for pid, exe in left) + "; close them and build again")
+    return [pid for pid, _ in found]
+
+
 def run_pyinstaller(dist: Path, work: Path) -> None:
     env = dict(os.environ, PYTHONHASHSEED="0")
     epoch = git("log", "-1", "--format=%ct")
@@ -306,6 +380,8 @@ def build(ffmpeg_dir: Path, dist_root: Path, work: Path, allow_dirty: bool,
     print(f"FFmpeg {ff['version']} from {ffmpeg_dir}: {ff['licence_block']['license_status']}")
     app = dist_root / "Sentinel"
     started = time.time()
+    if app.is_dir():
+        stop_running_copies(app)
     run_pyinstaller(dist_root, work)
     if not (app / f"{'Sentinel' if IS_WIN else 'sentinel'}{EXE_SUFFIX}").is_file():
         raise BuildError(f"PyInstaller did not produce the program in {app}")
