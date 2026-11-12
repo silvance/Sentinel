@@ -186,14 +186,18 @@ class OutputLog(QPlainTextEdit):
         self.current: Command | None = None
 
     def run(self, argv: list[str], title: str, on_done: Callable[[int, Command], None] | None = None,
-            busy: list[QWidget] | None = None, show_output: bool = True) -> Command | None:
+            busy: list[QWidget] | None = None, show_output: bool = True,
+            stop_note: str | None = None) -> Command | None:
+        """``stop_note``: the command only waits for something (it changes nothing itself), so the
+        person may stop it when another one is wanted; the note is logged when they do."""
         if self.current is not None and self.current.running():
-            QMessageBox.information(self, "Sentinel", "Wait until the current command has finished.")
-            return None
+            if not self._offer_stop():
+                return None
         self.appendPlainText(f"── {title}")
         self.started.emit(title)
         cmd = Command(argv, self)
         cmd.title = title  # type: ignore[attr-defined]
+        cmd.stop_note = stop_note  # type: ignore[attr-defined]
         if show_output:
             cmd.output.connect(self.appendPlainText)
         before = [(w, w.isEnabled()) for w in busy or []]
@@ -211,6 +215,34 @@ class OutputLog(QPlainTextEdit):
         cmd.finished.connect(finished)
         self.current = cmd
         return cmd.start()
+
+    def _offer_stop(self) -> bool:
+        """Another command is running. Field report 2026-11-12: "Wait until the current command has
+        finished" named no command, and a swap waiting for a stopped archive copier blocked the page
+        for 10 minutes. Name it; a command that only waits may be stopped. True once it has ended."""
+        cur = self.current
+        assert cur is not None
+        title = getattr(cur, "title", "A command")
+        note = getattr(cur, "stop_note", None)
+        if note is None:
+            QMessageBox.information(self, "Sentinel", f"“{title}” is still running. Wait until it has "
+                                    "finished (see the line under the list), then try again.")
+            return False
+        box = QMessageBox(QMessageBox.Icon.Question, "Sentinel",
+                          f"“{title}” is still running. Stop it and go on?",
+                          QMessageBox.StandardButton.Cancel, self)
+        stop = box.addButton("Stop it and go on", QMessageBox.ButtonRole.AcceptRole)
+        box.setDefaultButton(stop)
+        box.exec()
+        if box.clickedButton() is not stop:
+            return False
+        cur.kill()
+        if not cur.proc.waitForFinished(5000):
+            QMessageBox.information(self, "Sentinel", f"“{title}” did not stop. Try again in a moment.")
+            return False
+        cur._done(-1)
+        self.appendPlainText(f"── {title} stopped. {note}\n")
+        return True
 
 
 class CommandPanel(QWidget):

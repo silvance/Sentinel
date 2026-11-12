@@ -29,7 +29,8 @@ Why a separate process (not a thread inside the recorder) — design choice:
 The worker class can also run as a thread (``ArchiveWorker.start()``), which the tests use to
 run it next to an in-process recorder.
 
-Exit codes: 0 ok, 1 usage/config error, 2 swap did not complete in time, 3 archive not enabled.
+Exit codes: 0 ok, 1 usage/config error, 2 swap did not complete in time, 3 archive not enabled (run) or
+archive copying not running (swap, return), 4 needs an administrator (return).
 """
 
 from __future__ import annotations
@@ -45,7 +46,8 @@ from pathlib import Path
 
 from ..config import ConfigError, load_config
 from ..logging_setup import FORMAT, RedactingFilter, RedactingFormatter
-from .status import STATUS_FILE, ST_ABSENT, ST_REMOVE_MANUALLY, ST_SAFE, read_archive_status
+from .status import (COPIER_NOT_RUNNING, STATUS_FILE, ST_ABSENT, ST_REMOVE_MANUALLY, ST_SAFE, copier_running,
+                     read_archive_status)
 from .worker import ArchiveWorker, request_resume_file, request_swap_file
 
 
@@ -97,18 +99,28 @@ def _cmd_swap(args: argparse.Namespace) -> int:
     if cfg is None:
         return 1
     path = cfg.data_path / STATUS_FILE
-    before = (read_archive_status(path) or {}).get("heartbeat_epoch", 0)
+    doc = read_archive_status(path) or {}
+    # Field report 2026-11-12: with the copier stopped, swap waited its full 10 minutes in silence and
+    # blocked every other button on the Drives page. Nothing is being copied then, so say so at once,
+    # and leave no swap request behind for a copier that starts later.
+    if not copier_running(doc):
+        print(COPIER_NOT_RUNNING, flush=True)
+        return 3
+    before = doc.get("heartbeat_epoch", 0)
     request_swap_file(cfg)
-    print("Preparing the archive drive for removal. Do not remove it yet.")
+    print("Preparing the archive drive for removal. Do not remove it yet.", flush=True)
     end = time.monotonic() + args.timeout
     while time.monotonic() < end:
         doc = read_archive_status(path) or {}
         if doc.get("heartbeat_epoch", 0) > before and doc.get("state") in (ST_SAFE, ST_REMOVE_MANUALLY, ST_ABSENT):
-            print(doc.get("message", ""))
+            print(doc.get("message", ""), flush=True)
             return 0
+        if not copier_running(doc):
+            print("Archive copying stopped while the drive was being prepared. " + COPIER_NOT_RUNNING, flush=True)
+            return 3
         time.sleep(0.5)
     print("The archive drive is not ready to be removed yet. Do not remove it. If this keeps happening, "
-          "contact technical support.")
+          "contact technical support.", flush=True)
     return 2
 
 
@@ -177,9 +189,6 @@ def _cmd_acknowledge(args: argparse.Namespace) -> int:
     return 0
 
 
-HEARTBEAT_STALE_S = 120.0
-
-
 def _cmd_return(args: argparse.Namespace) -> int:
     """Return an archive drive to service after the office has copied it (0.3.9; see worker.py). The
     running archive copier does the work between two files; this command asks it and waits."""
@@ -218,8 +227,7 @@ def _cmd_return(args: argparse.Namespace) -> int:
         print(f"{args.drive} is not a Sentinel archive drive. Nothing was deleted.", file=sys.stderr)
         return 2
     status_path = cfg.data_path / STATUS_FILE
-    doc = read_archive_status(status_path) or {}
-    if time.time() - float(doc.get("heartbeat_epoch") or 0) > HEARTBEAT_STALE_S:
+    if not copier_running(read_archive_status(status_path) or {}):
         print("Archive copying is not running, so the drive cannot be returned to service now. Nothing was "
               "deleted. Contact technical support.", file=sys.stderr)
         return 3
@@ -240,7 +248,8 @@ def _cmd_return(args: argparse.Namespace) -> int:
               "again. Nothing was deleted.", file=sys.stderr)
         return 4
     label = marker.get("label") or args.drive
-    print(f"Returning {label} to service. Copying finishes the file in progress first; do not unplug the drive.")
+    print(f"Returning {label} to service. Copying finishes the file in progress first; do not unplug the "
+          "drive.", flush=True)
     end = time.monotonic() + args.timeout
     while time.monotonic() < end:
         try:

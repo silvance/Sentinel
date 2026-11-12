@@ -91,6 +91,13 @@ playlists from the drive. The drive keeps its marker and label and is used again
 count as archived (not copied again, no A-006) and, for local retention, as copies that left the laptop.
 Erasing a drive that held recordings stays refused; this is the way to reuse one.
 
+**Swap while archive copying is stopped (0.3.10, field report 2026-11-12).** With the copier not running
+(A-007), Swap used to wait its full 10 minutes in silence while every other Drives-page button answered "Wait
+until the current command has finished". Swap now answers at once that nothing is being copied and that the
+drive can be taken out with Safely remove…, and writes no swap request for a copier that starts later; it also
+stops waiting if the copier stops during a swap. The "still running" message names the command, and a
+command that only waits (swap) can be stopped there.
+
 ## 4. Automatic drive detection and one-button preparation
 
 On insertion the drive is **classified automatically** (UDisks2/udev: partition table, filesystem

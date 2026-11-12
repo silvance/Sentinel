@@ -121,6 +121,26 @@ class ArchiveStatusWriter:
         return doc
 
 
+HEARTBEAT_STALE_S = 120.0
+COPIER_NOT_RUNNING = (
+    "Archive copying is not running, so nothing is being copied to the archive drive and there is nothing to "
+    "finish. To take the drive out now: select it in the list and press Safely remove… (or use Windows' Safely "
+    "Remove Hardware). Recordings stay on this computer and are copied when archive copying runs again (alert "
+    "A-007). If A-007 stays, contact technical support.")
+
+
+def copier_running(doc: dict, now: float | None = None) -> bool:
+    """The archive copier publishes its status at least every poll interval; a fresh heartbeat and a
+    state other than STOPPED means it runs (and will answer a request)."""
+    if not doc or doc.get("state") == ST_STOPPED:
+        return False
+    try:
+        beat = float(doc.get("heartbeat_epoch") or 0)
+    except (TypeError, ValueError):
+        return False
+    return (time.time() if now is None else now) - beat <= HEARTBEAT_STALE_S
+
+
 def read_archive_status(path: Path) -> dict[str, Any] | None:
     try:
         return json.loads(path.read_text("utf-8"))

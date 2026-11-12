@@ -276,6 +276,7 @@ class DrivesPage(Page):
             if not operator_ok:
                 b.setToolTip("Needs an administrator on this computer (no operator request folder is set up)")
         self._after_load: Any = None
+        self._arc_running = True      # until the first status arrives; the command itself checks too
 
     def on_show(self) -> None:
         # Always re-read: a drive may have been plugged in, or a setting (such as allowing erasing)
@@ -284,6 +285,7 @@ class DrivesPage(Page):
 
     def on_status(self, read) -> None:  # noqa: ANN001
         arc = ((read.doc or {}).get("archive") or {}) if read is not None else {}
+        self._arc_running = bool(arc.get("running"))
         self.resume_btn.setVisible(swap_under_way(arc))
         if not arc:
             self.arc_text.setText("Archive copying is not enabled in the settings.")
@@ -301,10 +303,10 @@ class DrivesPage(Page):
     def _cfg(self) -> str:
         return str(self.ctx.cfg_path)
 
-    def _arc(self, *args: str) -> None:
+    def _arc(self, *args: str, stop_note: str | None = None) -> None:
         # Resume stays available during a swap: it cancels it (review 2026-11-10).
         self.log.run(sentinel_argv("archive", args[0], "--config", self._cfg(), *args[1:]),
-                     f"Archive {args[0]}", busy=[self.swap_btn])
+                     f"Archive {args[0]}", busy=[self.swap_btn], stop_note=stop_note)
 
     def _arc_cmd(self, args: list[str], title: str) -> None:
         self.log.run(sentinel_argv("archive", args[0], "--config", self._cfg(), *args[1:]), title)
@@ -329,10 +331,18 @@ class DrivesPage(Page):
             self.log.appendPlainText("── Cancel swap: requested.\n")
 
     def _swap(self) -> None:
+        if not self._arc_running:
+            # Field report 2026-11-12: nothing answers a swap while the copier is stopped.
+            from ...archive.status import COPIER_NOT_RUNNING
+
+            self.problem(COPIER_NOT_RUNNING)
+            return
         if not self.ctx.admin:
             self._operator_request("swap")
             return
-        self._arc("swap", "--timeout", "600")
+        self._arc("swap", "--timeout", "600",
+                  stop_note="If the archive copier was already preparing the drive, it carries on: wait until "
+                            "this page says SAFE TO REMOVE, or press Cancel swap.")
 
     def _resume(self) -> None:
         """Cancel a swap / keep using the drive: its own command, even while a swap is waiting."""

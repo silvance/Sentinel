@@ -940,3 +940,44 @@ def test_while_updating_the_window_says_so_instead_of_system_error(app: QApplica
     w.refresh()
     assert "Updating" not in w.sb_state.text()
     w.close()
+
+
+def test_swap_with_the_copier_stopped_says_so_and_a_waiting_command_can_be_stopped(
+        app: QApplication, tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    """Field report 2026-11-12: Swap ran 10 minutes against a stopped archive copier, and every other
+    button only said "Wait until the current command has finished"."""
+    import sys
+
+    from sentinel.archive.status import COPIER_NOT_RUNNING
+    from sentinel.gui.app import base
+
+    w = _window(app, tmp_path, admin=True)
+    page = w.pages["drives"]
+    shown: list[str] = []
+    page.problem = shown.append
+    page._arc_running = False
+    page._swap()
+    assert shown == [COPIER_NOT_RUNNING] and page.log.current is None
+
+    # A command that only waits may be stopped from the "still running" question; others may not.
+    log = page.log
+    sleeper = [sys.executable, "-c", "import time; time.sleep(60)"]
+    assert log.run(sleeper, "Archive swap", stop_note="The copier carries on.") is not None
+    told: list[str] = []
+    monkeypatch.setattr(base.QMessageBox, "exec", lambda box: told.append(box.text()) or 0)
+    monkeypatch.setattr(base.QMessageBox, "clickedButton",
+                        lambda box: next(b for b in box.buttons() if b.text() == "Stop it and go on"))
+    assert log.run([sys.executable, "-c", "pass"], "Refresh") is not None
+    assert "“Archive swap” is still running" in told[0]
+    assert "Archive swap stopped. The copier carries on." in log.toPlainText()
+    _drain(app, 1.0)
+
+    assert log.run(sleeper, "Erase and set up disk 1") is not None      # no stop_note: never stopped
+    infos: list[str] = []
+    monkeypatch.setattr(base.QMessageBox, "information", lambda _p, _t, text: infos.append(text))
+    assert log.run([sys.executable, "-c", "pass"], "Refresh") is None
+    assert "“Erase and set up disk 1” is still running" in infos[0]
+    assert log.current is not None and log.current.running()
+    log.current.kill()
+    log.current.proc.waitForFinished(5000)
+    w.close()
