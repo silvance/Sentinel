@@ -136,3 +136,95 @@ def test_a_new_disk_next_to_the_current_archive_drive_of_the_same_model_can_be_s
     classes, _ = classify_all([archive, new, SYS], POL, protected_for(), inspector=FakeInspector())
     by = {c.disk.disk_id: c for c in classes}
     assert by["3"].can_prepare and by["3"].refusal is None
+
+
+# Field report 2026-11-12: a brand-new, empty Samsung T7 (real serial) reported the disk UniqueId
+# 5000000000000001, a USB bridge's filler value that the Sabrent dock's disks had reported too, and was
+# refused as "holds Sentinel recordings" (reason known_hardware).
+FILLER_UID = "5000000000000001"
+
+
+@pytest.mark.parametrize("uid", [FILLER_UID, "6000000000000000000000000000000a", "naa.5000000000000001",
+                                 "0000000000000000", "eui.0000000000000000", "FFFFFFFFFFFFFFFF", "None"])
+def test_filler_unique_ids_are_placeholders(uid: str) -> None:
+    from sentinel.drives.model import unique_id_is_placeholder
+
+    assert unique_id_is_placeholder(uid)
+
+
+@pytest.mark.parametrize("uid", [None, "", "5000C500B4074486", "500253F8C2B00399", "600224803426183AAFEC9E61EC7A093A",
+                                 "eui.000000000000000000E04C70B6D755E0", "eui.6479A77730000009",
+                                 r"USBSTOR\DISK&VEN_KINGSTON&PROD_DATATRAVELER_3.0&REV_0000\E0D55E6C09F21591D9ECAFF8&0:HOST"])
+def test_real_unique_ids_are_not_placeholders(uid: str | None) -> None:
+    from sentinel.drives.model import unique_id_is_placeholder
+
+    assert not unique_id_is_placeholder(uid)
+
+
+def _new_t7():
+    from drive_fakes import data_part, usb_disk, vol
+
+    v = vol("79fe323b-0000-0000-0000-100000000000", "exfat", label="T7")
+    return usb_disk(disk_id="1", serial="V46972AY0LNNM7S", unique_id=FILLER_UID, model="PSSD T7",
+                    size=2000398934016, partitions=(data_part(1, v),))
+
+
+def test_a_new_ssd_sharing_the_docks_filler_unique_id_is_not_taken_for_a_sentinel_drive() -> None:
+    from sentinel.drives.known import KnownDrives
+
+    known = KnownDrives(unique_ids=frozenset({FILLER_UID}), serials=frozenset({ZEROS}),
+                        hardware=frozenset({(ZEROS, "wdc wd40efrx-68n", 4 * 10**12)}))
+    c = classify(_new_t7(), POL, protected_for(), inspector=FakeInspector(), known=known)
+    assert c.drive_class is DriveClass.WRONG_FORMAT and c.can_prepare, (c.drive_class, c.reasons)
+
+
+class _Audit:
+    """Just enough of the ledger for load_known: drive_prepared events, no drives table."""
+
+    def __init__(self, details: list[dict]) -> None:
+        import json
+
+        self.rows = [(json.dumps(d),) for d in details]
+
+    def query(self, sql: str):
+        return self.rows if "FROM events" in sql else []
+
+
+def _ident(serial: str, uid: str | None) -> dict:
+    return {"serial": serial, "unique_id": uid, "model": "WDC WD40EFRX-68N", "size_bytes": 4 * 10**12,
+            "volume_ids": [], "fs_serials": []}
+
+
+def test_the_ledger_does_not_keep_filler_or_dock_unique_ids() -> None:
+    from sentinel.drives.known import load_known
+
+    real = "5000C500B4074486"
+    known = load_known(_Audit([
+        {"drive_uuid": "11111111-1111-1111-1111-111111111111", "disk": _ident(ZEROS, FILLER_UID)},
+        {"drive_uuid": "22222222-2222-2222-2222-222222222222",
+         "disk": _ident(ZEROS, r"USBSTOR\DISK&VEN_DUAL&PROD_SATA\000000000000000000&0")},
+        {"drive_uuid": "33333333-3333-3333-3333-333333333333", "identity_after": _ident("Z505GDE8", real)},
+    ]))
+    assert known.error is None and known.unique_ids == frozenset({real.lower()})
+    c = classify(_new_t7(), POL, protected_for(), inspector=FakeInspector(), known=known)
+    assert c.drive_class is DriveClass.WRONG_FORMAT, c.reasons
+
+
+def test_once_set_up_the_ssd_is_still_recognised_by_its_real_serial() -> None:
+    from sentinel.drives.known import KnownDrives
+
+    t7 = _new_t7()
+    k = KnownDrives(unique_ids=frozenset({FILLER_UID}),
+                    hardware=frozenset({("v46972ay0lnnm7s", "pssd t7", t7.size_bytes)}))
+    c = classify(t7, POL, protected_for(), inspector=FakeInspector(), known=k)
+    assert c.drive_class is DriveClass.SENTINEL_EVIDENCE and c.reasons == ("known_hardware",)
+
+
+def test_the_refusal_says_why_a_drive_counts_as_holding_recordings() -> None:
+    from sentinel.drives.classify import evidence_why
+
+    assert evidence_why(["known_hardware"]) == \
+        "Sentinel's records show it set up a drive with this serial number before."
+    assert evidence_why(["marker", "marker_invalid", "archive_layout"]) == \
+        "It has Sentinel's drive file (SENTINEL_DRIVE.json). It has a folder named Sentinel at the top level."
+    assert evidence_why(["something_new"]) == ""

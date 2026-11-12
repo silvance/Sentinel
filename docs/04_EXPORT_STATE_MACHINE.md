@@ -113,6 +113,13 @@ type and label, mount state, size, SMART, whether it holds the OS or spool):
   taken for SENTINEL_1 and could not be set up). Such drives are recognised by their contents only
   (marker, volume GUIDs, filesystem serials); consequence: a Sentinel drive reformatted outside
   Sentinel is not recognised in such a dock.
+* USB bridges can also fill in the disk's UniqueId (field report 2026-11-12: a brand-new, empty Samsung
+  T7 with a real serial reported `5000000000000001`, as the disks in the Sabrent dock had, and was refused
+  as "holds Sentinel recordings", reason `known_hardware`). Since 0.3.8 a placeholder UniqueId (one
+  character repeated, or an NAA type 5/6 ID without a company ID) is never used to recognise a drive, and
+  the ledger no longer keeps UniqueIds recorded behind a placeholder serial. A drive with a real serial
+  is still recognised by its serial, model and size. The refusal now says why a drive counts as holding
+  recordings.
 * After erasing, the drive is found again by its hardware identity **and** the GUID of the partition
   the elevated helper has just created (0.3.6). Before, two disks in one such dock matched the same
   hardware identity, so setup erased and formatted the right disk but then stopped with "Two

@@ -561,6 +561,20 @@ def test_cancel_swap_is_shown_only_while_a_swap_is_under_way(app: QApplication, 
     w.close()
 
 
+def test_refusing_a_drive_with_recordings_says_why(app: QApplication, tmp_path: Path) -> None:
+    """Owner report 2026-11-12: a new SSD was refused with no reason given."""
+    w = _window(app, tmp_path, admin=True)
+    page = w.pages["drives"]
+    shown: list[str] = []
+    page.problem = shown.append
+    page._cannot_erase({"refusal": "sentinel_evidence", "reasons": ["known_hardware"],
+                        "message": "This drive holds Sentinel recordings and will not be erased."})
+    assert "Why: Sentinel's records show it set up a drive with this serial number before." in shown[0]
+    page._cannot_erase({"refusal": "lookalike", "reasons": ["empty_volume"], "message": "Another connected drive"})
+    assert "Why:" not in shown[1] and "Nothing was erased." in shown[1]
+    w.close()
+
+
 def test_general_page_sets_and_clears_the_organisation(app: QApplication, tmp_path: Path,
                                                        monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(base, "restart_recorder", lambda p, c: "Restarted.")

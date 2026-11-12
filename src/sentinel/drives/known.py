@@ -22,7 +22,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from .model import DiskInfo, norm_serial, serial_is_placeholder
+from .model import DiskInfo, norm_serial, serial_is_placeholder, unique_id_is_placeholder
 
 _DRIVES_TABLE_COLUMNS = {
     "drive_uuid": "uuid", "volume_id": "vol", "volume_guid": "vol", "fs_uuid": "fs", "filesystem_uuid": "fs",
@@ -55,7 +55,10 @@ class KnownDrives:
             # volume GUIDs, filesystem serials above) identify it. Consequence: a Sentinel drive that
             # was reformatted outside Sentinel is not recognised in such a dock (docs/04 §4).
             return why
-        if disk.unique_id and disk.unique_id.lower() in self.unique_ids:
+        # Field report 2026-11-12: a USB bridge's filler UniqueId (5000000000000001) is shared by unrelated
+        # drives (a new Samsung T7 and the Sabrent dock's disks), so it identifies nothing.
+        if (disk.unique_id and not unique_id_is_placeholder(disk.unique_id)
+                and disk.unique_id.lower() in self.unique_ids):
             why.append("known_hardware")
         elif disk.serial and ((disk.serial.lower(), (disk.model or "").lower(), disk.size_bytes) in self.hardware
                               or disk.serial.lower() in self.serials):
@@ -80,6 +83,8 @@ def norm_volume_id(value: str) -> str:
 def _add(acc: dict[str, set[Any]], kind: str, value: Any) -> None:
     if value is None or value == "":
         return
+    if kind == "uid" and unique_id_is_placeholder(str(value)):
+        return  # a bridge's filler value names no drive (field report 2026-11-12)
     acc[kind].add(norm_volume_id(value) if kind == "vol" else str(value).strip().lower())
 
 
@@ -98,7 +103,9 @@ def load_known(audit: Any) -> KnownDrives:
             _add(acc, "vol", d.get("volume_id"))
             for key in ("disk", "identity_after"):
                 ident = d.get(key) or {}
-                _add(acc, "uid", ident.get("unique_id"))
+                if not serial_is_placeholder(ident.get("serial")):
+                    # Behind a dock that hides serials the UniqueId is the dock's or bay's, not the disk's.
+                    _add(acc, "uid", ident.get("unique_id"))
                 for v in ident.get("volume_ids") or []:
                     _add(acc, "vol", v)
                 for s in ident.get("fs_serials") or []:

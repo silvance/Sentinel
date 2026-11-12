@@ -93,6 +93,31 @@ def serial_is_placeholder(serial: str | None) -> bool:
     return len(alnum) >= 6 and (alnum in run or alnum in run[1:] + "0")
 
 
+_HEX = frozenset("0123456789abcdef")
+
+
+def unique_id_is_placeholder(unique_id: str | None) -> bool:
+    """True for a disk UniqueId that a USB bridge fills in instead of an ID of its own (field report
+    2026-11-12: a new Samsung T7 reported ``5000000000000001``, the same value as the disks in the
+    Sabrent dock, and was taken for a drive Sentinel had set up). Placeholders: one character
+    repeated, and an NAA type 5/6 identifier without an IEEE company ID (digits 2-7 zero), which no
+    manufacturer assigns. EUI/NGUID values (``eui.``) are only checked for repetition: NVMe
+    NGUIDs legitimately start with zeros."""
+    if not unique_id:
+        return False
+    v = unique_id.strip().lower()
+    eui = v.startswith("eui.")
+    for prefix in ("naa.", "eui.", "0x"):
+        if v.startswith(prefix):
+            v = v[len(prefix):]
+            break
+    if not v or not set(v) <= _HEX:
+        return serial_is_placeholder(v) if v else True
+    if len(set(v)) == 1:
+        return True
+    return not eui and len(v) in (16, 32) and v[0] in "56" and v[1:7] == "000000"
+
+
 def serial_tail(serial: str | None, n: int = 4) -> str | None:
     """Last ``n`` letters/digits of the serial (what the operator must type for FOREIGN_DATA).
     None for a placeholder serial: typing "0000" proves nothing (see ``confirm_text``)."""

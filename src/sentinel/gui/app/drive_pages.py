@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QFileDialog
 
 from .. import textfmt as tf
 from ...archive.status import ST_REMOVE_MANUALLY, ST_SAFE, ST_SWAP_PENDING
+from ...drives.classify import evidence_why
 from ...drives.model import HIDDEN_SERIAL_WORD
 from ..ledger_view import load_exports
 from .base import CommandPanel, OutputLog, Page, ReadOnlyBar, capped, fill, icon_button, muted, selected_data, table
@@ -345,7 +346,10 @@ class DrivesPage(Page):
     def _cannot_erase(self, d: dict[str, Any]) -> None:
         """Why 'Erase and set up' is refused, in plain words, with the way forward where there is one."""
         if d.get("refusal") != "erase_disabled":
-            self.problem(f"This drive cannot be erased and set up.\n\n{d.get('message') or ''}\n\nNothing was erased.")
+            why = evidence_why(d.get("reasons") or []) if d.get("refusal") == "sentinel_evidence" else ""
+            why = f"\n\nWhy: {why}" if why else ""
+            self.problem(f"This drive cannot be erased and set up.\n\n{d.get('message') or ''}{why}"
+                         "\n\nNothing was erased.")
             return
         text = ("Erasing drives is turned off on this computer, so Sentinel cannot set up this drive yet.\n\n"
                 "An administrator can turn it on: Settings › Storage › \"Allow 'Erase and set up'\", then Save.")

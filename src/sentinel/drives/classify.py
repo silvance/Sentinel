@@ -74,6 +74,27 @@ UNSUITABLE_MESSAGES: dict[str, str] = {
 HARD_UNSUITABLE = ("system_disk", "recording_storage", "page_file")
 CHECKS_UNAVAILABLE = ("protected_unknown", "ledger_unavailable")
 EVIDENCE_MESSAGE = "This drive holds Sentinel recordings and will not be erased. Contact technical support."
+# Why a drive counts as holding recordings, in plain words (owner request 2026-11-12: the refusal named no
+# reason). Several reasons can give the same sentence; each sentence is shown once.
+EVIDENCE_REASON_WORDS = {
+    "marker": "It has Sentinel's drive file (SENTINEL_DRIVE.json).",
+    "marker_partial": "It has Sentinel's drive file (SENTINEL_DRIVE.json).",
+    "marker_invalid": "It has Sentinel's drive file (SENTINEL_DRIVE.json).",
+    "marker_unapproved_or_extra": "It has Sentinel's drive file (SENTINEL_DRIVE.json).",
+    "archive_layout": "It has a folder named Sentinel at the top level.",
+    "export_manifest": "It has folders laid out like a Sentinel review drive.",
+    "export_manifest_unreadable": "It has folders laid out like a Sentinel review drive.",
+    "review_layout": "It has folders laid out like a Sentinel review drive.",
+    "known_drive_uuid": "Sentinel's records show it set up this drive before.",
+    "known_volume": "Sentinel's records show it set up or wrote to this drive before.",
+    "known_filesystem": "Sentinel's records show it set up or wrote to this drive before.",
+    "known_hardware": "Sentinel's records show it set up a drive with this serial number before.",
+}
+
+
+def evidence_why(reasons: Iterable[str]) -> str:
+    """The plain-words reasons a drive counts as holding recordings ("" if none is known)."""
+    return " ".join(dict.fromkeys(EVIDENCE_REASON_WORDS[r] for r in reasons if r in EVIDENCE_REASON_WORDS))
 BLANK_MESSAGE = f"This drive is empty and must be set up before use. Press {ACTION_NAME}."
 ERASE_DISABLED_MESSAGE = "Setting up drives is not enabled on this system yet. Contact technical support."
 
