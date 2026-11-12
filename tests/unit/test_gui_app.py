@@ -561,6 +561,29 @@ def test_cancel_swap_is_shown_only_while_a_swap_is_under_way(app: QApplication, 
     w.close()
 
 
+def test_return_to_service_needs_every_answer_and_the_office_check(app: QApplication, tmp_path: Path) -> None:
+    """0.3.9: the agent (an administrator) returns a drive the office has copied and checked."""
+    from sentinel.gui.app.drive_pages import ReturnDialog
+
+    w = _window(app, tmp_path, admin=True)
+    assert w.pages["drives"].return_btn.isEnabled()
+    dlg = ReturnDialog({"label": "SENTINEL_1", "class": "READY", "role": "archive"})
+    assert not dlg.ok.isEnabled()
+    dlg.destination.setText("Office archive drive 3")
+    dlg.copied_by.setText("Clerk A")
+    dlg.who.setText("agent7")
+    assert not dlg.ok.isEnabled()                # the office check must be confirmed
+    dlg.checked.setChecked(True)
+    assert dlg.ok.isEnabled()
+    args = dlg.args()
+    assert args[:6] == ["--admin-id", "agent7", "--destination", "Office archive drive 3", "--copied-by", "Clerk A"]
+    assert args[-1] == "--checked" and len(args[-2]) == 10
+    w.close()
+    w2 = _window(app, tmp_path / "operator", admin=False)
+    assert not w2.pages["drives"].return_btn.isEnabled()
+    w2.close()
+
+
 def test_refusing_a_drive_with_recordings_says_why(app: QApplication, tmp_path: Path) -> None:
     """Owner report 2026-11-12: a new SSD was refused with no reason given."""
     w = _window(app, tmp_path, admin=True)

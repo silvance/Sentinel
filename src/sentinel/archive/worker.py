@@ -35,6 +35,14 @@ Mechanism (design choice, see docs/branches/design-archive-drive.md):
   by itself ("rollover"); nothing is lost and recording is never paused. Swap then prepares the FULL
   drive for removal while copying continues on the other one. The status lists every archive drive
   inserted (``drives``) and the drive waiting to be taken out (``removal``).
+* Return to service (0.3.9, owner request 2026-11-12): after the office has copied a full archive drive
+  to its own storage and checked every file, an administrator returns the drive (``python -m
+  sentinel.archive return``, the window's "Return to service"). The request reaches this process through
+  its control folder only (administrators), and is carried out between two files, never during a copy:
+  every recorded copy must still be on the drive with its recorded size (else nothing happens), the
+  copies are recorded as TRANSFERRED to the place named (they still count as archived), and only then
+  are those files, the index and the playlists deleted from the drive. The drive keeps its marker and
+  label and is used again like an empty one.
 
 Runs as its own process in production (``python -m sentinel.archive run``) — see
 :mod:`sentinel.archive.__main__` for why — and as a thread in tests (:meth:`start`).
@@ -81,6 +89,9 @@ log = logging.getLogger(__name__)
 CONTROL_DIR = "archive_control"
 SWAP_REQUEST = "swap.request"
 RESUME_REQUEST = "resume.request"
+RETURN_REQUEST = "return.request"   # JSON from ``archive return`` (control folder only: administrators)
+RETURN_RESULT = "return.result.json"
+RETURN_REQUEST_MAX_BYTES = 8192
 SWAPPED_STATE = "swapped_drive.json"   # the drive made safe to remove, kept across a restart of the worker
 REQUEST_MAX_AGE_S = 900.0        # a swap/resume request older than this is stale and not acted on
 CONTROL_POLL_S = 1.0             # how often a copy in progress looks for a swap request
@@ -390,6 +401,7 @@ class ArchiveWorker:
         scan = self.locator.scan()
         target, swapped_present = self._select(scan)
         self._last_scan = (scan, swapped_present)
+        self._poll_return(scan)
         if target is None:
             if self.att is not None:
                 # (review 2026-11-10) one scan that does not see the attached drive (drive not ready,
@@ -706,6 +718,130 @@ class ArchiveWorker:
             return False
         self._event("audit", f"archive_{kind}_requested", f"Archive {kind} requested", None)
         return True
+
+    # ------------------------------------------------------------------ return to service (0.3.9)
+    def _poll_return(self, scan: DriveScan) -> None:
+        p = self.control_dir / RETURN_REQUEST
+        try:
+            st = os.lstat(p)
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            log.warning("return request unreadable: %s", type(exc).__name__)
+            return
+        req: dict[str, Any] = {}
+        why = None
+        try:
+            if not stat.S_ISREG(st.st_mode) or st.st_size > RETURN_REQUEST_MAX_BYTES:
+                why = "not a small regular file"
+            else:
+                doc = json.loads(p.read_text("utf-8"))
+                req = doc if isinstance(doc, dict) else {}
+                age = time.time() - parse_iso_utc(str(req.get("written_utc")))
+                if not -REQUEST_MAX_AGE_S <= age <= REQUEST_MAX_AGE_S:
+                    why = f"written {age:.0f} s ago"
+        except (OSError, ValueError, TypeError) as exc:
+            why = f"unreadable ({type(exc).__name__})"
+        try:
+            p.unlink()
+        except OSError:
+            log.exception("could not remove the return request")
+            return
+        if why:
+            self._event("warning", "archive_return_request_ignored", "A request to return an archive drive to "
+                        "service was ignored", {"why": why})
+            ok, msg, detail = False, "The request was not carried out (it was too old or unreadable). Try again.", {}
+        else:
+            try:
+                ok, msg, detail = self._return_drive(req, scan)
+            except OSError as exc:
+                log.exception("return to service failed")
+                ok, msg, detail = (False, "The drive could not be returned to service because of a drive error. "
+                                   "Contact technical support.", {"error": f"{type(exc).__name__}: {exc}"})
+        out = {"request_id": req.get("request_id"), "ok": ok, "message": msg, "finished_utc": iso_utc(time.time()),
+               **detail}
+        try:
+            tmp = self.control_dir / (RETURN_RESULT + PARTIAL)
+            tmp.write_text(json.dumps(out, indent=2), "utf-8")
+            os.replace(tmp, self.control_dir / RETURN_RESULT)
+        except OSError:
+            log.exception("could not write the return result")
+        self._last_publish = float("-inf")
+
+    def _return_drive(self, req: dict[str, Any], scan: DriveScan) -> tuple[bool, str, dict[str, Any]]:
+        """Record the drive's copies as moved to the office and clear them from the drive (see the module
+        docstring). Returns (done, sentence for the operator, detail)."""
+        assert self.al is not None
+        fields = {k: str(req.get(k) or "").strip()[:200] for k in ("drive_uuid", "admin_id", "destination",
+                                                                     "copied_by", "copied_on")}
+        if not all(fields.values()) or req.get("checked") is not True:
+            return False, "The request is incomplete. Nothing was deleted.", {}
+        target = next((t for t in scan.candidates if t.identity.get("drive_uuid") == fields["drive_uuid"]), None)
+        if target is None:
+            return False, "That archive drive is not connected. Nothing was deleted.", {}
+        drive_id, root, label = target.drive_key, Path(target.root), target.label or "the archive drive"
+        copies = self.al.copies_on(drive_id)
+        bad = []
+        for c in copies:
+            try:
+                size = (root / c["path"]).stat().st_size
+            except FileNotFoundError:
+                size = None
+            if size != c["size_bytes"]:
+                bad.append(c["path"])
+        if bad:
+            self._event("warning", "archive_return_refused", "An archive drive was not returned to service: "
+                        "recordings recorded on it are missing or changed",
+                        {"drive_id": drive_id, "missing_or_changed": len(bad), "first": bad[:5]})
+            return False, (f"{len(bad)} recording(s) recorded on {label} are missing or changed, so it was not "
+                           "returned to service. Nothing was deleted. Contact technical support."), {"missing": len(bad)}
+        total = sum(int(c["size_bytes"]) for c in copies)
+        detail = {**fields, "checked": True, "label": target.label, "request_id": req.get("request_id"),
+                  "files": len(copies), "bytes": total}
+        changed = self.al.record_transfer(drive_id, [int(c["copy_id"]) for c in copies], detail) if copies else 0
+        deleted, failed = self._clear_drive(root, [c["path"] for c in copies])
+        self._full_drives.pop(drive_id, None)
+        if self.att is not None and self.att.drive_id == drive_id:
+            self.full = False
+            self.io.makedirs(root / layout.index_dir(self.camera_id))
+            self._write_index("returned")
+        self._event("audit" if not failed else "warning", "archive_drive_cleared",
+                    "Recordings moved to the office were deleted from the archive drive",
+                    {"drive_id": drive_id, "deleted": deleted, "not_deleted": failed[:20],
+                     "not_deleted_count": len(failed)})
+        gb = total / 1e9
+        msg = (f"{label} was returned to service: {changed} file(s) ({gb:.1f} GB) recorded as moved to "
+               f"{fields['destination']} and deleted from the drive.")
+        if failed:
+            msg += f" {len(failed)} file(s) could not be deleted; they stay on the drive."
+        return True, msg, {"files": changed, "bytes": total, "not_deleted": len(failed)}
+
+    def _clear_drive(self, root: Path, paths: list[str]) -> tuple[int, list[str]]:
+        """Delete the transferred copies, the index and playlists (they describe files no longer there) and
+        files set aside after a failed read-back; then empty folders. Nothing else is touched."""
+        cam = root / layout.ROOT / layout.safe(self.camera_id)
+        targets = [root / x for x in paths] + [root / x for x in self.index_names.values()]
+        targets.append(root / layout.chain_heads_path(self.camera_id))
+        if cam.is_dir():
+            targets += [p for p in cam.rglob("*") if p.is_file() and (
+                p.suffix == layout.PLAYLIST_SUFFIX or layout.SET_ASIDE_MARK in p.name)]
+        deleted, failed = 0, []
+        for p in targets:
+            try:
+                os.chmod(p, stat.S_IWRITE | stat.S_IREAD)    # copies are sealed read-only
+                p.unlink()
+                deleted += 1
+            except FileNotFoundError:
+                continue
+            except OSError:
+                failed.append(p.relative_to(root).as_posix())
+        if cam.is_dir():
+            for d in sorted((x for x in cam.rglob("*") if x.is_dir()), key=lambda x: len(x.parts), reverse=True):
+                try:
+                    d.rmdir()               # only empty folders
+                except OSError:
+                    pass
+        return deleted, failed
 
     # ------------------------------------------------------------------ swapped drive (persistent)
     def _set_swapped(self, drive_id: str | None, label: str | None = None) -> None:

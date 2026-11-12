@@ -6,6 +6,8 @@
     python -m sentinel.archive status --config <toml>
     python -m sentinel.archive designate   --config <toml> --drive <drive root> --admin-id <id>   (administrator)
     python -m sentinel.archive acknowledge --config <toml> --admin-id <id> [--problem N ...]       (administrator)
+    python -m sentinel.archive return --config <toml> --drive <root> --admin-id <id> --destination <text>
+        --copied-by <name> --copied-on YYYY-MM-DD --checked      (administrator; after the office copy)
     python -m sentinel.archive service-plan --config <toml> --host-command "<service host command line>"
         prints the Windows service installation commands (NOT EXECUTED; see sentinel.archive.hosting)
 
@@ -175,6 +177,88 @@ def _cmd_acknowledge(args: argparse.Namespace) -> int:
     return 0
 
 
+HEARTBEAT_STALE_S = 120.0
+
+
+def _cmd_return(args: argparse.Namespace) -> int:
+    """Return an archive drive to service after the office has copied it (0.3.9; see worker.py). The
+    running archive copier does the work between two files; this command asks it and waits."""
+    import datetime as dt
+    import os
+    import uuid
+
+    from ..clock import iso_utc
+    from ..drives.prepare import os_administrator_check
+    from .locator import read_marker
+    from .worker import CONTROL_DIR, RETURN_REQUEST, RETURN_RESULT
+
+    cfg = _load(args)
+    if cfg is None:
+        return 1
+    admin, _how = os_administrator_check()
+    if not admin:
+        print("Returning a drive to service needs an administrator. Nothing was deleted.", file=sys.stderr)
+        return 4
+    texts = {"destination": args.destination, "copied_by": args.copied_by, "admin_id": args.admin_id}
+    missing = [k for k, v in texts.items() if not (v or "").strip()]
+    if missing or not args.checked:
+        print("Say where the recordings were copied (--destination), who copied them (--copied-by) and confirm "
+              "that every file was checked at the office (--checked). Nothing was deleted.", file=sys.stderr)
+        return 1
+    try:
+        copied_on = dt.date.fromisoformat(args.copied_on)
+    except (TypeError, ValueError):
+        print("--copied-on must be a date like 2026-11-26. Nothing was deleted.", file=sys.stderr)
+        return 1
+    if copied_on > dt.date.today():
+        print("The copy date is in the future. Nothing was deleted.", file=sys.stderr)
+        return 1
+    marker = read_marker(Path(args.drive))
+    if not marker or marker.get("role") != "archive" or not marker.get("drive_uuid"):
+        print(f"{args.drive} is not a Sentinel archive drive. Nothing was deleted.", file=sys.stderr)
+        return 2
+    status_path = cfg.data_path / STATUS_FILE
+    doc = read_archive_status(status_path) or {}
+    if time.time() - float(doc.get("heartbeat_epoch") or 0) > HEARTBEAT_STALE_S:
+        print("Archive copying is not running, so the drive cannot be returned to service now. Nothing was "
+              "deleted. Contact technical support.", file=sys.stderr)
+        return 3
+    control = cfg.data_path / CONTROL_DIR
+    result = control / RETURN_RESULT
+    rid = str(uuid.uuid4())
+    req = {"written_utc": iso_utc(time.time()), "request_id": rid, "drive_uuid": str(marker["drive_uuid"]),
+           "admin_id": args.admin_id.strip(), "destination": args.destination.strip(),
+           "copied_by": args.copied_by.strip(), "copied_on": copied_on.isoformat(), "checked": True}
+    try:
+        control.mkdir(parents=True, exist_ok=True)
+        result.unlink(missing_ok=True)
+        tmp = control / (RETURN_REQUEST + ".partial")
+        tmp.write_text(json.dumps(req), "utf-8")
+        os.replace(tmp, control / RETURN_REQUEST)
+    except OSError as exc:
+        print(f"The request could not be made ({type(exc).__name__}). Open Sentinel as administrator and try "
+              "again. Nothing was deleted.", file=sys.stderr)
+        return 4
+    label = marker.get("label") or args.drive
+    print(f"Returning {label} to service. Copying finishes the file in progress first; do not unplug the drive.")
+    end = time.monotonic() + args.timeout
+    while time.monotonic() < end:
+        try:
+            out = json.loads(result.read_text("utf-8"))
+        except (OSError, ValueError):
+            time.sleep(0.5)
+            continue
+        if out.get("request_id") != rid:
+            time.sleep(0.5)
+            continue
+        result.unlink(missing_ok=True)
+        print(out.get("message", ""))
+        return 0 if out.get("ok") else 2
+    print("The archive copier has not answered yet. Do not unplug the drive; look at the Drives page in a few "
+          "minutes. If nothing changes, contact technical support.")
+    return 2
+
+
 def _cmd_service_plan(args: argparse.Namespace) -> int:
     cfg = _load(args)
     if cfg is None:
@@ -196,7 +280,7 @@ def _cmd_service_plan(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="python -m sentinel.archive", description="Sentinel archive-drive copy")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name in ("run", "swap", "resume", "status", "designate", "acknowledge", "service-plan"):
+    for name in ("run", "swap", "resume", "status", "designate", "acknowledge", "return", "service-plan"):
         p = sub.add_parser(name)
         p.add_argument("--config", required=True)
         if name == "swap":
@@ -211,12 +295,21 @@ def main(argv: list[str] | None = None) -> int:
             p.add_argument("--admin-id", required=True)
             p.add_argument("--problem", action="append", help="problem id (repeatable); omit to list")
             p.add_argument("--all", action="store_true")
+        if name == "return":
+            p.add_argument("--drive", required=True, help="root folder (letter) of the archive drive")
+            p.add_argument("--admin-id", required=True)
+            p.add_argument("--destination", required=True, help="where the office copied the recordings")
+            p.add_argument("--copied-by", required=True, help="who made the office copy")
+            p.add_argument("--copied-on", required=True, help="date of the office copy, YYYY-MM-DD")
+            p.add_argument("--checked", action="store_true",
+                           help="every file was checked against SHA256SUMS.txt at the office and matched")
+            p.add_argument("--timeout", type=float, default=1800.0)
         if name == "service-plan":
             p.add_argument("--host-command", default=None,
                            help="override; default: the Windows service host with --program archive")
     args = ap.parse_args(argv)
     return {"run": _cmd_run, "swap": _cmd_swap, "resume": _cmd_resume, "status": _cmd_status,
-            "designate": _cmd_designate, "acknowledge": _cmd_acknowledge,
+            "designate": _cmd_designate, "acknowledge": _cmd_acknowledge, "return": _cmd_return,
             "service-plan": _cmd_service_plan}[args.cmd](args)
 
 

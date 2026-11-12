@@ -147,12 +147,15 @@ _TABLE_KINDS = {"archive_copies": ("archive_copy_recorded", "archive_copy_update
                 "archive_problems": ("archive_problem_recorded", "archive_problem_updated"),
                 "archive_drive_sessions": ("drive_session_opened", "drive_session_closed"),
                 "retention_deletions": ("retention_decided", "retention_updated")}
-# table -> (columns that may go from NULL to a value once, {column: (from, to)} allowed transitions)
-_SET_ONCE_RULES: dict[str, tuple[frozenset[str], dict[str, tuple[Any, Any]]]] = {
-    "archive_copies": (frozenset({"lost_utc", "lost_reason"}), {"state": ("VERIFIED", "LOST")}),
+# table -> (columns that may go from NULL to a value once, {column: allowed (from, to) transitions})
+# archive_copies VERIFIED -> TRANSFERRED (0.3.9, "Return drive to service"): the copy was moved off the
+# archive drive to the office drive named in the audit event; lost_utc / lost_reason then say when and where.
+_SET_ONCE_RULES: dict[str, tuple[frozenset[str], dict[str, frozenset[tuple[Any, Any]]]]] = {
+    "archive_copies": (frozenset({"lost_utc", "lost_reason"}),
+                       {"state": frozenset({("VERIFIED", "LOST"), ("VERIFIED", "TRANSFERRED")})}),
     "archive_problems": (frozenset({"acknowledged_utc", "acknowledged_by"}), {}),
     "archive_drive_sessions": (frozenset({"gone_utc", "gone_how"}), {}),
-    "retention_deletions": (frozenset({"deleted_utc", "free_after"}), {"state": ("DELETING", "DONE")}),
+    "retention_deletions": (frozenset({"deleted_utc", "free_after"}), {"state": frozenset({("DELETING", "DONE")})}),
 }
 
 # table -> (primary key column, covered columns). Segments are covered once sealed (terminal state).
@@ -682,7 +685,7 @@ def illegal_changes(table: str, prev: dict[str, Any], cur: dict[str, Any]) -> li
             when = "after the segment was sealed"
         elif table in _SET_ONCE_RULES:
             once, transitions = _SET_ONCE_RULES[table]
-            if (f in once and a is None) or transitions.get(f) == (a, b):
+            if (f in once and a is None) or (a, b) in transitions.get(f, frozenset()):
                 continue
             when = "after it was recorded"
         elif table == "recording_gaps":

@@ -12,8 +12,9 @@ import getpass
 import json
 from typing import Any
 
-from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QGroupBox,
-                               QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QVBoxLayout)
+from PySide6.QtCore import QDate
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QDateEdit, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
+                               QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QVBoxLayout)
 
 from .. import textfmt as tf
 from ...archive.status import ST_REMOVE_MANUALLY, ST_SAFE, ST_SWAP_PENDING
@@ -142,6 +143,60 @@ class EraseDialog(QDialog):
         lay.addWidget(bb)
 
 
+class ReturnDialog(QDialog):
+    """Return an archive drive to service after the office copied it (0.3.9, owner request 2026-11-12):
+    where the recordings went, who copied them and when, and that the office checked every file."""
+
+    CHECK_TEXT = ("The office copied the whole drive and checked every file against SHA256SUMS.txt; "
+                  "all of them matched.")
+
+    def __init__(self, d: dict[str, Any], parent=None) -> None:  # noqa: ANN001
+        super().__init__(parent)
+        self.setWindowTitle("Return drive to service")
+        lay = QVBoxLayout(self)
+        label = d.get("label") or d.get("description", "")
+        warn = QLabel(f"<b>This deletes the recordings from {label}</b> so the drive can be used again. Sentinel "
+                      "records where the recordings were copied. Use it only after the office has copied this "
+                      "drive and checked the copy (office transfer checklist).")
+        warn.setWordWrap(True)
+        lay.addWidget(warn)
+        f = QFormLayout()
+        self.destination = QLineEdit()
+        self.destination.setPlaceholderText("e.g. Office archive drive 3")
+        f.addRow("Copied to", self.destination)
+        self.copied_by = QLineEdit()
+        f.addRow("Copied by", self.copied_by)
+        self.copied_on = QDateEdit(QDate.currentDate())
+        self.copied_on.setCalendarPopup(True)
+        self.copied_on.setDisplayFormat("yyyy-MM-dd")
+        self.copied_on.setMaximumDate(QDate.currentDate())
+        f.addRow("Date copied", self.copied_on)
+        self.who = QLineEdit(_who())
+        f.addRow("Your name or ID (recorded)", self.who)
+        lay.addLayout(f)
+        self.checked = QCheckBox(self.CHECK_TEXT)
+        lay.addWidget(self.checked)
+        lay.addWidget(muted("Recording is not affected. The drive keeps its name; copying to it starts again."))
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
+        self.ok = bb.addButton("Delete and return to service", QDialogButtonBox.ButtonRole.DestructiveRole)
+        self.ok.clicked.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+        for w in (self.destination, self.copied_by, self.who):
+            w.textChanged.connect(self._update)
+        self.checked.toggled.connect(self._update)
+        self._update()
+
+    def _update(self) -> None:
+        self.ok.setEnabled(all(w.text().strip() for w in (self.destination, self.copied_by, self.who))
+                           and self.checked.isChecked())
+
+    def args(self) -> list[str]:
+        return ["--admin-id", self.who.text().strip(), "--destination", self.destination.text().strip(),
+                "--copied-by", self.copied_by.text().strip(),
+                "--copied-on", self.copied_on.date().toString("yyyy-MM-dd"), "--checked"]
+
+
 class DrivesPage(Page):
     key = "drives"
     title = "Drives"
@@ -186,7 +241,10 @@ class DrivesPage(Page):
         self.erase_btn = icon_button("Erase and set up…", "erase", c)
         self.designate_btn = icon_button("Use as archive drive…", "drives", c)
         self.eject_btn = icon_button("Safely remove…", "eject", c)
-        for b in (self.refresh_btn, self.erase_btn, self.designate_btn, self.eject_btn):
+        self.return_btn = icon_button("Return to service…", "refresh", c)
+        self.return_btn.setToolTip("After the office has copied and checked a full archive drive: delete its "
+                                   "recordings and use it again")
+        for b in (self.refresh_btn, self.erase_btn, self.designate_btn, self.return_btn, self.eject_btn):
             row.addWidget(b)
         row.addStretch(1)
         bl.addLayout(row)
@@ -199,6 +257,7 @@ class DrivesPage(Page):
         self.erase_btn.clicked.connect(self._erase)
         self.designate_btn.clicked.connect(self._designate)
         self.eject_btn.clicked.connect(self._eject)
+        self.return_btn.clicked.connect(self._return)
         self.swap_btn.clicked.connect(self._swap)
         self.resume_btn.clicked.connect(self._resume)
         self.arc_status_btn.clicked.connect(lambda: self._arc("status"))
@@ -209,7 +268,7 @@ class DrivesPage(Page):
         # Swapping is an operator task (every few days): operators ask the archive copier through
         # its request folder; erasing, designating and removing drives stay administrator-only
         # (review 2026-11-10).
-        for b in (self.erase_btn, self.designate_btn, self.eject_btn):
+        for b in (self.erase_btn, self.designate_btn, self.return_btn, self.eject_btn):
             b.setEnabled(ctx.admin)
         operator_ok = ctx.admin or bool(ctx.cfg is not None and ctx.cfg.storage.status_dir)
         for b in (self.swap_btn, self.resume_btn):
@@ -383,6 +442,25 @@ class DrivesPage(Page):
         self.log.run(sentinel_argv("archive", "designate", "--config", self._cfg(), "--drive", letters[0],
                                    "--admin-id", who), f"Use {letters[0]} as archive drive",
                      busy=[self.designate_btn], on_done=lambda _c, _cmd: self.list.refresh())
+
+    def _return(self) -> None:
+        d = self._selected()
+        if d is None:
+            return
+        if d.get("class") != "READY" or d.get("role") != "archive":
+            self.problem("Select the archive drive that came back from the office (it shows as \"archive drive "
+                         "SENTINEL_…\" in the list).")
+            return
+        letters = _letters(d)
+        if not letters:
+            self.problem("This drive has no drive letter. Reconnect it and press Refresh list.")
+            return
+        dlg = ReturnDialog(d, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        self.log.run(sentinel_argv("archive", "return", "--config", self._cfg(), "--drive", letters[0], *dlg.args()),
+                     f"Return {d.get('label') or letters[0]} to service", busy=[self.return_btn],
+                     on_done=lambda _c, _cmd: self.list.refresh())
 
     def _eject(self) -> None:
         d = self._selected()

@@ -81,6 +81,16 @@ only for docks with a separate USB connection per bay, or two single-bay enclosu
 Recommended archive drives: separate external USB drives (SSDs for a laptop that is moved), each with its
 own USB connection (docs/09, "Recommended instead"; bench steps U.1-U.4).
 
+**Return to service (0.3.9, owner request 2026-11-12).** A full archive drive goes to the office, which
+copies it to its own storage and checks every file against `SHA256SUMS.txt` (docs/10_OFFICE_TRANSFER.md).
+Back on the laptop, an administrator (the agent) selects it and presses **Return to service…**, naming the
+office destination, who copied it and when, and confirming the check. The archive copier then, between two
+files: checks every recorded copy is still on the drive (else nothing happens), records the copies as
+TRANSFERRED (audit event `archive_drive_returned`, hash chain), and only then deletes them, the index and the
+playlists from the drive. The drive keeps its marker and label and is used again. Transferred recordings
+count as archived (not copied again, no A-006) and, for local retention, as copies that left the laptop.
+Erasing a drive that held recordings stays refused; this is the way to reuse one.
+
 ## 4. Automatic drive detection and one-button preparation
 
 On insertion the drive is **classified automatically** (UDisks2/udev: partition table, filesystem

@@ -127,6 +127,15 @@ sticks. Next trial: two 2 TB external SSDs. Before relying on them:
 | U.3 | With one SSD as archive drive: steps 5.4 to 5.6 (wait for the first full hour, folders, Swap with Safely Remove, playlists). | As in 5.4 to 5.6. | |
 | U.4 | Both SSDs plugged in (two USB ports): step 5.5a, then take out only the full one (Swap first). | The other SSD stays connected and copying carries on; no "removed without preparing". Only then use two drives at once. | |
 
+**Return to service (0.3.9).** Rehearse the office transfer (docs/10_OFFICE_TRANSFER.md) with an SSD that holds a few hours of copies:
+
+| # | Step | Expected | Result |
+|---|---|---|---|
+| R.1 | Swap the SSD out; on another PC copy everything to a new folder and run the check in docs/10 step 5. | Last line `N files checked, 0 problems`, N > 0. | |
+| R.2 | Rename one copied `.ts` in that folder and run the check again; rename it back. | A `PROBLEM` and a `NOT LISTED` line; then 0 problems again. | |
+| R.3 | Plug the SSD into the laptop; Drives › select it › **Return to service…**; fill in, tick, confirm. | Log: "SENTINEL_n was returned to service: N file(s) … deleted from the drive." The SSD holds only `SENTINEL_DRIVE.json`, `Sentinel/README_ARCHIVE.txt` and an empty index. No A-006; "Not yet archived" does not jump up. | |
+| R.4 | Leave it plugged in for an hour of recording. | New recordings are copied to it as usual. | |
+
 | # | Step | Expected | Result |
 |---|---|---|---|
 | 5.1 | Drives page › **Refresh list**; identify the archive drive **by serial number** (if the dock hides it: by model and size, with only that drive in the dock). | Only the external drive is offered; internal drives UNSUITABLE. | |

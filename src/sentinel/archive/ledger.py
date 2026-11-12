@@ -30,7 +30,10 @@ from .priority import normal_priority
 
 SEALED = ("FINALIZED", "INTERRUPTED", "CORRUPT")
 POLICY_THIS_DRIVE, POLICY_ANY_DRIVE = "this_drive", "any_drive"
-VERIFIED, LOST = "VERIFIED", "LOST"
+VERIFIED, LOST, TRANSFERRED = "VERIFIED", "LOST", "TRANSFERRED"
+# Copies that count as archived: on an archive drive (VERIFIED), or moved from it to the office drive
+# when the drive was returned to service (TRANSFERRED, 0.3.9; recorded with who, where and when).
+ARCHIVED_STATES = "('VERIFIED','TRANSFERRED')"
 # Problems that keep alert A-006 up until acknowledged. "set_aside" (one failed read-back, file kept
 # under a *.unverified-* name) is recorded and listed in the index but alerts only once it repeats
 # (verify_failed) — a single transient failure that is then copied successfully is not an alarm.
@@ -74,8 +77,8 @@ class ArchiveLedger:
     def _drive_clause(self, drive_id: str | None) -> tuple[str, tuple[Any, ...]]:
         """SQL fragment restricting archive_copies ``a`` to the drives that count under the policy."""
         if self.policy == POLICY_ANY_DRIVE or drive_id is None:
-            return " AND a.state='VERIFIED'", ()
-        return " AND a.state='VERIFIED' AND a.drive_id=?", (drive_id,)
+            return f" AND a.state IN {ARCHIVED_STATES}", ()
+        return f" AND a.state IN {ARCHIVED_STATES} AND a.drive_id=?", (drive_id,)
 
     def _pending_where(self, drive_id: str | None) -> tuple[str, tuple[Any, ...]]:
         dc, dp = self._drive_clause(drive_id)
@@ -108,10 +111,11 @@ class ArchiveLedger:
         marks = ",".join("?" for _ in kinds)
         if self.policy == POLICY_ANY_DRIVE:
             rows = self.ledger.query(f"SELECT 1 FROM archive_copies WHERE segment_id=? AND kind IN ({marks}) "
-                                     f"AND state='VERIFIED' LIMIT 1", (segment_id, *kinds))
+                                     f"AND state IN {ARCHIVED_STATES} LIMIT 1", (segment_id, *kinds))
         else:
             rows = self.ledger.query(f"SELECT 1 FROM archive_copies WHERE segment_id=? AND kind IN ({marks}) "
-                                     f"AND drive_id=? AND state='VERIFIED' LIMIT 1", (segment_id, *kinds, drive_id))
+                                     f"AND drive_id=? AND state IN {ARCHIVED_STATES} LIMIT 1",
+                                     (segment_id, *kinds, drive_id))
         return bool(rows)
 
     @retry_locked
@@ -288,6 +292,30 @@ class ArchiveLedger:
                                       {"copy_id": copy_id, "drive_id": row["drive_id"], "path": row["path"],
                                        "reason": reason, "segment_id": row["segment_id"],
                                        "removed_from_this_computer": bool(seg is not None and seg["local_deleted_utc"])}))
+
+    @retry_locked
+    def record_transfer(self, drive_id: str, copy_ids: list[int], detail: dict[str, Any]) -> int:
+        """"Return drive to service" (0.3.9): an administrator confirmed that the drive's recordings were
+        copied to an office drive and checked there. Every listed VERIFIED copy becomes TRANSFERRED (it
+        still counts as archived, at the place named) and one audit event records who, where and when.
+        Done BEFORE any file is deleted from the drive. Returns the number of copies changed."""
+        now = iso_utc(time.time())
+        where = f"transferred to {detail.get('destination')}"[:500]
+        changed = 0
+        with normal_priority(), self.ledger.tx() as c:
+            for cid in copy_ids:
+                row = c.execute("SELECT state, drive_id FROM archive_copies WHERE copy_id=?", (cid,)).fetchone()
+                if row is None or row["state"] != VERIFIED or row["drive_id"] != drive_id:
+                    continue
+                with self.ledger.chained(c, "archive_copies", [cid]):     # hash chain
+                    c.execute("UPDATE archive_copies SET state='TRANSFERRED', lost_utc=?, lost_reason=? "
+                              "WHERE copy_id=?", (now, where, cid))
+                changed += 1
+            self.ledger._event_in(c, _spec("audit", "archive_drive_returned",
+                                      "Archive drive returned to service: its recordings were moved to an office "
+                                      "drive", {**detail, "drive_id": drive_id, "copies": changed,
+                                                "copy_ids": copy_ids, "returned_utc": now}))
+        return changed
 
     @retry_locked
     def sync_sessions(self, present: set[str], keep_open: bool, swapped: str | None = None) -> None:

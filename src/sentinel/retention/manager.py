@@ -114,9 +114,12 @@ class RetentionManager:
         return {r["drive_id"] for r in rows}
 
     def _copies(self, c: Any, segment_id: str, kind: str, eligible: set[str] | None) -> list[dict[str, Any]]:
-        rows = c.execute("SELECT copy_id, drive_id, path, sha256 FROM archive_copies WHERE segment_id=? AND kind=? "
-                         "AND state='VERIFIED' ORDER BY copy_id", (segment_id, kind)).fetchall()
-        return [dict(r) for r in rows if eligible is None or r["drive_id"] in eligible]
+        # A TRANSFERRED copy (0.3.9) is on the office drive an administrator recorded when the archive
+        # drive was returned to service: it has left this computer whether or not that drive is inserted.
+        rows = c.execute("SELECT copy_id, drive_id, path, sha256, state FROM archive_copies WHERE segment_id=? "
+                         "AND kind=? AND state IN ('VERIFIED','TRANSFERRED') ORDER BY copy_id",
+                         (segment_id, kind)).fetchall()
+        return [dict(r) for r in rows if eligible is None or r["drive_id"] in eligible or r["state"] == "TRANSFERRED"]
 
     def _eligible(self, c: Any, seg: Any, eligible_drives: set[str] | None, now: float) -> tuple[bool, str, list[Any]]:
         if seg["state"] not in ("FINALIZED", "INTERRUPTED"):

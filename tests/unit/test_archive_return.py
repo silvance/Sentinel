@@ -1,0 +1,170 @@
+"""Return an archive drive to service (0.3.9, owner request 2026-11-12): the office copies a full archive drive
+to its own storage and checks it; an administrator then returns the drive to service on the laptop. The copies
+are recorded as TRANSFERRED (still archived, at the place named), only then deleted from the drive, and the
+drive is used again with its marker and label kept."""
+
+from __future__ import annotations
+
+import json
+import time
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from archive_helpers import drain, make_drive
+from conftest import make_config
+from sentinel.archive import layout
+from sentinel.archive import __main__ as arc_cli
+from sentinel.archive.io import ArchiveIO
+from sentinel.archive.ledger import ArchiveLedger
+from sentinel.archive.locator import DriveScan
+from sentinel.archive.worker import CONTROL_DIR, RETURN_REQUEST, RETURN_RESULT, ArchiveWorker
+from sentinel.clock import iso_utc
+from sentinel.db import Ledger
+from sentinel.ledgerchain import verify_ledger
+from sentinel.retention.manager import RetentionManager
+from tools.archive_bench import add_synthetic_run
+
+SEG = 200_000
+
+
+class OneBay:
+    def __init__(self, target: Any) -> None:
+        self.target = target
+
+    def scan(self) -> DriveScan:
+        return DriveScan([self.target] if Path(self.target.root).is_dir() else [])
+
+
+@pytest.fixture()
+def env(tmp_path: Path):  # noqa: ANN201
+    cfg = make_config(tmp_path, archive={
+        "enabled": True, "drive_path": str(tmp_path / "unused"), "require_drive_marker": False,
+        "reserve_free_mb": 0.0, "poll_interval_s": 0.05, "chunk_mib": 1, "fsync_every_mib": 2,
+        "max_rate_mb_s": 1000.0, "resume_policy": "this_drive"})
+    led = Ledger(cfg.data_path / "sentinel.db")
+    drive = make_drive(tmp_path, "A", marker=True)
+    w = ArchiveWorker(cfg, ledger=led, locator=OneBay(drive), io=ArchiveIO(read_chunk=1024 * 1024),
+                      allow_same_volume=True, lower_own_priority=False)
+    yield cfg, led, drive, w
+    led.close()
+
+
+def _request(cfg: Any, drive: Any, **over: Any) -> str:
+    req = {"written_utc": iso_utc(time.time()), "request_id": "r-1", "drive_uuid": drive.identity["drive_uuid"],
+           "admin_id": "tech1", "destination": "Office archive drive 3", "copied_by": "Clerk A",
+           "copied_on": "2026-11-26", "checked": True, **over}
+    d = cfg.data_path / CONTROL_DIR
+    d.mkdir(parents=True, exist_ok=True)
+    (d / RETURN_REQUEST).write_text(json.dumps(req), "utf-8")
+    return req["request_id"]
+
+
+def _result(cfg: Any) -> dict[str, Any]:
+    return json.loads((cfg.data_path / CONTROL_DIR / RETURN_RESULT).read_text("utf-8"))
+
+
+def _videos(root: Path) -> list[Path]:
+    return sorted(p for p in (root / layout.ROOT).rglob("*.ts"))
+
+
+def _states(led: Ledger) -> dict[str, int]:
+    return {r["state"]: r["n"] for r in led.query("SELECT state, COUNT(*) n FROM archive_copies GROUP BY state")}
+
+
+def test_a_returned_drive_is_recorded_cleared_and_used_again(env) -> None:  # noqa: ANN001
+    cfg, led, drive, w = env
+    add_synthetic_run(led, cfg, 3, SEG, sidecars=True)
+    drain(w)
+    root = Path(drive.root)
+    assert len(_videos(root)) == 3 and _states(led) == {"VERIFIED": 6}
+
+    _request(cfg, drive)
+    assert w.step() == "idle"                    # done between files; nothing to copy again afterwards
+    res = _result(cfg)
+    assert res["ok"] and res["request_id"] == "r-1" and res["files"] == 6, res
+    assert "Office archive drive 3" in res["message"]
+    assert _videos(root) == [] and not list((root / layout.ROOT).rglob("*.framehash.txt"))
+    assert (root / "SENTINEL_DRIVE.json").is_file()                   # marker (identity, label) kept
+    sums = root / layout.index_files("CAM01")["sums"]
+    assert sums.is_file() and sums.read_text("utf-8") == ""           # fresh index: nothing on the drive
+    assert _states(led) == {"TRANSFERRED": 6}
+    ev = led.query("SELECT detail FROM events WHERE code='archive_drive_returned'")
+    detail = json.loads(ev[0]["detail"])
+    assert detail["destination"] == "Office archive drive 3" and detail["copied_by"] == "Clerk A"
+    assert detail["admin_id"] == "tech1" and detail["checked"] is True and detail["copies"] == 6
+    al = ArchiveLedger(led, "CAM01", "this_drive")
+    assert al.backlog().segments == 0 and al.open_problems() == []    # still archived; no A-006
+    assert verify_ledger(cfg.data_path / "sentinel.db").ok            # the change is allowed by the chain
+
+    # Copying carries on to the same drive with new recordings only.
+    add_synthetic_run(led, cfg, 2, SEG)
+    drain(w)
+    assert len(_videos(root)) == 2 and _states(led) == {"TRANSFERRED": 6, "VERIFIED": 2}
+    w.step()                                     # detach/attach again: transferred copies are not "lost"
+    assert al.open_problems() == []
+
+
+def test_nothing_is_deleted_when_a_recording_is_missing_from_the_drive(env) -> None:  # noqa: ANN001
+    cfg, led, drive, w = env
+    add_synthetic_run(led, cfg, 2, SEG)
+    drain(w)
+    gone = _videos(Path(drive.root))[0]
+    gone.chmod(0o666)
+    gone.unlink()
+    _request(cfg, drive)
+    w.step()
+    res = _result(cfg)
+    assert not res["ok"] and "missing or changed" in res["message"] and "Nothing was deleted" in res["message"]
+    assert len(_videos(Path(drive.root))) == 1 and "TRANSFERRED" not in _states(led)
+
+
+@pytest.mark.parametrize("over", [{"checked": False}, {"destination": " "}, {"copied_by": ""},
+                                  {"drive_uuid": "00000000-0000-0000-0000-000000000000"},
+                                  {"written_utc": "2020-01-01T00:00:00.000Z"}])
+def test_an_incomplete_stale_or_wrong_request_deletes_nothing(env, over) -> None:  # noqa: ANN001
+    cfg, led, drive, w = env
+    add_synthetic_run(led, cfg, 2, SEG)
+    drain(w)
+    _request(cfg, drive, **over)
+    w.step()
+    assert not _result(cfg)["ok"]
+    assert len(_videos(Path(drive.root))) == 2 and _states(led) == {"VERIFIED": 2}
+    assert not (cfg.data_path / CONTROL_DIR / RETURN_REQUEST).exists()      # consumed, never retried
+
+
+def test_retention_counts_a_transferred_copy_as_off_this_computer(env) -> None:  # noqa: ANN001
+    cfg, led, drive, w = env
+    add_synthetic_run(led, cfg, 1, SEG)
+    drain(w)
+    seg = led.query("SELECT segment_id FROM segments")[0]["segment_id"]
+    rm = RetentionManager(cfg, led)
+    with led.tx() as c:
+        assert rm._copies(c, seg, "original", eligible=set()) == []          # drive still here: not eligible
+    _request(cfg, drive)
+    w.step()
+    with led.tx() as c:
+        got = rm._copies(c, seg, "original", eligible=set())
+    assert [x["state"] for x in got] == ["TRANSFERRED"]
+
+
+def test_the_command_refuses_without_administrator_or_confirmation(env, monkeypatch, tmp_path: Path,
+                                                                  capsys) -> None:  # noqa: ANN001
+    cfg, led, drive, w = env
+    monkeypatch.setattr(arc_cli, "_load", lambda _a: cfg)
+    base = ["return", "--config", "x.toml", "--drive", str(drive.root), "--admin-id", "tech1",
+            "--destination", "Office 3", "--copied-by", "Clerk A", "--copied-on", "2026-11-01"]
+    import sentinel.drives.prepare as prep
+
+    monkeypatch.setattr(prep, "os_administrator_check", lambda: (False, "test"))
+    assert arc_cli.main([*base, "--checked"]) == 4
+    monkeypatch.setattr(prep, "os_administrator_check", lambda: (True, "test"))
+    assert arc_cli.main(base) == 1                                           # not confirmed
+    assert arc_cli.main([*base[:-1], "2999-01-01", "--checked"]) == 1        # date in the future
+    assert arc_cli.main([*base, "--checked"]) == 3                           # copier not running
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert arc_cli.main([*base[:4], str(plain), *base[5:], "--checked"]) == 2   # not an archive drive
+    assert not (cfg.data_path / CONTROL_DIR / RETURN_REQUEST).exists()
+    assert "Nothing was deleted" in capsys.readouterr().err

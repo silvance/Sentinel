@@ -267,9 +267,9 @@ CREATE TABLE IF NOT EXISTS archive_copies (
     verify_method     TEXT NOT NULL,
     already_present   INTEGER NOT NULL DEFAULT 0,  -- 1: file found on the drive and re-verified, not copied
     verified_utc      TEXT NOT NULL,
-    state             TEXT NOT NULL DEFAULT 'VERIFIED',  -- VERIFIED | LOST
-    lost_utc          TEXT,
-    lost_reason       TEXT
+    state             TEXT NOT NULL DEFAULT 'VERIFIED',  -- VERIFIED | LOST | TRANSFERRED
+    lost_utc          TEXT,                   -- LOST: when found missing; TRANSFERRED: when returned to service
+    lost_reason       TEXT                    -- LOST: why; TRANSFERRED: where the office copy is
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ux_archive_copies_live ON archive_copies(segment_id, drive_id, kind)
     WHERE state='VERIFIED';
