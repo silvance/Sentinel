@@ -113,6 +113,20 @@ wait for the page to say what to do, use Windows' **Safely Remove Hardware** (wi
 dock it does no harm), take the drive out, insert the next one. Erasing and setting up a new drive is
 done the same way: take the archive drive out first, or set new drives up on another day.
 
+**Recommended instead: separate external USB drives (2026-11-11).** Each external drive has its own
+USB-SATA bridge, so taking one out affects only that drive, Safely Remove Hardware ejects only that
+drive, and Windows notices the removal at once. Most report their real serial number, so Sentinel can
+tell them apart by hardware and the erase confirmation uses the serial again. External SSDs suit a
+laptop that is moved (no moving parts); 2.5" portable hard drives are cheaper per TB. Not USB flash
+sticks. Next trial: two 2 TB external SSDs. Before relying on them:
+
+| # | Step | Expected | Result |
+|---|---|---|---|
+| U.1 | Plug in one SSD; Drives › **Refresh list**. | Shown as USB with a **real serial** in the Serial column (not zeros, not "hidden by the dock"). If it shows "hidden by the dock", it is used like the dock (one at a time). If the drive already holds files it is "contains other files": erasing needs an administrator and the serial's last characters; first make sure nothing on it is needed. A drive locked with BitLocker To Go or vendor encryption is not usable until that is removed. | |
+| U.2 | **Erase and set up…** that SSD; then the second one. | Each becomes SENTINEL_n, set up, ready; the label numbers continue from the dock drives. | |
+| U.3 | With one SSD as archive drive: steps 5.4 to 5.6 (wait for the first full hour, folders, Swap with Safely Remove, playlists). | As in 5.4 to 5.6. | |
+| U.4 | Both SSDs plugged in (two USB ports): step 5.5a, then take out only the full one (Swap first). | The other SSD stays connected and copying carries on; no "removed without preparing". Only then use two drives at once. | |
+
 | # | Step | Expected | Result |
 |---|---|---|---|
 | 5.1 | Drives page › **Refresh list**; identify the archive drive **by serial number** (if the dock hides it: by model and size, with only that drive in the dock). | Only the external drive is offered; internal drives UNSUITABLE. | |

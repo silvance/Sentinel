@@ -309,3 +309,10 @@ the number of files either. Instead:
   enclosures; it must not be used with the EC-HD2B. A considered alternative, not built: on a swap with
   two drives, finish the current file, flush and pause both, expect the dock to drop out (no A-003, the
   remaining drive's presence session kept open), and resume once the drives are back.
+* **Recommendation (2026-11-11): separate external USB drives instead of a multi-bay dock.** One USB-SATA
+  bridge per drive: removal affects only that drive and is reported to Windows at once, Safely Remove
+  ejects only that drive, and most such drives report their real serial (stronger identification before
+  erasing, no lookalike refusals). External SSDs for a laptop that is moved; 2.5" portable hard drives if
+  cost per TB matters; not USB flash sticks. Sentinel needs no change (drives are found by their marker).
+  The two-drive mode should work with two such drives on separate USB ports, but must be bench-tested
+  first (docs/09 U.1-U.4). Next trial: two 2 TB external SSDs the owner already has.

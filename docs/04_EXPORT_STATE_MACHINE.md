@@ -78,6 +78,8 @@ both bays until a disk is inserted again, so the drive left in it is cut off mid
 "removed without preparing". Keep **one archive drive at a time** in that dock and swap it the
 single-drive way (Swap, Safely Remove Hardware, take it out, insert the next). The two-drive mode is
 only for docks with a separate USB connection per bay, or two single-bay enclosures.
+Recommended archive drives: separate external USB drives (SSDs for a laptop that is moved), each with its
+own USB connection (docs/09, "Recommended instead"; bench steps U.1-U.4).
 
 ## 4. Automatic drive detection and one-button preparation
 
