@@ -278,9 +278,9 @@ def test_policy_defaults_and_validation() -> None:
                 {"allowed_bus_types": []}):
         with pytest.raises(DrivePolicyError):
             load_policy(bad)
-    assert load_policy({"erase_enabled": True, "approved_filesystem": "exfat"}).label_for(99) == "SENTINEL_99"
+    assert load_policy({"erase_enabled": True, "approved_filesystem": "exfat"}).label_for(99) == "SSD_99"
     with pytest.raises(DrivePolicyError):  # exFAT labels are limited to 11 characters
-        load_policy({"erase_enabled": True, "approved_filesystem": "exfat"}).label_for(100)
+        load_policy({"erase_enabled": True, "approved_filesystem": "exfat"}).label_for(10**8)
 
 
 def test_serial_normalisation_and_tail() -> None:

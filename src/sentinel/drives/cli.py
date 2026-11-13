@@ -6,6 +6,7 @@
                                         [--yes --serial-tail XXXX] [--dry-run]
     python -m sentinel.drives eject     --disk ID [--config FILE]
     python -m sentinel.drives snapshot  (raw read-only enumeration JSON, for support)
+    python -m sentinel.drives rename    --drive E: --name SSD_1 --config FILE [--who NAME]   (administrator)
 
 ``--disk`` is the Windows disk number or Linux kernel name shown by ``list``. It only *locates*
 the disk: the confirmation is bound to the disk's identity, which is re-checked before erasing.
@@ -292,6 +293,40 @@ def cmd_eject(env: _Env, args: argparse.Namespace) -> int:
     return EXIT_OK if res.ok else EXIT_FAILED
 
 
+def cmd_rename(env: _Env, args: argparse.Namespace) -> int:
+    """Give a Sentinel drive a new permanent name (administrator; sentinel.drives.rename)."""
+    from .prepare import os_administrator_check
+    from .rename import RenameRefused, rename_drive
+
+    if env.cfg is None:
+        print("rename needs --config (to know where Sentinel's records are kept).")
+        return EXIT_USAGE
+    ok, _how = os_administrator_check()
+    if not ok:
+        print("Renaming a drive needs an administrator. Nothing was changed.")
+        return EXIT_REFUSED
+    root = args.drive if args.drive.endswith(("\\", "/")) else args.drive + ("\\" if env.windows else "/")
+    key = Path(root).anchor.upper() if env.windows else str(Path(root))
+    others = [v.label or "" for d in env.enumerate() for v in d.volumes
+              if not any(Path(m).anchor.upper() == key for m in v.mount_paths)]
+    from ..db import Ledger
+
+    ledger = Ledger(env.cfg.data_path / "sentinel.db")
+    try:
+        detail = rename_drive(root, args.name, args.who or _default_who(), ledger, env.policy, other_labels=others)
+    except RenameRefused as exc:
+        print(str(exc))
+        return EXIT_REFUSED
+    except OSError as exc:
+        print(f"The drive could not be renamed: {exc}. Nothing else was changed.")
+        return EXIT_FAILED
+    finally:
+        ledger.close()
+    print(f"{detail['old_label']} is now called {detail['new_label']}. Write {detail['new_label']} on the drive's "
+          "label. Its recordings and records are unchanged; the rename is recorded.")
+    return EXIT_OK
+
+
 def cmd_snapshot(env: _Env, args: argparse.Namespace) -> int:
     if env.windows:
         from .windows_enum import capture_windows_snapshot
@@ -307,7 +342,7 @@ def cmd_snapshot(env: _Env, args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="python -m sentinel.drives", description="Sentinel drive tools (administrators)")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name in ("list", "classify", "prepare", "eject", "snapshot"):
+    for name in ("list", "classify", "prepare", "eject", "snapshot", "rename"):
         p = sub.add_parser(name)
         p.add_argument("--config", help="Sentinel TOML configuration (storage locations, [drives] policy)")
         if name in ("list", "classify"):
@@ -322,6 +357,10 @@ def build_parser() -> argparse.ArgumentParser:
             p.add_argument("--dry-run", action="store_true", help="print the elevated script; change nothing")
         if name == "eject":
             p.add_argument("--verbose", action="store_true")
+        if name == "rename":
+            p.add_argument("--drive", required=True, help="the drive's letter or folder, e.g. E:")
+            p.add_argument("--name", required=True, help="the new name, e.g. SSD_1")
+            p.add_argument("--who", help="name/ID of the person renaming the drive (recorded)")
     return ap
 
 
@@ -330,7 +369,7 @@ def main(argv: list[str] | None = None) -> int:
     env = _Env(args)
     try:
         return {"list": cmd_list, "classify": cmd_classify, "prepare": cmd_prepare, "eject": cmd_eject,
-                "snapshot": cmd_snapshot}[args.cmd](env, args)
+                "snapshot": cmd_snapshot, "rename": cmd_rename}[args.cmd](env, args)
     except DriveError as exc:
         print(f"{_alert_line(exc.code)}\n{exc}", file=sys.stderr)
         return EXIT_FAILED

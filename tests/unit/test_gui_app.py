@@ -981,3 +981,29 @@ def test_swap_with_the_copier_stopped_says_so_and_a_waiting_command_can_be_stopp
     log.current.kill()
     log.current.proc.waitForFinished(5000)
     w.close()
+
+
+def test_rename_is_for_administrators_and_runs_the_rename_command(app: QApplication, tmp_path: Path,
+                                                                  monkeypatch) -> None:  # noqa: ANN001
+    """Owner request 2026-11-12: drives carry a sticker with a permanent name such as SSD_1."""
+    from sentinel.gui.app import drive_pages
+
+    w = _window(app, tmp_path, admin=True)
+    page = w.pages["drives"]
+    assert page.rename_btn.isEnabled()
+    ran: list[list[str]] = []
+    monkeypatch.setattr(page.log, "run", lambda argv, *a, **k: ran.append(argv))
+    page._selected = lambda: {"class": "READY", "label": "SENTINEL_3", "volumes": [{"mount_paths": ["E:\\"]}]}
+    monkeypatch.setattr(drive_pages, "_letters", lambda _d: ["E:"])
+    monkeypatch.setattr(drive_pages.QInputDialog, "getText", lambda *a, **k: ("ssd_1", True))
+    page._rename()
+    assert ran and ran[0][-6:-2] == ["--drive", "E:", "--name", "SSD_1"]
+    shown: list[str] = []
+    page.problem = shown.append
+    page._selected = lambda: {"class": "BLANK"}
+    page._rename()
+    assert "Only a drive Sentinel has set up can be renamed" in shown[0]
+    w.close()
+    w2 = _window(app, tmp_path / "operator", admin=False)
+    assert not w2.pages["drives"].rename_btn.isEnabled()
+    w2.close()

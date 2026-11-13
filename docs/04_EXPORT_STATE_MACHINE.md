@@ -98,6 +98,14 @@ drive can be taken out with Safely remove…, and writes no swap request for a c
 stops waiting if the copier stops during a swap. The "still running" message names the command, and a
 command that only waits (swap) can be stopped there.
 
+**Drive names (0.3.11, owner decision 2026-11-12).** Drives are named `SSD_<n>` (`[drives] label_prefix`,
+`SENTINEL_` before), the permanent name on the drive's sticker; return to service keeps it. The number is one
+more than any used before in the set-up and rename records or on a connected drive. An administrator can rename
+a Sentinel drive in place (Drives › Rename…, `sentinel.drives rename`): the volume label and the marker's
+`label` change (old names kept in `previous_labels`), an audit event `drive_renamed` records old and new name;
+identity, recordings and records are unchanged. A name another drive holds (by the records, or on a connected
+volume) is refused. The archive index on the drive shows the new name from its next rewrite.
+
 ## 4. Automatic drive detection and one-button preparation
 
 On insertion the drive is **classified automatically** (UDisks2/udev: partition table, filesystem
@@ -145,7 +153,7 @@ type and label, mount state, size, SMART, whether it holds the OS or spool):
   was given is reused because it was never recorded as prepared. The helper also checks that the disk
   is empty (RAW) after clearing before it initialises it.
 * Action: GPT + one partition, approved filesystem (provisionally NTFS — risk C1), label
-  `SENTINEL_<n>`, then `SENTINEL_DRIVE.json` (`drive_uuid`, label, prepared_utc, operator/admin id),
+  `SSD_<n>` (`SENTINEL_<n>` before 0.3.11), then `SENTINEL_DRIVE.json` (`drive_uuid`, label, prepared_utc, operator/admin id),
   a write/read-back test file, and an `audit` event recording drive identity and who pressed it.
 * Optional "thorough check": full surface read test with progress (hours for 4 TB).
 

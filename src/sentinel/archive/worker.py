@@ -428,6 +428,12 @@ class ArchiveWorker:
                     self._detached(unexpected=True)
             if not self._attach(target):
                 return "unusable"
+        elif target.label and target.label != self.att.target.label:
+            # Renamed while attached (Drives › Rename…, 0.3.11): same drive, new name from now on.
+            log.info("archive drive renamed %s -> %s", self.att.target.label, target.label)
+            self.att.target = target
+            ExportLedger(self.ledger).upsert_drive(target)  # type: ignore[arg-type]
+            self._publish(force=True)
         assert self.att is not None and self.al is not None
         if self._swap.is_set():
             return self._do_swap()

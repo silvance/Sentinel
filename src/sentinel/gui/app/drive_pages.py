@@ -14,7 +14,8 @@ from typing import Any
 
 from PySide6.QtCore import QDate
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDateEdit, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
-                               QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QVBoxLayout)
+                               QGroupBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMessageBox, QPushButton,
+                               QVBoxLayout)
 
 from .. import textfmt as tf
 from ...archive.status import ST_REMOVE_MANUALLY, ST_SAFE, ST_SWAP_PENDING
@@ -244,7 +245,11 @@ class DrivesPage(Page):
         self.return_btn = icon_button("Return to service…", "refresh", c)
         self.return_btn.setToolTip("After the office has copied and checked a full archive drive: delete its "
                                    "recordings and use it again")
-        for b in (self.refresh_btn, self.erase_btn, self.designate_btn, self.return_btn, self.eject_btn):
+        self.rename_btn = icon_button("Rename…", "edit", c)
+        self.rename_btn.setToolTip("Give a Sentinel drive the permanent name on its sticker, e.g. SSD_1. "
+                                   "Its recordings stay; the rename is recorded.")
+        for b in (self.refresh_btn, self.erase_btn, self.designate_btn, self.return_btn, self.rename_btn,
+                  self.eject_btn):
             row.addWidget(b)
         row.addStretch(1)
         bl.addLayout(row)
@@ -258,6 +263,7 @@ class DrivesPage(Page):
         self.designate_btn.clicked.connect(self._designate)
         self.eject_btn.clicked.connect(self._eject)
         self.return_btn.clicked.connect(self._return)
+        self.rename_btn.clicked.connect(self._rename)
         self.swap_btn.clicked.connect(self._swap)
         self.resume_btn.clicked.connect(self._resume)
         self.arc_status_btn.clicked.connect(lambda: self._arc("status"))
@@ -268,7 +274,7 @@ class DrivesPage(Page):
         # Swapping is an operator task (every few days): operators ask the archive copier through
         # its request folder; erasing, designating and removing drives stay administrator-only
         # (review 2026-11-10).
-        for b in (self.erase_btn, self.designate_btn, self.return_btn, self.eject_btn):
+        for b in (self.erase_btn, self.designate_btn, self.return_btn, self.rename_btn, self.eject_btn):
             b.setEnabled(ctx.admin)
         operator_ok = ctx.admin or bool(ctx.cfg is not None and ctx.cfg.storage.status_dir)
         for b in (self.swap_btn, self.resume_btn):
@@ -459,7 +465,7 @@ class DrivesPage(Page):
             return
         if d.get("class") != "READY" or d.get("role") != "archive":
             self.problem("Select the archive drive that came back from the office (it shows as \"archive drive "
-                         "SENTINEL_…\" in the list).")
+                         "SSD_…\" in the list).")
             return
         letters = _letters(d)
         if not letters:
@@ -471,6 +477,31 @@ class DrivesPage(Page):
         self.log.run(sentinel_argv("archive", "return", "--config", self._cfg(), "--drive", letters[0], *dlg.args()),
                      f"Return {d.get('label') or letters[0]} to service", busy=[self.return_btn],
                      on_done=lambda _c, _cmd: self.list.refresh())
+
+    def _rename(self) -> None:
+        """Owner request 2026-11-12: each drive carries a sticker with a permanent name (SSD_1, SSD_2, …)."""
+        d = self._selected()
+        if d is None:
+            return
+        if d.get("class") != "READY":
+            self.problem("Only a drive Sentinel has set up can be renamed. Select it and press Erase and set up "
+                         "first; it is then named automatically (SSD_1, SSD_2, …).")
+            return
+        letters = _letters(d)
+        if not letters:
+            self.problem("This drive has no drive letter. Reconnect it and press Refresh list.")
+            return
+        old = d.get("label") or letters[0]
+        name, ok = QInputDialog.getText(
+            self, "Rename drive", f"New permanent name for {old} (letters, digits and _; for example SSD_1).\n\n"
+            "Write the same name on the drive's sticker. Its recordings stay; the rename is recorded.",
+            text=str(old))
+        name = (name or "").strip().upper()
+        if not ok or not name or name == str(old).upper():
+            return
+        self.log.run(sentinel_argv("drives", "rename", "--config", self._cfg(), "--drive", letters[0],
+                                   "--name", name, "--who", _who()),
+                     f"Rename {old} to {name}", busy=[self.rename_btn], on_done=lambda _c, _cmd: self.list.refresh())
 
     def _eject(self) -> None:
         d = self._selected()

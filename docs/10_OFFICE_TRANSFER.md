@@ -1,6 +1,6 @@
 # Office transfer: moving a full archive drive to office storage
 
-Sentinel 0.3.9. Two parts: the **office** copies the archive drive (an external SSD such as `SENTINEL_1`)
+Sentinel 0.3.9. Two parts: the **office** copies the archive drive (an external SSD such as `SSD_1`)
 to its larger drive and checks the copy; the **agent** then returns the SSD to service on the laptop, which
 records where the recordings went and empties the SSD. No Sentinel software is needed at the office.
 
@@ -12,9 +12,9 @@ and only after the copy has been checked. A Sentinel SSD reformatted elsewhere c
 1. **The SSD must have been taken out with "Swap archive drive"** on the laptop (so its index lists every
    file). If it was simply unplugged, plug it back into the laptop, wait a minute, press Swap archive drive,
    and take it out when the screen says so.
-2. Plug the SSD into the office computer. It shows as `SENTINEL_1` (or `_2`, …).
+2. Plug the SSD into the office computer. It shows as `SSD_1` (or `SSD_2`, …), the name on its sticker.
 3. On the office drive, make a new folder named after the SSD and today's date, for example
-   `D:\Sentinel transfers\SENTINEL_1_2026-11-26`. Use a new folder every time; never copy into an older one.
+   `D:\Sentinel transfers\SSD_1_2026-11-26`. Use a new folder every time; never copy into an older one.
 4. Open the SSD, select **everything** (Ctrl+A), copy it (Ctrl+C) and paste it into the new folder (Ctrl+V).
    Wait until Windows has finished.
 5. **Check the copy.** In the new folder, click the address bar, type `powershell` and press Enter. Paste
@@ -35,15 +35,26 @@ and only after the copy has been checked. A Sentinel SSD reformatted elsewhere c
 
 1. Plug the returned SSD in. (With the Sabrent dock: Swap archive drive first and take the drive in use
    out; only one drive at a time in that dock.)
-2. Drives page › **Refresh list**. Select the SSD (it shows as "archive drive SENTINEL_1").
+2. Drives page › **Refresh list**. Select the SSD (it shows as "archive drive SSD_1").
 3. Press **Return to service…** and fill in from the transfer sheet: where it was copied, who copied it, the
    date. Tick the box that the office checked every file and all matched. Press **Delete and return to service**.
    Windows asks for the administrator password.
-4. The log under the list says, for example: "SENTINEL_1 was returned to service: 1432 file(s) (1840.2 GB)
+4. The log under the list says, for example: "SSD_1 was returned to service: 1432 file(s) (1840.2 GB)
    recorded as moved to Office archive drive 3 and deleted from the drive." The SSD is then empty and is
    used for copying again; it keeps its name.
 
 If it says recordings are "missing or changed", nothing was deleted: contact technical support.
+
+## Drive names (0.3.11)
+
+Each archive SSD has a permanent name: `SSD_1`, `SSD_2`, … Write it on a sticker on the drive. The name
+stays through every office transfer and return to service. A new SSD gets the next free number when it is set
+up (Drives › **Erase and set up…**).
+
+To give a drive a different name (for example SSDs set up before 0.3.11 as `SENTINEL_3`, `SENTINEL_4`): plug it
+in, Drives › select it › **Rename…**, type the name (e.g. `SSD_1`) and confirm (administrator). Nothing on
+the drive is erased; its recordings, history and identity stay, and the rename is recorded. A name another
+drive already has is refused.
 
 ## What Sentinel records
 

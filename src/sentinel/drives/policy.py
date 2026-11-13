@@ -49,7 +49,9 @@ class DrivePolicy:
     foreign_data_authorization: str = "admin_only"
     allowed_bus_types: tuple[str, ...] = ("USB",)
     min_size_gb: float = 128.0
-    label_prefix: str = "SENTINEL_"
+    # Owner decision 2026-11-12: drives are named SSD_1, SSD_2, … (the name on the drive's sticker).
+    # SENTINEL_<n> was the earlier default; drives already named that way keep their names.
+    label_prefix: str = "SSD_"
     serial_confirm_chars: int = 4
 
     @property

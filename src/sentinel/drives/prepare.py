@@ -203,14 +203,17 @@ _LABEL_NUM = re.compile(r"^(?P<p>[A-Z][A-Z0-9_]*?)(?P<n>\d+)$")
 
 
 def next_label(policy: DrivePolicy, audit: AuditSink, disks: list[DiskInfo]) -> str:
-    """SENTINEL_<n>: one more than any number used before (ledger) or currently attached."""
+    """<prefix><n> (SSD_<n> by default): one more than any number used before (set-up and rename records)
+    or currently attached."""
     used: list[int] = []
-    for row in audit.query("SELECT detail FROM events WHERE category=? AND code='drive_prepared'", (AUDIT_CATEGORY,)):
+    for row in audit.query("SELECT detail FROM events WHERE category=? AND code IN ('drive_prepared', "
+                           "'drive_renamed')", (AUDIT_CATEGORY,)):
         try:
-            label = json.loads(row[0] or "{}").get("label", "")
+            d = json.loads(row[0] or "{}")
         except ValueError:
             continue
-        used.append(_label_number(policy, label))
+        for key in ("label", "new_label"):
+            used.append(_label_number(policy, str(d.get(key) or "")))
     for d in disks:
         for v in d.volumes:
             used.append(_label_number(policy, v.label or ""))

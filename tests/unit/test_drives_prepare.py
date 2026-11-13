@@ -61,7 +61,7 @@ def _ctx(ledger: Ledger, enum: Sequence, runner: FakeRunner, root: Path, *, poli
          inspector=None) -> PrepareContext:
     def insp(v):
         # The 'prepared' volume is backed by a real temporary directory; others use the fake.
-        if v.label and v.label.startswith("SENTINEL_"):
+        if v.label and v.label.startswith("SSD_"):
             return inspect_root(root)
         return (inspector or FakeInspector())(v)
 
@@ -80,7 +80,7 @@ def _events(ledger: Ledger, code: str) -> list[dict]:
 
 
 def _success_world(d, root: Path):
-    after = prepared_disk_like(d, "SENTINEL_1")
+    after = prepared_disk_like(d, "SSD_1")
     enum = Sequence([d, SYS], [d, SYS])
     runner = FakeRunner(OK, on_run=lambda plan: enum.snapshots.append([after, SYS]) or
                         setattr(enum, "calls", len(enum.snapshots) - 1))
@@ -95,17 +95,17 @@ def test_blank_drive_prepared_end_to_end(ledger: Ledger, tmp_path: Path) -> None
     root = tmp_path / "vol"
     enum, runner = _success_world(d, root)
     res = prepare_drive(_ctx(ledger, enum, runner, root), d.disk_id, _conf(d), OPERATOR)
-    assert res.label == "SENTINEL_1" and res.filesystem == "ntfs" and res.previous_class == "BLANK"
+    assert res.label == "SSD_1" and res.filesystem == "ntfs" and res.previous_class == "BLANK"
     assert len(runner.plans) == 1 and runner.plans[0].identity == d.identity
     marker = json.loads((root / MARKER_NAME).read_text(encoding="utf-8"))
     assert marker["drive_uuid"] == res.drive_uuid and marker["prepared_by"] == "operator7"
-    assert marker["label"] == "SENTINEL_1" and marker["write_test"]["bytes"] == 1024 * 1024
+    assert marker["label"] == "SSD_1" and marker["write_test"]["bytes"] == 1024 * 1024
     assert not (root / "SENTINEL_WRITE_TEST.bin").exists()
     done = _events(ledger, "drive_prepared")
     assert len(done) == 1 and done[0]["who"] == "operator7" and done[0]["disk"]["serial"] == d.serial
     assert len(_events(ledger, "drive_prepare_authorized")) == 1
     assert ledger.query("SELECT severity, category FROM events WHERE code='drive_prepared'")[0][:] == ("audit", "drives")
-    assert next_label(DrivePolicy(erase_enabled=True), ledger, []) == "SENTINEL_2"
+    assert next_label(DrivePolicy(erase_enabled=True), ledger, []) == "SSD_2"
 
 
 def test_wrong_format_needs_single_confirmation_only(ledger: Ledger, tmp_path: Path) -> None:
@@ -169,9 +169,9 @@ def test_spool_disk_refused_by_identity(ledger: Ledger, tmp_path: Path) -> None:
 
 
 def test_ready_drive_refused(ledger: Ledger, tmp_path: Path) -> None:
-    d = prepared_disk_like(blank_disk(), "SENTINEL_4")
+    d = prepared_disk_like(blank_disk(), "SSD_4")
     marker = {"format": "sentinel-drive", "version": 1, "drive_uuid": "0b0e5f0a-1c2d-4e3f-8a9b-0c1d2e3f4a5b",
-              "label": "SENTINEL_4", "prepared_utc": "x", "prepared_by": "y"}
+              "label": "SSD_4", "prepared_utc": "x", "prepared_by": "y"}
     insp = FakeInspector({d.volumes[0].volume_id: RootContents(readable=True, entries=(MARKER_NAME,), marker=marker)})
     runner = FakeRunner(OK)
     ctx = PrepareContext(policy=DrivePolicy(erase_enabled=True), protected=protected_for(), enumerate=Sequence([d, SYS]), runner=runner,
@@ -295,7 +295,7 @@ def test_linux_flow_mounts_then_writes_marker(ledger: Ledger, tmp_path: Path) ->
 
     d = replace(blank_disk(), platform="linux", disk_id="sdb", device_path="/dev/sdb", os_devices=("8:16",))
     sysd = replace(system_disk(), platform="linux", disk_id="nvme0n1", os_devices=("259:0", "252:0"))
-    after = prepared_disk_like(d, "SENTINEL_1")
+    after = prepared_disk_like(d, "SSD_1")
     root = tmp_path / "media"
     root.mkdir()
     mounted = replace(after, partitions=tuple(
@@ -321,17 +321,17 @@ def test_linux_flow_mounts_then_writes_marker(ledger: Ledger, tmp_path: Path) ->
                          settle_s=0.0)
     conf = Confirmation(d.disk_id, d.identity.fingerprint(), DriveClass.BLANK)
     res = prepare_drive(ctx, d.disk_id, conf, OPERATOR)
-    assert mounts and (root / MARKER_NAME).exists() and res.label == "SENTINEL_1"
+    assert mounts and (root / MARKER_NAME).exists() and res.label == "SSD_1"
 
 
 def test_existing_marker_is_never_overwritten(tmp_path: Path) -> None:
     from sentinel.drives.marker import write_marker
 
     m = {"format": "sentinel-drive", "version": 1, "drive_uuid": "0b0e5f0a-1c2d-4e3f-8a9b-0c1d2e3f4a5b",
-         "label": "SENTINEL_1", "prepared_utc": "x", "prepared_by": "y"}
+         "label": "SSD_1", "prepared_utc": "x", "prepared_by": "y"}
     write_marker(tmp_path, m)
     with pytest.raises(FileExistsError):
-        write_marker(tmp_path, {**m, "label": "SENTINEL_2"})
+        write_marker(tmp_path, {**m, "label": "SSD_2"})
 
 
 def test_write_read_back_test_bypasses_cache_on_this_host(tmp_path: Path) -> None:
@@ -352,18 +352,18 @@ DOCK = "000000000000000000"   # Sabrent EC-HD2B: the same placeholder serial for
 
 
 def _dock_world(ledger: Ledger, tmp_path: Path, helper_guid: str | None):
-    """Disk 4: archive drive SENTINEL_1. Disk 3: same model and size in the other bay, left with an empty
-    volume labelled SENTINEL_3 by a setup that did not finish (as on the laptop)."""
+    """Disk 4: archive drive SSD_1. Disk 3: same model and size in the other bay, left with an empty
+    volume labelled SSD_3 by a setup that did not finish (as on the laptop)."""
     same = {"serial": DOCK, "unique_id": None, "model": "Dual SATA Bridge", "size": 2 * TB}
-    old_vol = vol("1a1a1a1a-0000-0000-0000-000000000001", label="SENTINEL_1", letter="E")
+    old_vol = vol("1a1a1a1a-0000-0000-0000-000000000001", label="SSD_1", letter="E")
     archive = usb_disk(disk_id="4", disk_guid="41414141-0000-0000-0000-000000000000",
                        partitions=(msr_part(), data_part(2, old_vol, guid="41414141-0000-0000-0000-000000000002")),
                        **same)
-    left_vol = vol("3c3c3c3c-0000-0000-0000-000000000001", label="SENTINEL_3", letter="F")
+    left_vol = vol("3c3c3c3c-0000-0000-0000-000000000001", label="SSD_3", letter="F")
     target = usb_disk(disk_id="3", disk_guid="31313131-0000-0000-0000-000000000000",
                       partitions=(msr_part(), data_part(2, left_vol, guid="31313131-0000-0000-0000-000000000002")),
                       **same)
-    new_vol = vol("5e5e5e5e-0000-0000-0000-000000000001", label="SENTINEL_2", letter="F")
+    new_vol = vol("5e5e5e5e-0000-0000-0000-000000000001", label="SSD_2", letter="F")
     after = replace(target, disk_guid="32323232-0000-0000-0000-000000000000",
                     partitions=(msr_part(), data_part(2, new_vol, guid="32323232-0000-0000-0000-000000000002")))
     roots = {old_vol.volume_id: tmp_path / "old", left_vol.volume_id: tmp_path / "left",
@@ -391,9 +391,9 @@ def test_second_bay_of_a_dock_is_found_again_by_its_new_partition(ledger: Ledger
     assert target.identity.same_device(archive.identity)   # the dock makes both bays look the same
     assert conf.drive_class is DriveClass.BLANK            # empty volume left by the failed setup
     res = prepare_drive(ctx, "3", conf, OPERATOR)
-    # SENTINEL_3 was only on the disk being erased (never recorded as prepared): the next number is 2.
-    assert res.label == "SENTINEL_2" and res.disk_id == "3"
-    assert json.loads((new_root / MARKER_NAME).read_text(encoding="utf-8"))["label"] == "SENTINEL_2"
+    # SSD_3 was only on the disk being erased (never recorded as prepared): the next number is 2.
+    assert res.label == "SSD_2" and res.disk_id == "3"
+    assert json.loads((new_root / MARKER_NAME).read_text(encoding="utf-8"))["label"] == "SSD_2"
     assert not (tmp_path / "old" / MARKER_NAME).exists()
     assert len(_events(ledger, "drive_prepared")) == 1
 

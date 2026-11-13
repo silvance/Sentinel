@@ -168,3 +168,17 @@ def test_the_command_refuses_without_administrator_or_confirmation(env, monkeypa
     assert arc_cli.main([*base[:4], str(plain), *base[5:], "--checked"]) == 2   # not an archive drive
     assert not (cfg.data_path / CONTROL_DIR / RETURN_REQUEST).exists()
     assert "Nothing was deleted" in capsys.readouterr().err
+
+
+def test_a_drive_renamed_while_attached_is_shown_by_its_new_name(env) -> None:  # noqa: ANN001
+    """0.3.11: Drives › Rename… while the drive is in use: same drive (same key), new name at once."""
+    from sentinel.export.target import ExportTarget
+
+    cfg, led, drive, w = env
+    w.step()
+    assert w.att is not None and w.att.target.label == "ARCHIVE_A"
+    renamed = ExportTarget(drive.root, dict(drive.identity, label="SSD_1"))
+    w.locator = OneBay(renamed)
+    w.step()
+    assert w.att.drive_id == renamed.drive_key and w.att.target.label == "SSD_1"
+    assert led.query("SELECT label FROM drives WHERE drive_id=?", (renamed.drive_key,))[0][0] == "SSD_1"

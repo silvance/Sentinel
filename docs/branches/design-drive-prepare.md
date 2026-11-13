@@ -56,7 +56,7 @@ Design choices (all mine, all reversible by configuration or small code changes)
   Drives without serial and UniqueId are UNSUITABLE.
 * **Drive letter after formatting** (`Add-PartitionAccessPath -AssignDriveLetter`). This way Explorer
   cannot pop up "You need to format the disk" in the middle of the setup.
-* **Label** is `SENTINEL_<n>`, validated against filesystem label limits.
+* **Label** is `SSD_<n>` (`[drives] label_prefix`; `SENTINEL_<n>` before 0.3.11), validated against filesystem label limits.
 * **Administrator** (interim answer to D4): the OS account is in BUILTIN\Administrators
   (S-1-5-32-544, also when UAC-filtered) and `--admin` was given. On Linux: root or group `sentinel-admin`.
 * **Alert prefix `M-`** ("media"), because `D-` is already the recording database. M-001 empty, M-002

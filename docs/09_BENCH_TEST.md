@@ -123,7 +123,7 @@ sticks. Next trial: two 2 TB external SSDs. Before relying on them:
 | # | Step | Expected | Result |
 |---|---|---|---|
 | U.1 | Plug in one SSD; Drives › **Refresh list**. | Shown as USB with a **real serial** in the Serial column (not zeros, not "hidden by the dock"). If it shows "hidden by the dock", it is used like the dock (one at a time). If the drive already holds files it is "contains other files": erasing needs an administrator and the serial's last characters; first make sure nothing on it is needed. A drive locked with BitLocker To Go or vendor encryption is not usable until that is removed. | |
-| U.2 | **Erase and set up…** that SSD; then the second one. | Each becomes SENTINEL_n, set up, ready; the label numbers continue from the dock drives. | |
+| U.2 | **Erase and set up…** that SSD; then the second one. | Each becomes SSD_n (from 0.3.11; SENTINEL_n before), set up, ready. Write the name on a sticker on the drive. | |
 | U.3 | With one SSD as archive drive: steps 5.4 to 5.6 (wait for the first full hour, folders, Swap with Safely Remove, playlists). | As in 5.4 to 5.6. | |
 | U.4 | Both SSDs plugged in (two USB ports): step 5.5a, then take out only the full one (Swap first). | The other SSD stays connected and copying carries on; no "removed without preparing". Only then use two drives at once. | |
 
@@ -133,7 +133,7 @@ sticks. Next trial: two 2 TB external SSDs. Before relying on them:
 |---|---|---|---|
 | R.1 | Swap the SSD out; on another PC copy everything to a new folder and run the check in docs/10 step 5. | Last line `N files checked, 0 problems`, N > 0. | |
 | R.2 | Rename one copied `.ts` in that folder and run the check again; rename it back. | A `PROBLEM` and a `NOT LISTED` line; then 0 problems again. | |
-| R.3 | Plug the SSD into the laptop; Drives › select it › **Return to service…**; fill in, tick, confirm. | Log: "SENTINEL_n was returned to service: N file(s) … deleted from the drive." The SSD holds only `SENTINEL_DRIVE.json`, `Sentinel/README_ARCHIVE.txt` and an empty index. No A-006; "Not yet archived" does not jump up. | |
+| R.3 | Plug the SSD into the laptop; Drives › select it › **Return to service…**; fill in, tick, confirm. | Log: "SSD_n was returned to service: N file(s) … deleted from the drive." The SSD holds only `SENTINEL_DRIVE.json`, `Sentinel/README_ARCHIVE.txt` and an empty index. No A-006; "Not yet archived" does not jump up. | |
 | R.4 | Leave it plugged in for an hour of recording. | New recordings are copied to it as usual. | |
 
 | # | Step | Expected | Result |
