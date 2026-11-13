@@ -13,6 +13,8 @@ race for the instance lock, and the one in the user session would stop at log-of
   configuration-problem code) gives C-001; any other stop gives C-003. The operator screen still
   shows what the service itself wrote into ``status.json``.
 * ``stop``: ControlService(STOP); the service host stops the recorder gracefully.
+* ``start_archive`` / ``stop_archive`` / ``restart_archive``: the same for ``SentinelArchive``, which reads
+  its settings once at start and is not restarted by Windows after a clean stop.
 * If the SCM cannot be asked at all, the provider fails closed: a control that never starts a
   recorder and reports C-003, rather than guessing that no service exists.
 
@@ -35,6 +37,7 @@ from . import SERVICE_NAME
 log = logging.getLogger(__name__)
 
 EXIT_CONFIG = 2   # sentinel.service.EXIT_CONFIG (configuration / startup problem)
+ARCHIVE_SERVICE_NAME = "SentinelArchive"   # sentinel.winsvc.commands.ARCHIVE_SERVICE_NAME (unit test)
 
 
 @dataclass
@@ -59,18 +62,23 @@ class ServiceControl:
 
     def __init__(self, api: ScmCalls | None = None, service_name: str = SERVICE_NAME,
                  clock: Callable[[], float] = time.monotonic, sleep: Callable[[float], None] = time.sleep,
-                 query_error: str | None = None) -> None:
+                 query_error: str | None = None, archive_enabled: bool | None = None,
+                 archive_service_name: str = ARCHIVE_SERVICE_NAME) -> None:
         self.api = api or real_calls()
         self.service_name = service_name
         self._clock = clock
         self._sleep = sleep
         self.query_error = query_error      # set when the provider could not ask the SCM
+        # [archive] enabled in the configuration (None = not known: act on the service if it is installed).
+        self.archive_enabled = archive_enabled
+        self.archive_service_name = archive_service_name
 
-    def _state(self) -> int | None:
+    def _state(self, name: str | None = None) -> int | None:
+        name = name or self.service_name
         try:
-            info = self.api.query(self.service_name)
+            info = self.api.query(name)
         except OSError as exc:
-            log.error("cannot query the %s service: %s", self.service_name, exc)
+            log.error("cannot query the %s service: %s", name, exc)
             return None
         return None if info is None else int(info.state)
 
@@ -122,6 +130,52 @@ class ServiceControl:
                 return False
             self._sleep(0.5)
 
+    # ---- the archive-drive copy service (review 2026-11-12: nothing started it again after a clean stop)
+    def start_archive(self) -> bool:
+        """Start ``SentinelArchive`` when ``[archive] enabled``, it is installed and it is not running.
+        Best effort (standard users may not start services: access denied is logged, not raised); the
+        status shows A-007 while archive copying is not running. True when a start was accepted."""
+        from .scm import ERROR_SERVICE_ALREADY_RUNNING, SERVICE_RUNNING, SERVICE_START_PENDING
+
+        if self.archive_enabled is False or self.query_error is not None:
+            return False
+        state = self._state(self.archive_service_name)
+        if state is None or state in (SERVICE_RUNNING, SERVICE_START_PENDING):
+            return False
+        err = self.api.start(self.archive_service_name)
+        if err not in (0, ERROR_SERVICE_ALREADY_RUNNING):
+            log.warning("could not start the %s service (Windows error %d)", self.archive_service_name, err)
+            return False
+        log.info("%s service start requested", self.archive_service_name)
+        return err == 0
+
+    def stop_archive(self, timeout_s: float = 180.0) -> bool:
+        """Stop ``SentinelArchive`` (it is built to survive a stop mid-copy). True once it is stopped or
+        when it is not installed."""
+        from .scm import ERROR_SERVICE_NOT_ACTIVE, SERVICE_STOPPED
+
+        state = self._state(self.archive_service_name)
+        if state is None or state == SERVICE_STOPPED:
+            return True
+        err = self.api.stop(self.archive_service_name)
+        if err not in (0, ERROR_SERVICE_NOT_ACTIVE):
+            log.warning("could not stop the %s service (Windows error %d)", self.archive_service_name, err)
+            return False
+        end = self._clock() + timeout_s
+        while self._state(self.archive_service_name) not in (SERVICE_STOPPED, None):
+            if self._clock() >= end:
+                log.warning("the %s service did not stop within %.0f s", self.archive_service_name, timeout_s)
+                return False
+            self._sleep(0.5)
+        return True
+
+    def restart_archive(self, timeout_s: float = 180.0) -> bool:
+        """Stop and start ``SentinelArchive`` so it reads the saved settings again (it reads them once, at
+        start). Call after a settings save, together with the recorder restart. True when it was started."""
+        if not self.stop_archive(timeout_s):
+            return False
+        return self.start_archive()
+
 
 def service_control_provider(config_path: Path, cfg: Any, api: ScmCalls | None = None,
                              platform: str | None = None) -> ServiceControl | None:
@@ -136,4 +190,5 @@ def service_control_provider(config_path: Path, cfg: Any, api: ScmCalls | None =
         return ServiceControl(api, query_error=str(exc))
     if info is None:
         return None
-    return ServiceControl(calls)
+    archive = getattr(cfg, "archive", None)
+    return ServiceControl(calls, archive_enabled=None if archive is None else bool(getattr(archive, "enabled", False)))

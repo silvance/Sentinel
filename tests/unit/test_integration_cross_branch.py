@@ -40,6 +40,8 @@ class FakeScm:
         return wctl.ScmCalls(self.query, self.start, self.stop)
 
     def query(self, name: str) -> Info | None:
+        if name == wctl.ARCHIVE_SERVICE_NAME:
+            return None                              # the archive-drive copy service is not installed here
         assert name == SERVICE_NAME
         if self.query_raises:
             raise OSError(5, "access denied")

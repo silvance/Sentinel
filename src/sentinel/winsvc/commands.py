@@ -244,6 +244,30 @@ class InstallInputs:
     # Owner request 2026-11-10: an unattended laptop must not go to sleep (sentinel.power). False only
     # with ``install --keep-power-settings``.
     power_settings: bool = True
+    # Review 2026-11-12 (repair): services already registered on this computer. Their registration is
+    # updated in place (``sc config``) and every permission step runs again; the recorder keeps
+    # recording. Empty = a fresh installation.
+    existing: frozenset[str] = frozenset()
+
+
+def _registration_step(name: str, inp: InstallInputs, host: HostCommand, start_type: str, account: str,
+                       display: str, what: str) -> Step:
+    """``sc create`` for a new service; ``sc config`` with the same values for one already registered
+    (install / repair on an installed computer)."""
+    values = ("binPath=", host.command_line, "start=", start_type, "obj=", account, "DisplayName=", display)
+    if name in inp.existing:
+        return Step(f"Update the registration of {what} {name} (already installed: repaired in place; "
+                    "a running service keeps running)", ("sc.exe", "config", name, *values))
+    return Step(f"Register {what} {name} ({'delayed ' if start_type == 'delayed-auto' else ''}automatic start "
+                f"at boot, virtual account {account})", ("sc.exe", "create", name, *values))
+
+
+def _start_steps(name: str, inp: InstallInputs, description: str) -> list[Step]:
+    if name in inp.existing:
+        # Repair: start it only if it is not running (sc start would fail with 1056 on a running service).
+        return [Step(f"{description} (if it is not running)", action="ensure_running",
+                     params={"service": name, "timeout_s": 30})]
+    return [Step(description, ("sc.exe", "start", name))]
 
 
 def install_plan(inp: InstallInputs, forbidden: Iterable[str] | None = None) -> list[Step]:
@@ -264,10 +288,19 @@ def install_plan(inp: InstallInputs, forbidden: Iterable[str] | None = None) -> 
     if inp.status_readers not in ("group", "users"):
         raise PlanError("status readers must be 'group' or 'users'")
 
-    steps = [
-        Step(f"Register the service {name} (automatic start at boot, virtual account {account})",
-             ("sc.exe", "create", name, "binPath=", inp.host.command_line, "start=", "auto",
-              "obj=", account, "DisplayName=", DISPLAY_NAME)),
+    steps: list[Step] = []
+    if inp.archive_host is not None and ARCHIVE_SERVICE_NAME in inp.existing and inp.start:
+        # Repair: the folder steps below replace the ACLs the archive copy uses and add its grants back
+        # afterwards. Stop it meanwhile (it is built to survive a stop mid-copy) and start it again at the
+        # end, which also applies changed settings. The recorder is not stopped.
+        steps += [
+            Step("Pause the archive-drive copy during the repair (started again at the end)",
+                 ("sc.exe", "stop", ARCHIVE_SERVICE_NAME), may_fail=True),
+            Step("Wait until it has paused (up to 3 minutes)", action="wait_stopped",
+                 params={"service": ARCHIVE_SERVICE_NAME, "timeout_s": 180}, may_fail=True),
+        ]
+    steps += [
+        _registration_step(name, inp, inp.host, "auto", account, DISPLAY_NAME, "the service"),
         Step("Describe the service", ("sc.exe", "description", name, DESCRIPTION)),
         Step("Restart after every failure, forever (5 s, 30 s, then every 60 s)",
              ("sc.exe", "failure", name, "reset=", str(FAILURE_RESET_S), "actions=", FAILURE_ACTIONS)),
@@ -340,9 +373,9 @@ def install_plan(inp: InstallInputs, forbidden: Iterable[str] | None = None) -> 
 
         steps += [Step(f"Power: {d}", argv, may_fail=mf) for d, argv, mf in power_setting_commands()]
     if inp.start:
-        steps.append(Step("Start the service now", ("sc.exe", "start", name)))
+        steps += _start_steps(name, inp, "Start the service now")
         if inp.archive_host is not None:
-            steps.append(Step("Start the archive-drive copy service now", ("sc.exe", "start", ARCHIVE_SERVICE_NAME)))
+            steps += _start_steps(ARCHIVE_SERVICE_NAME, inp, "Start the archive-drive copy service now")
     return steps
 
 
@@ -360,9 +393,8 @@ def archive_service_steps(inp: InstallInputs, cfg_dir: Path) -> list[Step]:
     asid = _sid(service_sid(name))
     spool, data, logs = (str(d) for d in inp.data_dirs)
     steps = [
-        Step(f"Register the archive-drive copy service {name} (delayed automatic start, virtual account {account})",
-             ("sc.exe", "create", name, "binPath=", inp.archive_host.command_line, "start=", "delayed-auto",
-              "obj=", account, "DisplayName=", ARCHIVE_DISPLAY_NAME)),
+        _registration_step(name, inp, inp.archive_host, "delayed-auto", account, ARCHIVE_DISPLAY_NAME,
+                           "the archive-drive copy service"),
         Step("Describe the archive-drive copy service", ("sc.exe", "description", name, ARCHIVE_DESCRIPTION)),
         Step("Archive copy: restart after every failure, forever",
              ("sc.exe", "failure", name, "reset=", str(FAILURE_RESET_S), "actions=", FAILURE_ACTIONS)),

@@ -1,6 +1,7 @@
 """Windows service integration for the Sentinel recorder.
 
     python -m sentinel.winsvc install --config C:\\ProgramData\\Sentinel\\config\\sentinel.toml [--dry-run]
+        (on a computer where the services are installed: repairs them in place, recording continues)
     python -m sentinel.winsvc uninstall [--dry-run]
     python -m sentinel.winsvc status [--config ...]
     python -m sentinel.winsvc set-camera-credentials --config ...

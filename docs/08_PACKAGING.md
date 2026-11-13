@@ -527,6 +527,18 @@ folder they get its permissions (under Program Files: only administrators may ch
 A version that failed its check is left as `<app>.failed-<version>` for technical support (delete it
 when done); the version kept from before an update is set aside and restored if the update fails.
 
+Review 2026-11-12 (follow-up): the check waits until each restarted service reports RUNNING and is still running
+5 s later (a service that stops while starting fails the check), and stops the services again before the folders
+are swapped back. Every way out of the swap window removes the state file (`pending.json`) and its process-id note
+(`finisher.pid`); the window shows "Updating…" only while that PowerShell window still runs. Any failure after
+recording was stopped (not only a refusal) starts recording again and is written to `last_update.json`, which
+PowerShell now writes without a byte-order mark.
+
+**An update file changes program files only, never permissions or the service registration.** When a release
+changes the install plan, the administrator runs System › Service › *Install / repair service…* once after the
+update. On an installed computer this repairs in place (`sc config`, every folder and file permission again, the
+archive copy paused and started again); the recorder keeps recording.
+
 **End-to-end test (2026-11-10, real builds, scratch folder, no recorder):** a real 0.3.0 build was
 updated to a 0.3.1 test build with a 6.8 MB update file (4 of 1,170 files carried): swapped and
 checked, `about --verify` clean. Going back restored 0.3.0 (0.3.1 kept as previous). An update whose

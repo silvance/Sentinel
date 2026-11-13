@@ -19,9 +19,9 @@ from pathlib import Path
 from .. import __version__
 from ..clock import iso_utc
 from ..paths import app_dir, find_config
-from .apply import (Folders, Pending, RecordingState, check_installed, finisher_script, folder_version,
-                    launch_finisher, read_result, record_event, restart_after_refusal, stage, start_recording,
-                    stop_recording, write_result)
+from .apply import (SERVICES, Folders, Pending, RecordingState, abandoned, check_installed, end_state,
+                    finisher_script, folder_version, in_progress, launch_finisher, read_result, record_event,
+                    restart_after_refusal, stage, start_recording, stop_recording, stop_services, write_result)
 from .package import UpdateRefused, read_package
 
 EXIT_OK, EXIT_REFUSED, EXIT_FAILED = 0, 2, 1
@@ -90,11 +90,61 @@ def _relaunch_elevated(argv: list[str]) -> bool:
 def _busy(folders: Folders) -> str | None:
     if not folders.state.is_file():
         return None
-    age = time.time() - folders.state.stat().st_mtime
-    if age > PENDING_STALE_S:
+    # Review 2026-11-12: an update whose window is gone (closed, or ended without cleaning up) does not block
+    # the next one for an hour; the next one starts again what it had stopped (_take_over).
+    if in_progress(folders, stale_s=PENDING_STALE_S) is None:
         return None
     return ("Another update or rollback started less than an hour ago and has not finished "
             f"({folders.state}). Wait for it, or delete that file if it was interrupted.")
+
+
+def _take_over(st: RecordingState, folders: Folders) -> RecordingState:
+    """Add to ``st`` what an abandoned update or rollback had stopped, so it is started again too."""
+    old = abandoned(folders)
+    if old is None or not isinstance(old.recording, dict):
+        return st
+    try:
+        prior = RecordingState(**old.recording)
+    except TypeError:
+        return st
+    st.service_managed = st.service_managed or prior.service_managed
+    st.recorder_running = st.recorder_running or prior.recorder_running
+    st.services = [s for s in SERVICES if s in st.services or s in prior.services]
+    return st
+
+
+def _undo_after_stop(folders: Folders, st: RecordingState | None, cfg_path: Path | None, staging: Path | None,
+                     pending: Pending | None, exc: BaseException, what: str) -> int:
+    """Review 2026-11-12: something other than a refusal failed after recording was stopped (the state file could
+    not be written, PowerShell could not be started, ...). Start recording again, remove the state file, record
+    the failure where the window shows it, and say so; never leave the computer without recording."""
+    import shutil
+
+    again = ""
+    if st is not None:
+        try:
+            ok, detail = start_recording(st, cfg_path)
+            again = ("Recording was started again." if ok else
+                     f"Recording could not be started again ({detail}). Restart the computer so that recording "
+                     "starts, and contact technical support.")
+        except BaseException as exc2:  # noqa: BLE001
+            again = (f"Recording could not be started again ({exc2.__class__.__name__}: {exc2}). Restart the "
+                     "computer so that recording starts, and contact technical support.")
+    if staging is not None:
+        shutil.rmtree(staging, ignore_errors=True)
+    if st is not None:      # (when nothing was stopped, an older abandoned state stays for the next update)
+        end_state(folders)
+    msg = (f"The {what} was not carried out ({exc.__class__.__name__}: {exc}); no program file was changed. "
+           f"{again}").strip()
+    try:
+        write_result(folders, "failed", pending, msg)
+    except OSError:
+        pass
+    record_event(str(cfg_path) if cfg_path else None, "software_update_failed", msg,
+                 {"outcome": "failed", "reason": f"{exc.__class__.__name__}: {exc}"})
+    print(f"\n{msg}")
+    _pause()
+    return EXIT_FAILED
 
 
 # ---------------------------------------------------------------------- commands for people
@@ -155,15 +205,22 @@ def cmd_apply(args: argparse.Namespace) -> int:
             if again:
                 raise UpdateRefused(exc.code, f"{exc} {again}") from None
             raise
-        pending = Pending("update", __version__, pkg.version, str(app), str(staging), str(folders.previous),
-                          str(cfg_path) if cfg_path else None, asdict(st), str(pkg.path), pkg.sha256, pkg.key_id,
-                          who=_who(), started_utc=iso_utc(time.time()))
-        pending.write(folders.state)
-        record_event(pending.config, "software_update_started",
-                     f"Software update from Sentinel {__version__} to {pkg.version} started",
-                     {"from": __version__, "to": pkg.version, "package_sha256": pkg.sha256, "key_id": pkg.key_id,
-                      "who": pending.who})
-        launch_finisher(finisher_script(pending, folders, args.window_pid), folders)
+        except BaseException as exc:  # noqa: BLE001 - nothing was stopped yet (asking Windows failed)
+            return _undo_after_stop(folders, None, cfg_path, staging, None, exc, "update")
+        pending = None
+        try:
+            st = _take_over(st, folders)
+            pending = Pending("update", __version__, pkg.version, str(app), str(staging), str(folders.previous),
+                              str(cfg_path) if cfg_path else None, asdict(st), str(pkg.path), pkg.sha256, pkg.key_id,
+                              who=_who(), started_utc=iso_utc(time.time()))
+            pending.write(folders.state)
+            record_event(pending.config, "software_update_started",
+                         f"Software update from Sentinel {__version__} to {pkg.version} started",
+                         {"from": __version__, "to": pkg.version, "package_sha256": pkg.sha256, "key_id": pkg.key_id,
+                          "who": pending.who})
+            launch_finisher(finisher_script(pending, folders, args.window_pid), folders)
+        except BaseException as exc:  # noqa: BLE001 - review 2026-11-12: never leave recording stopped
+            return _undo_after_stop(folders, st, cfg_path, staging, pending, exc, "update")
     except UpdateRefused as exc:
         print(f"\nThe update was not applied: {exc}")
         _pause()
@@ -204,15 +261,23 @@ def cmd_rollback(args: argparse.Namespace) -> int:
     except UpdateRefused as exc:
         again = restart_after_refusal(exc, cfg_path)          # review 2026-11-12: never leave it stopped
         print(f"Sentinel did not go back to the previous version: {exc} {again}".rstrip())
+        _pause()
         return EXIT_REFUSED
-    pending = Pending("rollback", __version__, prev_version, str(app), str(folders.previous), str(folders.previous),
-                      str(cfg_path) if cfg_path else None, asdict(st), who=_who(), started_utc=iso_utc(time.time()),
-                      reason=args.reason or "requested by an administrator")
-    pending.write(folders.state)
-    record_event(pending.config, "software_rollback_started",
-                 f"Going back from Sentinel {__version__} to {prev_version}",
-                 {"from": __version__, "to": prev_version, "who": pending.who, "reason": pending.reason})
-    launch_finisher(finisher_script(pending, folders, args.window_pid), folders)
+    except BaseException as exc:  # noqa: BLE001 - nothing was stopped yet (asking Windows failed)
+        return _undo_after_stop(folders, None, cfg_path, None, None, exc, "going back")
+    pending = None
+    try:
+        st = _take_over(st, folders)
+        pending = Pending("rollback", __version__, prev_version, str(app), str(folders.previous),
+                          str(folders.previous), str(cfg_path) if cfg_path else None, asdict(st), who=_who(),
+                          started_utc=iso_utc(time.time()), reason=args.reason or "requested by an administrator")
+        pending.write(folders.state)
+        record_event(pending.config, "software_rollback_started",
+                     f"Going back from Sentinel {__version__} to {prev_version}",
+                     {"from": __version__, "to": prev_version, "who": pending.who, "reason": pending.reason})
+        launch_finisher(finisher_script(pending, folders, args.window_pid), folders)
+    except BaseException as exc:  # noqa: BLE001 - review 2026-11-12: never leave recording stopped
+        return _undo_after_stop(folders, st, cfg_path, None, pending, exc, "going back")
     print("Going back continues in a new window; this one closes now.")
     time.sleep(2)
     return EXIT_OK
@@ -242,9 +307,14 @@ def cmd_finish(args: argparse.Namespace) -> int:
     folders = Folders(Path(pending.app))
     problems = check_installed(Path(pending.app), pending.config)
     if not problems:
-        ok, detail = start_recording(RecordingState(**pending.recording), pending.config)
+        st = RecordingState(**pending.recording)
+        ok, detail = start_recording(st, pending.config)
         if not ok:
             problems.append(f"the recorder did not start: {detail}")
+            if st.service_managed and st.services:
+                # Review 2026-11-12: a service started from the new folder (or restarted by Windows) keeps that
+                # folder in use, and the swap back would fail. Stop them first; the old version starts them again.
+                stop_services(st.services)
     if problems:
         pending.reason = "; ".join(problems)
         pending.write(folders.state)

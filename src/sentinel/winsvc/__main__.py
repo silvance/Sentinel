@@ -55,6 +55,35 @@ def _act_wait_stopped(service: str, timeout_s: float) -> None:
         raise RuntimeError(f"service still {info.state_name} after {timeout_s:.0f} s")
 
 
+def _act_ensure_running(service: str, timeout_s: float = 30.0, *, scm: object | None = None,
+                        sleep: Callable[[float], None] | None = None) -> None:
+    """Start the service unless it already runs (install / repair). Raises if Windows refuses the start or
+    the service stops again within ``timeout_s``; still starting at the end is not an error."""
+    import time
+
+    if scm is None:
+        from . import scm as real_scm
+
+        scm = real_scm
+    info = scm.query_service(service)  # type: ignore[attr-defined]
+    if info is None:
+        raise RuntimeError(f"the service {service} is not installed")
+    if info.state in (scm.SERVICE_RUNNING, scm.SERVICE_START_PENDING):  # type: ignore[attr-defined]
+        return
+    err = scm.start_service(service)  # type: ignore[attr-defined]
+    if err not in (0, scm.ERROR_SERVICE_ALREADY_RUNNING):  # type: ignore[attr-defined]
+        raise RuntimeError(f"Windows did not start {service} (error {err})")
+    end = time.monotonic() + timeout_s
+    while time.monotonic() < end:
+        info = scm.query_service(service)  # type: ignore[attr-defined]
+        if info is not None and info.state == scm.SERVICE_RUNNING:  # type: ignore[attr-defined]
+            return
+        if info is not None and info.state == scm.SERVICE_STOPPED:  # type: ignore[attr-defined]
+            code = info.service_exit_code if info.win32_exit_code == 1066 else info.win32_exit_code
+            raise RuntimeError(f"{service} stopped again (exit {code}: {EXIT_MEANINGS.get(code, 'see its log')})")
+        (sleep or time.sleep)(1.0)
+
+
 def _act_remove_account_aces(paths: list[str], accounts: str = "users", keep: list[str] | None = None) -> None:
     """Remove explicit ACEs from each existing path (review 2026-11-12): of individual user accounts
     ("users"), or of every trustee not in ``keep`` ("all_but")."""
@@ -75,6 +104,7 @@ def _act_remove_account_aces(paths: list[str], accounts: str = "users", keep: li
 
 
 _ACTIONS: dict[str, Callable[..., None]] = {
+    "ensure_running": _act_ensure_running,
     "remove_account_aces": _act_remove_account_aces,
     "set_preshutdown_timeout": _act_set_preshutdown_timeout,
     "set_service_environment": _act_set_service_environment,
@@ -203,15 +233,31 @@ def cmd_install(args: argparse.Namespace) -> int:
         print(f"PROBLEM: {e}")
     if inp is None:
         return EXIT_FAILED
+    names = (SERVICE_NAME, *((ARCHIVE_SERVICE_NAME,) if inp.archive_host is not None else ()))
+    installed, query_problem = _installed_services(names)
     try:
         steps = install_plan(InstallInputs(inp.config_path, inp.data_dirs, inp.credentials_path, inp.host,
                                            start=not args.no_start, status_dir=inp.status_dir,
                                            status_readers=args.status_readers, time_server=args.time_server,
                                            archive_host=inp.archive_host,
-                                           power_settings=not args.keep_power_settings))
+                                           power_settings=not args.keep_power_settings,
+                                           existing=frozenset(installed)))
     except PlanError as exc:
         print(f"PROBLEM: {exc}")
         return EXIT_FAILED
+    if query_problem:
+        print(f"WARNING: could not ask Windows which Sentinel services are installed ({query_problem})")
+    if installed:
+        # Review 2026-11-12: "Install / repair" on an installed computer used to stop at "already installed",
+        # so permission fixes that come with a new version never reached it. Now it repairs in place.
+        print(f"REPAIR: {', '.join(sorted(installed))} {'is' if len(installed) == 1 else 'are'} already installed. "
+              "The registration is updated in place and every folder and file permission is set again; "
+              "nothing is uninstalled and the recorder keeps recording.")
+        for name, info in sorted(installed.items()):
+            command = inp.host if name == SERVICE_NAME else inp.archive_host
+            if command is not None and getattr(info, "binary_path", None) not in (None, command.command_line):
+                print(f"NOTE: {name} runs with its previous command until it is restarted "
+                      "(System › Service › Restart recorder, or restart the computer).")
     if args.dry_run:
         _print_plan(steps)
         print("DRY RUN: nothing was changed.")
@@ -219,19 +265,48 @@ def cmd_install(args: argparse.Namespace) -> int:
     if errors:
         print("Installation refused: fix the problems above first (nothing was changed).")
         return EXIT_FAILED
-    from .scm import is_admin, query_service
+    from .scm import is_admin
 
     if not is_admin():
         print("Installation needs administrator rights. Open 'Command Prompt' with 'Run as administrator' "
               "and run this command again (nothing was changed).")
         return EXIT_NOT_ADMIN
-    for name in (SERVICE_NAME, *((ARCHIVE_SERVICE_NAME,) if inp.archive_host is not None else ())):
-        if query_service(name) is not None:
-            print(f"The service {name} is already installed. Run 'uninstall' first to reinstall.")
-            return EXIT_FAILED
+    if query_problem:
+        print("Installation refused: Windows could not say whether the services are installed (nothing was "
+              "changed).")
+        return EXIT_FAILED
     ok = execute(steps)
-    print("Installed." if ok else "Installation stopped at the failed step above.")
-    return EXIT_OK if ok else EXIT_FAILED
+    if ok:
+        print("Repaired." if installed else "Installed.")
+        return EXIT_OK
+    print(("Repair" if installed else "Installation") + " stopped at the failed step above.")
+    if installed and not args.no_start:
+        # Never leave a repaired computer without recording: start again what the repair may have paused.
+        for name in names:
+            if name in installed:
+                try:
+                    _ACTIONS["ensure_running"](service=name, timeout_s=30)
+                    print(f"{name} is running.")
+                except Exception as exc:  # noqa: BLE001 - report every service, then return
+                    print(f"{name} could not be started again: {exc}. Restart the computer.")
+    return EXIT_FAILED
+
+
+def _installed_services(names: tuple[str, ...]) -> tuple[dict[str, object], str | None]:
+    """{name: ServiceInfo} of the Sentinel services already registered, and why asking failed (if it did)."""
+    if sys.platform != "win32":
+        return {}, None
+    from . import scm
+
+    found: dict[str, object] = {}
+    try:
+        for name in names:
+            info = scm.query_service(name)
+            if info is not None:
+                found[name] = info
+    except OSError as exc:
+        return found, str(exc)
+    return found, None
 
 
 def cmd_uninstall(args: argparse.Namespace) -> int:
@@ -560,6 +635,33 @@ def run_recorder_in_host(host: object, config: str, recorder_factory: Callable |
     return svc.run()
 
 
+ARCHIVE_LOG_NAME = "archive.log"     # the same file the archive copy writes when run from the launcher
+
+
+def setup_archive_logging(log_dir: Path, level: str) -> None:
+    """The SentinelArchive service logs to its own ``archive.log`` (file only: a service has no console).
+    Review 2026-11-12: it used the recorder's ``recorder.log``; two processes rotating one file on Windows
+    lose records (the rename fails while the other process holds the file open)."""
+    import logging
+    import logging.handlers
+    import time
+
+    from ..logging_setup import FORMAT, RedactingFilter, RedactingFormatter
+
+    root = logging.getLogger()
+    for h in list(root.handlers):
+        root.removeHandler(h)
+    root.setLevel(level.upper())
+    fmt = RedactingFormatter(FORMAT, datefmt="%Y-%m-%dT%H:%M:%S")
+    fmt.converter = time.gmtime
+    log_dir.mkdir(parents=True, exist_ok=True)
+    handler = logging.handlers.RotatingFileHandler(log_dir / ARCHIVE_LOG_NAME, maxBytes=10 * 1024 * 1024,
+                                                   backupCount=5, encoding="utf-8")
+    handler.setFormatter(fmt)
+    handler.addFilter(RedactingFilter())
+    root.addHandler(handler)
+
+
 def run_archive_in_host(host: object, config: str, worker_factory: Callable | None = None,
                         event_log: Callable[[str], object] = _default_event_log) -> int:
     """Body of ServiceMain for the ``SentinelArchive`` service (integration of design/archive-drive
@@ -567,10 +669,9 @@ def run_archive_in_host(host: object, config: str, worker_factory: Callable | No
     stops it. A configuration error exits 2 (the SCM restarts it, each attempt visible in the
     event log); archiving switched off in the configuration is a clean stop (no restart loop).
     Real SCM operation NOT EXECUTED (administrator rights); tested with a fake host."""
-    from ..config import ConfigError, load_config
-    from ..logging_setup import setup_logging
     import threading
 
+    from ..config import ConfigError, load_config
     from ..service import EXIT_CONFIG, EXIT_LOCKED
 
     try:
@@ -586,7 +687,7 @@ def run_archive_in_host(host: object, config: str, worker_factory: Callable | No
         event_log("Sentinel archive: [archive] enabled = false in the configuration; the service stops.")
         return 0
     try:
-        setup_logging(cfg.log_path, cfg.service.log_level, to_stderr=False)
+        setup_archive_logging(cfg.log_path, cfg.service.log_level)
     except OSError as exc:
         event_log(f"Sentinel archive cannot start: the log folder {cfg.log_path} cannot be used: {exc}")
         return EXIT_CONFIG
@@ -615,7 +716,8 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="python -m sentinel.winsvc",
                                  description="Install and manage the Sentinel recorder Windows service.")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    p = sub.add_parser("install", help="register the service (administrator)")
+    p = sub.add_parser("install", help="register the services, or repair them in place when already installed "
+                                       "(administrator)")
     p.add_argument("--config", required=True)
     p.add_argument("--dry-run", action="store_true", help="only print the commands")
     p.add_argument("--no-start", action="store_true", help="do not start the service after installing")

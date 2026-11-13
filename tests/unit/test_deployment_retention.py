@@ -205,3 +205,77 @@ def test_uninstall_removes_archive_service_only_when_asked() -> None:
     argvs = [s.argv for s in uninstall_plan(archive=True) if s.argv]
     assert ("sc.exe", "delete", ARCHIVE_SERVICE_NAME) in argvs and ("sc.exe", "delete", "SentinelRecorder") in argvs
     assert not any(a[0] in ("icacls", "rmdir", "del") for a in argvs)
+
+
+# ---------------------------------------------------------------------- review 2026-11-12: SentinelArchive control
+class _ScmWorld:
+    """Fake SCM for both services: start -> RUNNING, stop -> STOPPED."""
+
+    def __init__(self, states: dict[str, int | None], start_err: int = 0) -> None:
+        self.states, self.start_err = dict(states), start_err
+        self.calls: list[tuple[str, str]] = []
+
+    def calls_api(self):  # noqa: ANN201
+        from sentinel.winsvc import control as wctl
+
+        return wctl.ScmCalls(self.query, self.start, self.stop)
+
+    def query(self, name: str) -> Any:
+        s = self.states.get(name)
+        return None if s is None else type("I", (), {"state": s, "win32_exit_code": 0, "service_exit_code": 0})()
+
+    def start(self, name: str) -> int:
+        self.calls.append(("start", name))
+        if self.start_err == 0:
+            self.states[name] = 4
+        return self.start_err
+
+    def stop(self, name: str) -> int:
+        self.calls.append(("stop", name))
+        self.states[name] = 1
+        return 0
+
+
+def _svc_ctl(world: _ScmWorld, archive_enabled: bool | None = True):  # noqa: ANN202
+    from sentinel.winsvc import control as wctl
+
+    return wctl.ServiceControl(world.calls_api(), clock=lambda: 0.0, sleep=lambda _s: None,
+                               archive_enabled=archive_enabled)
+
+
+def test_service_control_starts_a_stopped_archive_service() -> None:
+    """Nothing started SentinelArchive again after a clean stop: ServiceControl had no start_archive, so 'Save and
+    restart recorder' restarted only the recorder."""
+    from sentinel.winsvc import control as wctl
+
+    assert wctl.ARCHIVE_SERVICE_NAME == ARCHIVE_SERVICE_NAME
+    w = _ScmWorld({"SentinelRecorder": 4, ARCHIVE_SERVICE_NAME: 1})
+    assert _svc_ctl(w).start_archive() is True and w.calls == [("start", ARCHIVE_SERVICE_NAME)]
+    assert _svc_ctl(w).start_archive() is False and len(w.calls) == 1            # already running
+    off = _ScmWorld({"SentinelRecorder": 4, ARCHIVE_SERVICE_NAME: 1})
+    assert _svc_ctl(off, archive_enabled=False).start_archive() is False and off.calls == []
+    absent = _ScmWorld({"SentinelRecorder": 4})
+    assert _svc_ctl(absent).start_archive() is False and absent.calls == []
+    denied = _ScmWorld({"SentinelRecorder": 4, ARCHIVE_SERVICE_NAME: 1}, start_err=5)
+    assert _svc_ctl(denied).start_archive() is False                              # logged, not raised
+
+
+def test_service_control_restarts_the_archive_service_so_it_reads_saved_settings() -> None:
+    w = _ScmWorld({"SentinelRecorder": 4, ARCHIVE_SERVICE_NAME: 4})
+    assert _svc_ctl(w).restart_archive() is True
+    assert w.calls == [("stop", ARCHIVE_SERVICE_NAME), ("start", ARCHIVE_SERVICE_NAME)]
+    # copying switched off in the settings: stopped and left stopped
+    w2 = _ScmWorld({"SentinelRecorder": 4, ARCHIVE_SERVICE_NAME: 4})
+    assert _svc_ctl(w2, archive_enabled=False).restart_archive() is False
+    assert w2.calls == [("stop", ARCHIVE_SERVICE_NAME)] and w2.states[ARCHIVE_SERVICE_NAME] == 1
+
+
+def test_service_provider_passes_the_archive_setting(tmp_path: Path) -> None:
+    from sentinel.winsvc import control as wctl
+
+    w = _ScmWorld({"SentinelRecorder": 4})
+    on = wctl.service_control_provider(tmp_path, make_config(tmp_path, archive={"enabled": True}),
+                                       api=w.calls_api(), platform="win32")
+    off = wctl.service_control_provider(tmp_path, make_config(tmp_path, archive={"enabled": False}),
+                                        api=w.calls_api(), platform="win32")
+    assert on.archive_enabled is True and off.archive_enabled is False
