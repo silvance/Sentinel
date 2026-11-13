@@ -118,10 +118,19 @@ function Same-Set($actual, $expected) {
     foreach ($x in $e) { if ($a -notcontains $x) { return $false } }
     return $true
 }
+function Norm-Serial([object]$v) { return ((N $v) -replace '\s', '').TrimEnd('.') }
+function Disk-Serial($d) {
+    $serial = Norm-Serial $d.SerialNumber
+    if (-not $serial) {
+        $dd = @(Get-CimInstance -ClassName Win32_DiskDrive -Filter ('Index={0}' -f [int]$d.Number))
+        if ($dd.Count -eq 1) { $serial = Norm-Serial $dd[0].SerialNumber }
+    }
+    return $serial
+}
 function Assert-Disk($d, [bool]$contents) {
     $model = N $d.Model
     if (-not $model) { $model = N $d.FriendlyName }
-    $serial = ((N $d.SerialNumber) -replace '\s', '').TrimEnd('.')
+    $serial = Disk-Serial $d
     if ($serial -ne $exp.serial) { throw 'IDENTITY_MISMATCH serial' }
     if ((N $d.UniqueId) -ne $exp.unique_id) { throw 'IDENTITY_MISMATCH unique_id' }
     if ($model -ne $exp.model) { throw 'IDENTITY_MISMATCH model' }
@@ -252,7 +261,9 @@ def build_linux_script(disk: DiskInfo, *, filesystem: str, label: str, protected
     return f"""set -eu
 DEV={q(disk.device_path)}
 step=verify
-fail() {{ echo "RESULT ok=0 step=$step code=$1 error=$2"; exit "$1"; }}
+reported=0
+fail() {{ reported=1; echo "RESULT ok=0 step=$step code=$1 error=$2"; exit "$1"; }}
+trap 'rc=$?; [ "$reported" = 1 ] || echo "RESULT ok=0 step=$step code=2 error=aborted_$rc"' EXIT
 check() {{
   [ "$(lsblk -dno SERIAL "$DEV" | tr -d '[:space:]')" = {q(ident.serial or '')} ] || fail 3 IDENTITY_MISMATCH_serial
   [ "$(lsblk -dno WWN "$DEV" | tr -d '[:space:]')" = {q(ident.unique_id or '')} ] || fail 3 IDENTITY_MISMATCH_wwn
@@ -286,12 +297,13 @@ step=partition
 check
 notmounted
 printf 'label: gpt\\n,,%s\\n' {q(parttype)} | sfdisk --quiet --lock --wipe always --wipe-partitions always "$DEV" || fail 2 sfdisk_failed
-udevadm settle
-PART=$(lsblk -nlpo PATH,TYPE "$DEV" | awk '$2=="part" {{ print $1; exit }}')
+udevadm settle || fail 2 udevadm_settle_failed
+PART=$(lsblk -nlpo PATH,TYPE "$DEV" | awk '$2=="part" {{ print $1; exit }}') || fail 2 no_partition
 [ -n "$PART" ] || fail 2 no_partition
 step=format
 {mkfs} {q(label)} "$PART" >/dev/null || fail 2 mkfs_failed
-udevadm settle
+udevadm settle || fail 2 udevadm_settle_failed
 step=done
+reported=1
 echo "RESULT ok=1 step=done code=0 part=$PART"
 """

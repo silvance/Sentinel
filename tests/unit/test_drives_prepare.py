@@ -351,6 +351,10 @@ def test_write_read_back_test_bypasses_cache_on_this_host(tmp_path: Path) -> Non
 DOCK = "000000000000000000"   # Sabrent EC-HD2B: the same placeholder serial for both bays
 
 
+ARCHIVE_MARKER = {"format": "sentinel-drive", "version": 1, "drive_uuid": "41414141-aaaa-4bbb-8ccc-000000000001",
+                  "label": "SSD_1", "prepared_utc": "2026-11-11T00:00:00Z", "prepared_by": "tech", "role": "archive"}
+
+
 def _dock_world(ledger: Ledger, tmp_path: Path, helper_guid: str | None):
     """Disk 4: archive drive SSD_1. Disk 3: same model and size in the other bay, left with an empty
     volume labelled SSD_3 by a setup that did not finish (as on the laptop)."""
@@ -370,6 +374,8 @@ def _dock_world(ledger: Ledger, tmp_path: Path, helper_guid: str | None):
              new_vol.volume_id: tmp_path / "new"}
     for r in roots.values():
         r.mkdir()
+    # The archive drive carries its marker (READY), so the other bay is not refused as its lookalike.
+    (roots[old_vol.volume_id] / MARKER_NAME).write_text(json.dumps(ARCHIVE_MARKER), encoding="utf-8")
     insp = lambda v: inspect_root(roots[v.volume_id]) if v.volume_id in roots else RootContents(readable=True)  # noqa: E731
     enum = Sequence([archive, target, SYS], [archive, target, SYS])
     res = {"ok": True, "step": "done"}
@@ -394,7 +400,7 @@ def test_second_bay_of_a_dock_is_found_again_by_its_new_partition(ledger: Ledger
     # SSD_3 was only on the disk being erased (never recorded as prepared): the next number is 2.
     assert res.label == "SSD_2" and res.disk_id == "3"
     assert json.loads((new_root / MARKER_NAME).read_text(encoding="utf-8"))["label"] == "SSD_2"
-    assert not (tmp_path / "old" / MARKER_NAME).exists()
+    assert json.loads((tmp_path / "old" / MARKER_NAME).read_text(encoding="utf-8")) == ARCHIVE_MARKER
     assert len(_events(ledger, "drive_prepared")) == 1
 
 

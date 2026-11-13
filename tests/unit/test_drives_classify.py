@@ -118,9 +118,10 @@ def test_real_data_disks_with_files_are_foreign(host_disks) -> None:
 
 # ---------------------------------------------------------------------------- synthetic classes
 
-def test_blank_raw_disk() -> None:
+def test_blank_disk() -> None:
+    # Review 2026-11-12: an initialised disk with no data partition; a RAW one is test_drives_review_1112_medium.
     c = classify(blank_disk(), POL, protected_for(), inspector=FakeInspector())
-    assert c.drive_class is DriveClass.BLANK and c.reasons == ("no_partition_table",)
+    assert c.drive_class is DriveClass.BLANK and c.reasons == ("no_data_partitions",)
     assert c.can_prepare and not c.needs_admin and not c.needs_serial
     assert c.message == BLANK_MESSAGE and c.alert_code == "M-001"
     assert c.message == "This drive is empty and must be set up before use. Press Erase and Set Up Drive."

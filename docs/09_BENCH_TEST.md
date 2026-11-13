@@ -102,7 +102,9 @@ Those builds still ask for "the serial's last 4 characters", and the only answer
 `0000`. That confirms nothing about which disk is in the dock. With such a build, keep exactly
 one drive in the dock and check the model and size on screen before typing `0000`. Later builds
 show "hidden by the dock" in the Serial column, ask for `ERASE` instead, and refuse to erase while
-two connected drives look the same. Also in those builds: after ticking "Allow 'Erase and set up'"
+another connected drive that could be erased also hides its serial and has the same model and size
+(or is an identical empty disk); a set-up archive drive next to it is fine. Also in those builds:
+after ticking "Allow 'Erase and set up'"
 in Settings › Storage, press **Refresh list** on the Drives page before erasing, or the page still
 answers "erase_disabled".
 

@@ -4,9 +4,11 @@
     python -m sentinel.drives classify  --disk ID [--config FILE] [--json]
     python -m sentinel.drives prepare   --disk ID --config FILE [--who NAME] [--admin]
                                         [--yes --serial-tail XXXX] [--dry-run]
-    python -m sentinel.drives eject     --disk ID [--config FILE]
+                                        [--fingerprint FP --expect-class CLASS]
+    python -m sentinel.drives eject     --disk ID [--config FILE] [--fingerprint FP]
     python -m sentinel.drives snapshot  (raw read-only enumeration JSON, for support)
-    python -m sentinel.drives rename    --drive E: --name SSD_1 --config FILE [--who NAME]   (administrator)
+    python -m sentinel.drives rename    --drive E: --name SSD_1 --config FILE [--who NAME] [--expect-uuid UUID]
+                                        (administrator)
 
 ``--disk`` is the Windows disk number or Linux kernel name shown by ``list``. It only *locates*
 the disk: the confirmation is bound to the disk's identity, which is re-checked before erasing.
@@ -23,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 import sys
 from collections.abc import Callable
 from dataclasses import asdict
@@ -78,8 +81,10 @@ class _Env:
         db = self.cfg.data_path / "sentinel.db"
         present, why = _installed.path_state(db)
         if present is None:   # review 2026-11-10: access denied is NOT "no ledger" (fail closed)
-            return KnownDrives(error=f"the recorder ledger {db} cannot be read by this account ({why}); "
-                                     f"{_installed.ADMIN_HINT}")
+            # Review 2026-11-12: normal for the operator window (no administrator rights), not a fault.
+            return KnownDrives(error=f"Sentinel's records ({db}) cannot be read by this account ({why}); checking "
+                                     "and erasing drives need administrator rights (in the window: Unlock…; "
+                                     "on the command line: run it as administrator)", needs_admin=True)
         if not present:
             return KnownDrives()
         from ..db import Ledger
@@ -274,6 +279,9 @@ def cmd_prepare(env: _Env, args: argparse.Namespace, *, reader: Callable[[str], 
         except PrepareFailed as exc:
             print(f"\n{_alert_line(exc.code)}\n{exc}")
             return EXIT_FAILED
+        except sqlite3.Error as exc:   # prepare_drive turns every ledger error after its first write into the above
+            print(f"\nSentinel's records could not be read ({exc}). Nothing was erased. Try again in a minute.")
+            return EXIT_FAILED
         print(f"\nDrive erased and set up: {res.label} ({res.filesystem}). Write test passed "
               f"({'cache bypassed' if res.write_test.get('uncached') else 'cache NOT bypassed'}).")
         return EXIT_OK
@@ -287,28 +295,78 @@ def _default_who() -> str:
     return _os_user()
 
 
+def _copier_running(env: _Env) -> bool:
+    if env.cfg is None:
+        return False
+    from ..archive.status import STATUS_FILE, copier_running, read_archive_status
+
+    return copier_running(read_archive_status(env.cfg.data_path / STATUS_FILE) or {})
+
+
 def cmd_eject(env: _Env, args: argparse.Namespace) -> int:
-    from .eject import safe_remove
+    from .eject import archive_marker, record_archive_removal, safe_remove
 
     disks = env.enumerate()
     d = next((x for x in disks if x.disk_id == args.disk), None)
     if d is None:
         raise SystemExit(f"no disk {args.disk!r}")
+    # Review 2026-11-12: bind the removal to the drive the person was shown (disk numbers are reused).
+    seen_fp = (getattr(args, "fingerprint", None) or "").strip()
+    if seen_fp and seen_fp != d.identity.fingerprint():
+        print(f"{_alert_line('M-007')}\nDisk {args.disk} is not the drive that was shown when you chose Safely "
+              "remove: it was replaced or has changed. Nothing was removed. Press Refresh list and try again.")
+        return EXIT_REFUSED
+    arc = archive_marker(d, getattr(env, "inspector", None))
+    if arc is not None and _copier_running(env):
+        # Review 2026-11-12: the copier may be writing to it; Swap finishes the copy and records the removal.
+        print(f"{_alert_line('M-007')}\n{arc.get('label') or 'This drive'} is an archive drive and archive copying "
+              "is running. Press Swap archive drive instead: it finishes the copying and records the drive as "
+              "taken out. Nothing was removed.")
+        return EXIT_REFUSED
     try:
         res = safe_remove(d, disks, env.protected, enumerate_fn=env.enumerate)
     except DriveError as exc:
         print(f"{_alert_line(exc.code)}\n{exc}")
         return EXIT_REFUSED
     print(res.message if res.ok else f"{_alert_line('M-007')}\n{res.message}")
+    if res.ok and arc is not None:
+        print(_record_removal(env, arc, record_archive_removal))
     if args.verbose:
         print(json.dumps(res.steps, indent=2))
     return EXIT_OK if res.ok else EXIT_FAILED
 
 
+def _record_removal(env: _Env, marker: dict[str, Any], record: Callable[..., None]) -> str:
+    """Record an archive drive taken out with Safely remove like one taken out with Swap (review 2026-11-12:
+    otherwise Return to service refuses it for ever). The sentence for the person."""
+    name = marker.get("label") or "The archive drive"
+    later = ("When it comes back from the office, plug it in and press Swap archive drive before returning it "
+             "to service, or contact technical support.")
+    if env.cfg is None:
+        return f"{name} was taken out, but Sentinel could not record it (no configuration given). {later}"
+    from ..db import Ledger
+
+    db = env.cfg.data_path / "sentinel.db"
+    present, why = _installed.path_state(db)
+    if not present:
+        return f"{name} was taken out, but Sentinel could not record it ({why or 'no ledger found'}). {later}"
+    try:
+        ledger = Ledger(db)
+    except (OSError, sqlite3.Error) as exc:
+        return f"{name} was taken out, but Sentinel could not record it ({exc}). {later}"
+    try:
+        record(ledger, marker)
+    except sqlite3.Error as exc:
+        return f"{name} was taken out, but Sentinel could not record it ({exc}). {later}"
+    finally:
+        ledger.close()
+    return f"{name} is recorded as taken out for the office (as with Swap archive drive)."
+
+
 def cmd_rename(env: _Env, args: argparse.Namespace) -> int:
     """Give a Sentinel drive a new permanent name (administrator; sentinel.drives.rename)."""
     from .prepare import os_administrator_check
-    from .rename import RenameRefused, rename_drive
+    from .rename import RenameNotRecorded, RenameRefused, rename_drive
 
     if env.cfg is None:
         print("rename needs --config (to know where Sentinel's records are kept).")
@@ -325,12 +383,19 @@ def cmd_rename(env: _Env, args: argparse.Namespace) -> int:
 
     ledger = Ledger(env.cfg.data_path / "sentinel.db")
     try:
-        detail = rename_drive(root, args.name, args.who or _default_who(), ledger, env.policy, other_labels=others)
+        detail = rename_drive(root, args.name, args.who or _default_who(), ledger, env.policy, other_labels=others,
+                              expect_uuid=getattr(args, "expect_uuid", None) or None)
     except RenameRefused as exc:
         print(str(exc))
         return EXIT_REFUSED
+    except RenameNotRecorded as exc:
+        print(str(exc))
+        return EXIT_FAILED
     except OSError as exc:
         print(f"The drive could not be renamed: {exc}. Nothing else was changed.")
+        return EXIT_FAILED
+    except sqlite3.Error as exc:     # rename_drive turns ledger errors after its first write into the above
+        print(f"Sentinel's records could not be read ({exc}). Nothing was changed. Try again in a minute.")
         return EXIT_FAILED
     finally:
         ledger.close()
@@ -372,10 +437,14 @@ def build_parser() -> argparse.ArgumentParser:
             p.add_argument("--expect-class", help="refuse unless the disk is still in this class (e.g. BLANK)")
         if name == "eject":
             p.add_argument("--verbose", action="store_true")
+            p.add_argument("--fingerprint", help="refuse unless the disk is still the drive with this identity "
+                                                 "fingerprint (the one the person was shown)")
         if name == "rename":
             p.add_argument("--drive", required=True, help="the drive's letter or folder, e.g. E:")
             p.add_argument("--name", required=True, help="the new name, e.g. SSD_1")
             p.add_argument("--who", help="name/ID of the person renaming the drive (recorded)")
+            p.add_argument("--expect-uuid", help="refuse unless the drive at --drive has this drive_uuid "
+                                                 "(the drive the person selected)")
     return ap
 
 

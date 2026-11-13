@@ -201,6 +201,12 @@ def test_known_from_export_branch_drives_table(ledger: Ledger) -> None:
     assert c.drive_class is DriveClass.SENTINEL_EVIDENCE
 
 
+def _export_batch(c, drive_id: str, batch_id: str) -> None:
+    c.execute("INSERT INTO export_batches (batch_id, purpose, camera_id, drive_id, state, interval_start_utc, "
+              "interval_end_utc, display_timezone, app_version, stamp, planned_utc, updated_utc) "
+              "VALUES (?, 'review', 'CAM01', ?, 'COMPLETE', 't', 't', 'UTC', '0', 's', 't', 't')", (batch_id, drive_id))
+
+
 def test_export_drives_row_matches_by_volume_guid_and_volume_serial(ledger: Ledger) -> None:
     """Integration: export stores the bare `{GUID}` and an 8-hex-digit volume serial; drives
     enumerates `\\\\?\\Volume{GUID}\\` and a decimal serial. A review drive known only from an
@@ -213,6 +219,9 @@ def test_export_drives_row_matches_by_volume_guid_and_volume_serial(ledger: Ledg
                   "VALUES (?, ?, '{}', 't', 't')", (f"volume_guid:{{{guid.upper()}}}", f"{{{guid.upper()}}}"))
         c.execute("INSERT INTO drives (drive_id, identity, first_seen_utc, last_seen_utc) VALUES ('x', ?, 't', 't')",
                   (json.dumps({"volume_serial": f"{int(dec_serial):08X}"}),))
+        # Review 2026-11-12: only drives something was exported to count (see test_drives_review_1112_medium).
+        for i, drive_id in enumerate((f"volume_guid:{{{guid.upper()}}}", "x")):
+            _export_batch(c, drive_id, f"b{i}")
     known = load_known(ledger)
     assert {"known_volume", "known_filesystem"} <= set(known.matches(d))
 

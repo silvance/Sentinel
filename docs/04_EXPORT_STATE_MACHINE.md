@@ -104,7 +104,17 @@ more than any used before in the set-up and rename records or on a connected dri
 a Sentinel drive in place (Drives › Rename…, `sentinel.drives rename`): the volume label and the marker's
 `label` change (old names kept in `previous_labels`), an audit event `drive_renamed` records old and new name;
 identity, recordings and records are unchanged. A name another drive holds (by the records, or on a connected
-volume) is refused. The archive index on the drive shows the new name from its next rewrite.
+volume) is refused. The archive index on the drive shows the new name from its next rewrite. Review 2026-11-12:
+the rename is recorded as authorised (`drive_rename_authorized`) before the drive changes, ledger writes are
+retried while the ledger is locked, and a rename that still cannot be recorded is undone (the same holds for
+set-up: `drive_prepare_authorized` first; a set-up whose last record fails keeps its number). `drives rename
+--expect-uuid` refuses when the drive at that letter is not the one selected.
+
+**Safely remove on an archive drive (review 2026-11-12).** `drives eject` refuses an archive drive while
+archive copying runs (use Swap). With copying stopped it ejects it and records the same `archive_swap_ready`
+event Swap writes (with the drive's last copy id), so the drive can be returned to service after the office
+copies it. `drives eject --fingerprint` refuses when the disk number now belongs to another drive, and success is
+judged by the disk's Plug-and-Play instance ID (a lookalike in another enclosure no longer makes it look failed).
 
 ## 4. Automatic drive detection and one-button preparation
 
@@ -114,9 +124,9 @@ type and label, mount state, size, SMART, whether it holds the OS or spool):
 | Classification | Example | Operator sees | Button |
 |---|---|---|---|
 | READY | Sentinel-prepared, approved filesystem, has `SENTINEL_DRIVE.json` | "Archive drive ready" (copy resumes) | — |
-| BLANK | no partition table, or empty partition, no files | "This drive is empty and needs to be prepared." | **Prepare This Drive** |
+| BLANK | an empty partition table (no data partition), or one empty partition, no files; on Linux also no partition table and no whole-disk signature | "This drive is empty and needs to be prepared." | **Prepare This Drive** |
 | WRONG_FORMAT | e.g. exFAT / FAT32 / ext4 / HFS+ when the approved format is NTFS (or vice versa), **with no files on it** | "This drive uses the wrong format (exFAT). It must be prepared before use." | **Prepare This Drive** |
-| FOREIGN_DATA | any filesystem containing files, not a Sentinel drive | "This drive contains other files (412 GB). Preparing it will erase them." | **Prepare This Drive** (stricter confirmation, below) |
+| FOREIGN_DATA | any filesystem containing files, not a Sentinel drive; on Windows also a disk with no partition table Windows recognises (reason `unknown_contents`, review 2026-11-12: Windows cannot see a whole-disk LUKS/LVM/ZFS volume or a damaged table) | "This drive contains other files (412 GB). Preparing it will erase them." / "Windows cannot see what is on this drive..." | **Prepare This Drive** (stricter confirmation, below) |
 | UNSUITABLE | too small, read-only, failing SMART, the system disk | Specific reason | none — the system disk is never offered |
 
 **Prepare This Drive** (one press, then a confirmation screen — never automatic):
@@ -132,7 +142,13 @@ type and label, mount state, size, SMART, whether it holds the OS or spool):
   `ERASE` instead of the serial's last characters (typing `0000` would prove nothing), and erasing
   is refused while another connected disk cannot be told apart from it: same serial, model and
   size *and* the same partition and volume IDs, i.e. two empty identical disks (`lookalike`). A new
-  disk next to the current archive drive is fine (field report 2026-11-11).
+  disk next to the current archive drive is fine (field report 2026-11-11). Since review 2026-11-12 it is
+  also refused while another connected disk that could itself be erased hides its serial and has the
+  same model and size (the two rows read the same, and `ERASE` says nothing about which one is meant).
+* A drive whose serial is missing (a UniqueId only) or shorter than the characters to type cannot be
+  confirmed against its label, so erasing it is not offered (`no_confirmation`, review 2026-11-12).
+* The elevated helper reads the serial as the listing does: Get-Disk's, else Win32_DiskDrive's
+  (review 2026-11-12; before, such a drive always failed with "The drive changed").
 * In such a dock the serial and UniqueId identify the dock or bay, not the disk, so they are not
   used to recognise drives Sentinel has used before (field report 2026-11-11: a brand-new disk was
   taken for SENTINEL_1 and could not be set up). Such drives are recognised by their contents only

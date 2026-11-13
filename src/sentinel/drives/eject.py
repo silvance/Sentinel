@@ -131,6 +131,18 @@ def _flush_windows(disk: DiskInfo, steps: list[dict[str, Any]]) -> None:
     steps.append({"step": "flush", "ok": True, "volumes": len(paths)})
 
 
+def _is_this_disk(disk: DiskInfo, other: DiskInfo) -> bool:
+    """Is ``other`` (from a new listing) still the disk that was ejected? Review 2026-11-12: compared by its
+    Plug-and-Play instance ID, which no two connected devices share, not by the hardware key: behind bridges
+    that report placeholder serials a second disk of the same model and size has the same key, and the removal
+    was reported as failed ("Do not unplug it") although it had worked. A disk listed without an instance ID
+    counts as this one if its whole identity (contents included) is the same."""
+    pnp = (disk.pnp_device_id or "").lower()
+    if other.pnp_device_id:
+        return other.pnp_device_id.lower() == pnp
+    return other.identity.fingerprint() == disk.identity.fingerprint()
+
+
 def safe_remove_windows(disk: DiskInfo, all_disks: list[DiskInfo], protected: ProtectedStorage, *,
                         enumerate_fn: Callable[[], list[DiskInfo]], wait_s: float = 15.0) -> SafeRemoveResult:
     steps: list[dict[str, Any]] = []
@@ -166,9 +178,8 @@ def safe_remove_windows(disk: DiskInfo, all_disks: list[DiskInfo], protected: Pr
         return SafeRemoveResult(False, "The drive is still in use and cannot be removed yet. Close any open files "
                                 "on it and try again.", needs_admin=(veto == 13) or None, steps=steps, veto=vt)
     deadline = time.monotonic() + wait_s
-    ident = disk.identity
     while time.monotonic() < deadline:
-        if not any(d.identity.same_device(ident) for d in enumerate_fn()):
+        if not any(_is_this_disk(disk, d) for d in enumerate_fn()):
             steps.append({"step": "verify_gone", "ok": True})
             return SafeRemoveResult(True, "SAFE TO REMOVE DRIVE", needs_admin=False, steps=steps)
         time.sleep(1.0)
@@ -197,6 +208,46 @@ def safe_remove_linux(disk: DiskInfo, protected: ProtectedStorage) -> SafeRemove
         return SafeRemoveResult(False, "The drive could not be switched off. Do not unplug it. "
                                 "Contact technical support.", needs_admin=None, steps=steps)
     return SafeRemoveResult(True, "SAFE TO REMOVE DRIVE", needs_admin=False, steps=steps)
+
+
+ARCHIVE_SWAP_READY = "archive_swap_ready"   # the archive copier's own "taken out for the office" event
+
+
+def archive_marker(disk: DiskInfo, inspector: Callable[[Any], Any] | None = None) -> dict[str, Any] | None:
+    """The disk's SENTINEL_DRIVE.json if it marks an archive drive (``"role": "archive"`` with a drive_uuid)."""
+    from .marker import inspect_volume
+
+    look = inspector or inspect_volume
+    for v in disk.volumes:
+        try:
+            rc = look(v)
+        except OSError:
+            continue
+        m = rc.marker if rc.readable else None
+        if isinstance(m, dict) and m.get("role") == "archive" and m.get("drive_uuid"):
+            return m
+    return None
+
+
+def record_archive_removal(ledger: Any, marker: dict[str, Any]) -> None:
+    """Record an archive drive taken out with Safely remove exactly as the archive copier records one taken out
+    with Swap (review 2026-11-12): event ``archive_swap_ready`` (category ``archive``) with the copier's drive
+    key ``drive_uuid:<uuid>`` and the highest copy id on the drive. Return to service compares the copies on the
+    drive with that id (sentinel.archive.ledger.ArchiveLedger.last_swap_since_return). Only after the drive
+    was ejected while the copier was not running. Retries while the ledger is locked."""
+    from ..export.ledger import retry_locked
+
+    drive_id = f"drive_uuid:{marker['drive_uuid']}"
+
+    @retry_locked
+    def write() -> None:
+        rows = ledger.query("SELECT MAX(copy_id) FROM archive_copies WHERE drive_id=?", (drive_id,))
+        last = int(rows[0][0] or 0) if rows else 0
+        ledger.add_event("audit", "archive", ARCHIVE_SWAP_READY, "Archive drive taken out with Safely remove",
+                         {"drive_id": drive_id, "ejected": True, "detail": "drives eject (Safely remove)",
+                          "last_copy_id": last, "label": marker.get("label"), "via": "drives_eject"})
+
+    write()
 
 
 def safe_remove(disk: DiskInfo, all_disks: list[DiskInfo], protected: ProtectedStorage, *,

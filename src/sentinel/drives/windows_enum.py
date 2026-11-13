@@ -179,6 +179,9 @@ def parse_windows_snapshot(data: dict[str, Any]) -> list[DiskInfo]:
         style = _enum(d.get("PartitionStyle"), PART_STYLE)
         style = style.upper() if style else None
         dd = pnp.get(number, {})
+        # Serial: Get-Disk's, else Win32_DiskDrive's (same Index). The elevated helper applies the same rule
+        # (commands.WINDOWS_TEMPLATE, Disk-Serial); review 2026-11-12: it used to read Get-Disk only, so a
+        # drive whose serial came from Win32_DiskDrive could never be set up ("The drive changed").
         out.append(DiskInfo(
             platform="windows", disk_id=str(number),
             serial=norm_serial(d.get("SerialNumber")) or norm_serial(dd.get("SerialNumber")),

@@ -15,8 +15,9 @@ Rules, in order of precedence (design choices are marked *):
 4. UNSUITABLE (other): offline, read-only, health Warning/Unhealthy, smaller than ``min_size_gb``,
    bus not in ``allowed_bus_types``*, no serial and no UniqueId*, protected disks could not be
    determined*, ledger unreadable* (fail closed).
-5. BLANK: no partition table / no data partitions, or one empty data partition already in the
-   approved filesystem but without a marker.
+5. BLANK: no data partitions, or one empty data partition already in the approved filesystem but
+   without a marker. No partition table at all is BLANK on Linux only (lsblk probes whole-disk
+   signatures); on Windows it is FOREIGN_DATA ``unknown_contents`` (review 2026-11-12).
 6. WRONG_FORMAT: only empty data partitions, but not exactly one in the approved filesystem.
 7. FOREIGN_DATA: files at the root of any data volume; or anything that cannot be read and therefore
    might hold data* (unrecognised filesystem, unmounted volume on Linux, access denied); or
@@ -45,6 +46,7 @@ from .model import (
     DiskInfo,
     DriveClass,
     VolumeInfo,
+    confirm_text,
     fs_display,
     human_size,
 )
@@ -63,6 +65,10 @@ UNSUITABLE_MESSAGES: dict[str, str] = {
                          "Contact technical support.",
     "ledger_unavailable": "Drive checks are unavailable because the recording records could not be read. "
                           "Contact technical support.",
+    # Review 2026-11-12: the operator window runs without administrator rights and cannot read the ledger.
+    # That is normal, not a fault: say who can check the drive instead of sending the agent to support.
+    "ledger_needs_admin": "This drive can only be checked with administrator rights (this account cannot read "
+                          "Sentinel's records). Press Unlock… to check it.",
     "offline": "This drive is switched off in Windows and cannot be used. Contact technical support.",
     "read_only": "This drive is write-protected and cannot be used.",
     "health": "This drive is reporting a hardware problem and must not be used.",
@@ -72,7 +78,15 @@ UNSUITABLE_MESSAGES: dict[str, str] = {
                    "Use a different drive.",
 }
 HARD_UNSUITABLE = ("system_disk", "recording_storage", "page_file")
-CHECKS_UNAVAILABLE = ("protected_unknown", "ledger_unavailable")
+CHECKS_UNAVAILABLE = ("protected_unknown", "ledger_unavailable", "ledger_needs_admin")
+# Ledger reasons that do not stop a drive with a valid marker from showing as READY (READY never offers
+# erasing). An unresolved protected-storage check still does: a READY drive can be made the archive drive.
+LEDGER_UNREAD = ("ledger_unavailable", "ledger_needs_admin")
+NO_CONFIRMATION_MESSAGE = ("This drive does not report a usable serial number, so erasing it cannot be confirmed "
+                           "against its label. Use a different drive.")
+UNKNOWN_CONTENTS_MESSAGE = ("Windows cannot see what is on this drive (it has no partition table Windows "
+                            "recognises): it may be new and empty, or hold data from another system. "
+                            "Erasing it will delete anything on it.")
 EVIDENCE_MESSAGE = "This drive holds Sentinel recordings and will not be erased. Contact technical support."
 # Why a drive counts as holding recordings, in plain words (owner request 2026-11-12: the refusal named no
 # reason). Several reasons can give the same sentence; each sentence is shown once.
@@ -159,7 +173,7 @@ def _unsuitable_reasons(disk: DiskInfo, policy: DrivePolicy, protected: Protecte
     if not protection_ok:
         reasons.append("protected_unknown")
     if known.error:
-        reasons.append("ledger_unavailable")
+        reasons.append("ledger_needs_admin" if known.needs_admin else "ledger_unavailable")
     if disk.is_offline:
         reasons.append("offline")
     if disk.is_read_only:
@@ -243,11 +257,14 @@ def classify(disk: DiskInfo, policy: DrivePolicy, protected: ProtectedStorage, *
     s = _scan(disk, policy, inspector)
     first_fs = next((f for f in s.data_fs if f), None)
     ready = s.marker is not None and len(s.parts) == 1 and "marker_invalid" not in s.signs
-    if ready and not reasons:
-        # Files on a READY drive are Sentinel's own archive. READY never offers erasing.
+    if ready and all(r in LEDGER_UNREAD for r in reasons):
+        # Files on a READY drive are Sentinel's own archive. READY never offers erasing, so a ledger this
+        # account cannot read does not change it (review 2026-11-12: the operator window showed the archive
+        # drive in use as "holds Sentinel recordings... Contact technical support").
+        notes = (*s.notes, *(["Sentinel's records were not read (no administrator rights)"] if reasons else []))
         return Classification(disk, DriveClass.READY, ("sentinel_drive",), "Archive drive ready.", None,
                               filesystem=first_fs, used_bytes=s.used, marker=s.marker, refusal="already_prepared",
-                              notes=tuple(s.notes))
+                              notes=tuple(notes))
     evidence = list(dict.fromkeys(s.signs + known.matches(disk, tuple(s.marker_uuids))))
     if evidence:
         return Classification(disk, DriveClass.SENTINEL_EVIDENCE, tuple(evidence), EVIDENCE_MESSAGE,
@@ -258,6 +275,12 @@ def classify(disk: DiskInfo, policy: DrivePolicy, protected: ProtectedStorage, *
 
     approved = policy.approved_filesystem
     if not s.parts:
+        if disk.platform == "windows" and disk.partition_style in (None, "RAW"):
+            # Review 2026-11-12: Windows reports a disk used whole by another system (LUKS, LVM, ZFS, a DVR, a
+            # damaged partition table) exactly like a new one: RAW, no partitions. It cannot look inside, so
+            # the contents are unknown and the stricter path applies (Linux probes signatures: lsblk FSTYPE).
+            return _preparable(disk, policy, DriveClass.FOREIGN_DATA, ("unknown_contents",),
+                               UNKNOWN_CONTENTS_MESSAGE)
         why = "no_partition_table" if disk.partition_style in (None, "RAW") else "no_data_partitions"
         return _preparable(disk, policy, DriveClass.BLANK, (why,), BLANK_MESSAGE)
     if s.foreign:
@@ -299,6 +322,11 @@ def _preparable(disk: DiskInfo, policy: DrivePolicy, cls: DriveClass, reasons: t
         else:
             serial = True
             admin = mode == "admin_only"
+    if can and confirm_text(disk.serial, policy.serial_confirm_chars) is None:
+        # Review 2026-11-12: no serial (a UniqueId only) or one too short to type: the window and the command
+        # line confirm with the serial's last characters, so nothing typed could ever match. Say so up front.
+        return Classification(disk, cls, reasons, NO_CONFIRMATION_MESSAGE, code, filesystem=filesystem,
+                              used_bytes=used, can_prepare=False, refusal="no_confirmation", notes=tuple(notes))
     return Classification(disk, cls, reasons, msg, code, filesystem=filesystem, used_bytes=used,
                           can_prepare=can, needs_admin=admin, needs_serial=serial, refusal=refusal, notes=tuple(notes))
 
@@ -312,24 +340,40 @@ def classify_all(disks: list[DiskInfo], policy: DrivePolicy, protected: Protecte
     if known.error:
         problems = [*problems, f"ledger: {known.error}"]
     classes = [classify(d, policy, protected, inspector=inspector, protection_ok=ok, known=known) for d in disks]
-    return [_refuse_lookalike(c, disks) for c in classes], problems
+    return [_refuse_lookalike(c, classes) for c in classes], problems
 
 
 LOOKALIKE_MESSAGE = ("Another connected drive looks exactly like this one to the computer (the drive dock hides "
                      "their serial numbers and both are empty). Remove the other drive, then try again.")
+LOOKALIKE_HIDDEN_MESSAGE = ("Another connected drive looks the same as this one (same model and size, and the "
+                            "drive dock hides both serial numbers), so the list cannot show which one is in your "
+                            "hand. Remove the other drive, then try again.")
+# Classes that can never be erased: picking one of them by mistake erases nothing.
+_NEVER_ERASED = (DriveClass.READY, DriveClass.SENTINEL_EVIDENCE)
 
 
-def _refuse_lookalike(c: Classification, disks: list[DiskInfo]) -> Classification:
+def _refuse_lookalike(c: Classification, classes: list[Classification]) -> Classification:
     """Erasing is refused while another connected disk has the same *full* identity: same serial,
     model and size and the same partition table and volume IDs (C2: a dock that reports one
     placeholder serial for both bays, with two blank disks of one model). Only then could the disk
     confirmed and the disk erased be different ones without the identity check before erasing
     noticing. A prepared drive (e.g. the current archive drive) next to a new one of the same model
-    differs in its partition and volume IDs, so it is no lookalike (field report 2026-11-10)."""
+    differs in its partition and volume IDs, so it is no lookalike (field report 2026-11-10).
+
+    Review 2026-11-12: when the dock hides the serial, the confirmation is the word ERASE, which says
+    nothing about which drive is meant. So erasing is also refused while another connected disk with a
+    hidden serial has the same model and size and could itself be erased (two rows that read the same);
+    a READY or SENTINEL_EVIDENCE disk next to it is fine, since it is never erased."""
     if not c.can_prepare:
         return c
-    fp = c.disk.identity.fingerprint()
-    if not any(d.disk_id != c.disk.disk_id and d.identity.fingerprint() == fp for d in disks):
-        return c
-    return replace(c, can_prepare=False, refusal="lookalike", message=LOOKALIKE_MESSAGE,
-                   notes=(*c.notes, "another connected disk cannot be told apart from this one"))
+    d0 = c.disk
+    fp = d0.identity.fingerprint()
+    if any(x.disk.disk_id != d0.disk_id and x.disk.identity.fingerprint() == fp for x in classes):
+        return replace(c, can_prepare=False, refusal="lookalike", message=LOOKALIKE_MESSAGE,
+                       notes=(*c.notes, "another connected disk cannot be told apart from this one"))
+    if d0.serial_hidden and any(x.disk.disk_id != d0.disk_id and x.drive_class not in _NEVER_ERASED
+                                and x.disk.serial_hidden and (x.disk.model, x.disk.size_bytes)
+                                == (d0.model, d0.size_bytes) for x in classes):
+        return replace(c, can_prepare=False, refusal="lookalike", message=LOOKALIKE_HIDDEN_MESSAGE,
+                       notes=(*c.notes, "another connected disk of the same model and size hides its serial too"))
+    return c
