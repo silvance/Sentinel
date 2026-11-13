@@ -631,13 +631,13 @@ class AppWindow(QMainWindow):
         assert cfg is not None
         return lambda: read_status(cfg.status_path, max_age_s=max(15.0, 5 * cfg.service.status_interval_s))
 
-    def check_now(self, require_saved_file: bool = True):  # noqa: ANN201
+    def check_now(self, require_saved_file: bool = True, ignore_alerts: frozenset[str] = frozenset()):  # noqa: ANN201
         """Run the self-check; a pass (as administrator) is remembered as the last known good settings."""
         from ...selfcheck import mark_known_good, run_checks
 
         if self.ctx.cfg is None or self.ctx.cfg_path is None:
             return None
-        rep = run_checks(self.ctx.cfg_path, self._status_reader(), self.clock(), require_saved_file)
+        rep = run_checks(self.ctx.cfg_path, self._status_reader(), self.clock(), require_saved_file, ignore_alerts)
         if rep.ok and self.ctx.admin:
             try:
                 mark_known_good(self.ctx.cfg_path, rep)
@@ -652,7 +652,10 @@ class AppWindow(QMainWindow):
         previous version instead."""
         if self.ctx.cfg is None or not self.ctx.admin:
             return
-        self._watch = {"started": self.clock(), "passes": 0, "last": None, "mode": mode}
+        from ...selfcheck import unrelated_alerts
+
+        ignore = unrelated_alerts(self._status_reader()) if mode != "update" else frozenset()
+        self._watch = {"started": self.clock(), "passes": 0, "last": None, "mode": mode, "ignore": ignore}
         what = "new version" if mode == "update" else "new settings"
         self.statusBar().showMessage(f"Checking the recorder with the {what} (up to 3 minutes)…")
         self.watch_timer.start()
@@ -666,7 +669,7 @@ class AppWindow(QMainWindow):
         w = self._watch
         if w is None or (self._restart_task is not None and self._restart_task.running()):
             return
-        rep = self.check_now(require_saved_file=False)
+        rep = self.check_now(require_saved_file=False, ignore_alerts=w.get("ignore") or frozenset())
         if rep is None:
             return
         w["last"] = rep

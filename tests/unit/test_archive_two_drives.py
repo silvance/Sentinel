@@ -286,3 +286,92 @@ def test_status_heartbeat_continues_while_one_long_file_is_copied_and_read_back(
     w._read_hash(big)
     assert len(beats) - copied >= 2
     assert env.status()["heartbeat_epoch"] > 0
+
+
+def test_a_second_swap_press_never_prepares_the_drive_in_use_or_reuses_the_waiting_one(env: Env) -> None:
+    """Review 2026-11-12: with the full drive waiting to be taken out, another Swap press was armed and then
+    prepared the drive in use, while the full drive was attached and written again."""
+    add_synthetic_run(env.ledger, env.cfg, 4, SEG)
+    a, b = sorted([make_drive(env.tmp, "A"), make_drive(env.tmp, "B")], key=lambda t: t.drive_key)
+    io = CappedIO({Path(a.root): 2 * SEG + 60_000})
+    bays = Bays(a, b)
+    w = env.worker(bays, io)
+    for _ in range(6):
+        if drain(w)[-1] == "idle":
+            break
+    db = env.drive_id(b.label)
+    w.request_swap()
+    assert w.step() == "swapped" and w.att is not None and w.att.drive_id == db
+    w.request_swap()                                  # pressed again: ignored while A waits to be taken out
+    add_synthetic_run(env.ledger, env.cfg, 1, SEG)
+    assert drain(w)[-1] == "idle"
+    assert w.att is not None and w.att.drive_id == db
+    st = env.status()
+    assert st["removal"]["label"] == a.label
+    assert {d["label"]: d["use"] for d in st["drives"]} == {b.label: "in_use", a.label: "take_out"}
+
+
+def test_one_drive_a_second_press_does_not_prepare_the_next_drive_inserted(env: Env) -> None:
+    add_synthetic_run(env.ledger, env.cfg, 1, SEG)
+    a, b = make_drive(env.tmp, "A"), make_drive(env.tmp, "B")
+    bays = Bays(a)
+    w = env.worker(bays, CappedIO({}))
+    drain(w)
+    w.request_swap()
+    for _ in range(10):
+        if w.step() == "swapped":
+            break
+    w.request_swap()                                  # pressed again while A is still in its bay
+    assert not w._swap.is_set()
+    bays.targets = [a, b]                             # the next drive goes into the other bay first
+    add_synthetic_run(env.ledger, env.cfg, 1, SEG)
+    drain(w)
+    assert w.att is not None and w.att.drive_id == env.drive_id(b.label)   # B in use, A not written again
+    assert env.status()["removal"]["label"] == a.label
+
+
+def test_a_refused_drive_does_not_block_the_good_drive_next_to_it(env: Env) -> None:
+    """First review run, 2026-11-12: the lowest drive was chosen at every scan, refused, and the other one never
+    tried."""
+    from sentinel.archive.worker import REVIEW_LAYOUT
+
+    add_synthetic_run(env.ledger, env.cfg, 2, SEG)
+    a, b = sorted([make_drive(env.tmp, "A"), make_drive(env.tmp, "B")], key=lambda t: t.drive_key)
+    (Path(a.root) / REVIEW_LAYOUT[0]).mkdir()          # the first drive holds a review-drive layout
+    w = env.worker(Bays(a, b), CappedIO({}))
+    out = [w.step() for _ in range(4)]
+    assert out[0] == "unusable" and "copied" in out
+    assert w.att is not None and w.att.drive_id == b.drive_key
+
+
+def test_one_file_that_cannot_be_read_back_does_not_stop_all_copying(env: Env) -> None:
+    """First review run, 2026-11-12: an I/O error reading one copy back was retried for ever and nothing else
+    was copied; now it is reported (A-006) and skipped after the usual attempts."""
+    import errno
+
+    class BadSector(CappedIO):
+        def __init__(self) -> None:
+            super().__init__({})
+            self.bad: str | None = None
+
+        def read_back(self, path: Path):  # noqa: ANN201
+            if path.suffix == ".ts" and (self.bad is None or self.bad == path.name):
+                self.bad = path.name
+                raise OSError(errno.EIO, "I/O error")
+            return super().read_back(path)
+
+    add_synthetic_run(env.ledger, env.cfg, 3, SEG)
+    a = make_drive(env.tmp, "A")
+    io = BadSector()
+    w = env.worker(Bays(a), io)
+    out = []
+    for _ in range(12):
+        try:
+            out.append(w.step())
+        except OSError:
+            out.append("error")
+    assert out.count("error") == env.cfg.archive.verify_attempts - 1
+    copied = env.ledger.query("SELECT COUNT(*) FROM archive_copies WHERE kind='original' AND state='VERIFIED'")
+    assert copied[0][0] == 2                                      # the other two recordings were copied
+    probs = env.ledger.query("SELECT kind FROM archive_problems")
+    assert [r[0] for r in probs] == ["verify_failed"]             # A-006 names the file

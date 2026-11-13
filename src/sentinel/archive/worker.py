@@ -93,6 +93,9 @@ RETURN_REQUEST = "return.request"   # JSON from ``archive return`` (control fold
 RETURN_RESULT = "return.result.json"
 RETURN_REQUEST_MAX_BYTES = 8192
 SWAPPED_STATE = "swapped_drive.json"   # the drive made safe to remove, kept across a restart of the worker
+# Review 2026-11-12: drives taken out with Swap are not written again until they are returned to service
+# (the office copy is of what the drive held then) or the operator presses Cancel swap.
+AWAITING_STATE = "awaiting_return.json"
 REQUEST_MAX_AGE_S = 900.0        # a swap/resume request older than this is stale and not acted on
 CONTROL_POLL_S = 1.0             # how often a copy in progress looks for a swap request
 HEARTBEAT_S = 10.0               # status heartbeat while one file is copied or read back (a one-hour file
@@ -200,6 +203,7 @@ class ArchiveWorker:
         self._swapped_absent_polls = 0
         self._present: dict[str, ExportTarget] = {}  # archive drives inserted (last scan), the swapped one excluded
         self._full_drives: dict[str, float] = {}    # drive_id -> mono time it was found full
+        self._refused: dict[str, float] = {}        # drive_id -> mono time _attach refused it (review 2026-11-12)
         self._swap_result: tuple[bool, str] | None = None
         self._last_swapped: str | None = None       # drive last prepared for removal (session gone_how)
         self._att_missed = 0                        # consecutive scans that did not see the attached drive
@@ -209,12 +213,24 @@ class ArchiveWorker:
         self._last_publish = 0.0
         self._instance: str | None = None
         self._last_scan: tuple[DriveScan | None, bool] = (None, False)
+        self._awaiting: dict[str, str | None] = {}           # drive_id -> label, swapped and not yet returned
+        self._awaiting_since: dict[str, float] = {}          # drive_id -> when it was swapped (epoch)
+        self._awaiting_present: dict[str, ExportTarget] = {}
         self._load_swapped()
+        self._load_awaiting()
 
     # ================================================================== public control
     def request_swap(self) -> None:
         """Operator pressed "Swap Archive Drive": pause at the next segment boundary, then make the
         drive safe to remove. Recording is not affected."""
+        if self._swapped_drive is not None:
+            # Review 2026-11-12: a second press while a drive waits to be taken out armed a swap that then
+            # prepared the drive in use (or the next one inserted) and made the first drive writable again.
+            log.info("swap request ignored: %s is still waiting to be taken out",
+                     self._swapped_label or self._swapped_drive)
+            self._last_publish = float("-inf")
+            self._wake.set()
+            return
         if not self._swap.is_set():
             self._swap_deadline = self.mono() + self.acfg.swap_max_wait_s
             self._swap.set()
@@ -226,6 +242,7 @@ class ArchiveWorker:
         self._swap_deadline = None
         self._set_swapped(None)
         self._last_swapped = None
+        self._set_awaiting(None)
         self._wake.set()
 
     def stop(self, timeout: float = 60.0) -> None:
@@ -335,7 +352,8 @@ class ArchiveWorker:
                     self._set_swapped(None)
                 else:
                     swapped_present = True
-        usable = {k: t for k, t in by_key.items() if k != self._swapped_drive}
+        self._awaiting_present = {k: t for k, t in by_key.items() if k in self._awaiting and k != self._swapped_drive}
+        usable = {k: t for k, t in by_key.items() if k != self._swapped_drive and k not in self._awaiting}
         self._present = usable
         now = self.mono()
         for k in list(self._full_drives):
@@ -352,7 +370,14 @@ class ArchiveWorker:
             return usable[self.att.drive_id], swapped_present
         if not usable:
             return None, swapped_present
+        for k in list(self._refused):      # tried again once it was re-inserted, or after a while
+            if k not in by_key or now - self._refused[k] >= FULL_RECHECK_S:
+                del self._refused[k]
         room = sorted(k for k in usable if k not in self._full_drives)
+        if len(room) > 1:
+            # First review run, 2026-11-12: a drive the copier refuses (review layout, write test failed, ...)
+            # was chosen again at every scan and the good drive next to it was never used.
+            room = [k for k in room if k not in self._refused] or room
         if room:
             if self.att is None and len(usable) > 1:
                 log.info("%d archive drives inserted; using %s", len(usable), room[0])
@@ -399,9 +424,9 @@ class ArchiveWorker:
         self._open()
         self._poll_control()
         scan = self.locator.scan()
+        self._poll_return(scan)           # first: a drive returned to service is used from this scan on
         target, swapped_present = self._select(scan)
         self._last_scan = (scan, swapped_present)
-        self._poll_return(scan)
         if target is None:
             if self.att is not None:
                 # (review 2026-11-10) one scan that does not see the attached drive (drive not ready,
@@ -417,7 +442,11 @@ class ArchiveWorker:
             if swapped_present:
                 self._waiting_for_removal()
                 return "waiting_for_removal"
-            return self._no_drive(scan)
+            res = self._no_drive(scan)
+            if res == "absent" and self._awaiting_present:
+                self._set(ST_ABSENT, self._awaiting_text() or "")
+                self._publish(force=True)
+            return res
         key = target.drive_key
         self._att_missed = 0
         if self.att is None or self.att.drive_id != key:
@@ -498,6 +527,10 @@ class ArchiveWorker:
             log.warning("archive drive %s removed without preparing", att.drive_id)
 
     def _refuse(self, target: ExportTarget, reason: str) -> bool:
+        try:
+            self._refused[target.drive_key] = self.mono()
+        except TargetError:
+            pass
         self.unusable_reason = reason
         self._event("warning", "archive_drive_unusable", "Archive drive refused",
                     {"reason": reason, "identity": target.identity})
@@ -787,6 +820,33 @@ class ArchiveWorker:
             return False, "That archive drive is not connected. Nothing was deleted.", {}
         drive_id, root, label = target.drive_key, Path(target.root), target.label or "the archive drive"
         copies = self.al.copies_on(drive_id)
+        # Review 2026-11-12: only what the drive held when it was taken out with Swap went to the office.
+        # A drive in use, one not swapped since its last return, or one written to after its swap would
+        # otherwise have copies the office never had recorded as transferred and deleted.
+        swap = self.al.last_swap_since_return(drive_id)
+        if self.att is not None and self.att.drive_id == drive_id:
+            return False, (f"{label} is the archive drive Sentinel is copying to now, so it has not been to the "
+                           "office. Nothing was deleted. Select the drive that came back from the office."), {}
+        if drive_id == self._swapped_drive:
+            # Review 2026-11-12 (first run): prepared for removal but never taken out, so not at the office.
+            return False, (f"{label} was prepared for removal but has not been taken out since, so the office "
+                           "cannot have copied it. Nothing was deleted. Take it out, have the office copy it, then "
+                           "plug it in and return it to service."), {}
+        if swap is None:
+            return False, (f"{label} was not taken out with Swap archive drive since it was set up or last returned "
+                           "to service, so the office copy cannot be of it. Nothing was deleted. Select the drive "
+                           "that came back from the office."), {}
+        last = swap["last_copy_id"]
+        newer = [c for c in copies if (int(c["copy_id"]) > last if last is not None
+                                       else str(c["verified_utc"]) > str(swap["ts_utc"]))]
+        if newer:
+            self._event("warning", "archive_return_refused", "An archive drive was not returned to service: "
+                        "recordings were copied to it after it was taken out for the office",
+                        {"drive_id": drive_id, "copied_after_swap": len(newer)})
+            return False, (f"{len(newer)} recording(s) were copied to {label} after it was taken out with Swap "
+                           "archive drive, so the office copy does not have them. Nothing was deleted. Press Swap "
+                           f"archive drive, take {label} out when the page says so, and have the office copy it "
+                           "again (into a new folder)."), {"copied_after_swap": len(newer)}
         bad = []
         for c in copies:
             try:
@@ -807,6 +867,15 @@ class ArchiveWorker:
         changed = self.al.record_transfer(drive_id, [int(c["copy_id"]) for c in copies], detail) if copies else 0
         deleted, failed = self._clear_drive(root, [c["path"] for c in copies])
         self._full_drives.pop(drive_id, None)
+        since = self._awaiting_since.get(drive_id)
+        self._set_awaiting(drive_id, remove=True)       # in service again: copied to from the next scan
+        # Review 2026-11-12 (first run): with a one-bay dock the drive in use is swapped out only to make room for
+        # the drive coming back from the office (docs/10). Drives swapped after this one's swap and before its
+        # return are such drives: use them again. (One that went to the office as well is safe: copies made to it
+        # after its swap stop its own return until it is swapped and copied again.)
+        if since is not None:
+            for other in [k for k, t in self._awaiting_since.items() if t > since]:
+                self._set_awaiting(other, remove=True)
         if self.att is not None and self.att.drive_id == drive_id:
             self.full = False
             self.io.makedirs(root / layout.index_dir(self.camera_id))
@@ -893,6 +962,57 @@ class ArchiveWorker:
         self._swap.clear()
         self._swap_deadline = None
 
+    def _set_awaiting(self, drive_id: str | None, label: str | None = None, *, remove: bool = False) -> None:
+        """Drives taken out with Swap and not yet returned to service (persisted). ``None`` clears all
+        (Cancel swap); ``remove`` clears one drive (returned to service)."""
+        if drive_id is None:
+            self._awaiting.clear()
+            self._awaiting_since.clear()
+        elif remove:
+            self._awaiting.pop(drive_id, None)
+            self._awaiting_since.pop(drive_id, None)
+        else:
+            self._awaiting[drive_id] = label
+            self._awaiting_since[drive_id] = time.time()
+        self._last_publish = float("-inf")
+        p = self.control_dir / AWAITING_STATE
+        try:
+            if not self._awaiting:
+                p.unlink(missing_ok=True)
+            else:
+                self.control_dir.mkdir(parents=True, exist_ok=True)
+                tmp = p.with_name(p.name + PARTIAL)
+                tmp.write_text(json.dumps({"drives": self._awaiting, "since": self._awaiting_since}), "utf-8")
+                os.replace(tmp, p)
+        except OSError:
+            log.exception("could not record the archive drives waiting to be returned to service")
+
+    def _load_awaiting(self) -> None:
+        p = self.control_dir / AWAITING_STATE
+        try:
+            doc = json.loads(p.read_text("utf-8"))
+        except FileNotFoundError:
+            return
+        except (OSError, ValueError):
+            log.warning("awaiting-return record unreadable; ignored")
+            return
+        drives = doc.get("drives") if isinstance(doc, dict) else None
+        if isinstance(drives, dict):
+            self._awaiting = {str(k): (v if isinstance(v, str) else None) for k, v in drives.items() if k}
+        since = doc.get("since") if isinstance(doc, dict) else None
+        if isinstance(since, dict):
+            self._awaiting_since = {str(k): float(v) for k, v in since.items()
+                                    if k in self._awaiting and isinstance(v, (int, float))}
+
+    def _awaiting_text(self) -> str | None:
+        if not self._awaiting_present:
+            return None
+        names = ", ".join(sorted(str(t.label or self._awaiting.get(k) or "An archive drive")
+                                 for k, t in self._awaiting_present.items()))
+        return (f"{names} was taken out with Swap archive drive, so Sentinel does not copy to it until it is "
+                "returned to service (Drives › Return to service…, after the office has copied it). "
+                "To keep using it without an office copy, press Cancel swap.")
+
     def _has_room(self, t: ExportTarget) -> bool:
         """Room on a drive that is not in use for the next recording (at least one file at the measured rate)."""
         try:
@@ -936,6 +1056,7 @@ class ArchiveWorker:
         self._clear_swap()
         self._swap_result = (res.ejected, res.detail)
         self._set_swapped(att.drive_id, att.target.label)
+        self._set_awaiting(att.drive_id, att.target.label)
         self._full_drives.pop(att.drive_id, None)
         self._present.pop(att.drive_id, None)
         self._last_swapped = att.drive_id
@@ -943,7 +1064,8 @@ class ArchiveWorker:
         self.after_swap = True
         self.att = None
         self._event("audit", "archive_swap_ready", "Archive drive prepared for removal",
-                    {"drive_id": att.drive_id, "ejected": res.ejected, "detail": res.detail})
+                    {"drive_id": att.drive_id, "ejected": res.ejected, "detail": res.detail,
+                     "last_copy_id": self.al.last_copy_id(att.drive_id) if self.al else None})
         self._waiting_for_removal()
         return "swapped"
 
@@ -957,12 +1079,14 @@ class ArchiveWorker:
         self._clear_swap()
         self._swap_result = (res.ejected, res.detail)
         self._set_swapped(key, t.label)
+        self._set_awaiting(key, t.label)
         self._full_drives.pop(key, None)
         self._present.pop(key, None)
         self._last_swapped = key
         self._swapped_absent_polls = 0
         self._event("audit", "archive_swap_ready", "Archive drive prepared for removal",
                     {"drive_id": key, "ejected": res.ejected, "detail": res.detail, "full": True,
+                     "last_copy_id": self.al.last_copy_id(key) if self.al else None,
                      "copying_continues_on": self.att.drive_id if self.att else None})
         if self.att is not None:          # copying carries on: show that, plus which drive to take out
             self._set(ST_COPYING, "Copying recordings to the archive drive. Do not unplug it.")
@@ -1054,8 +1178,23 @@ class ArchiveWorker:
                 self._drive_full(str(exc))
                 return
             except OSError as exc:
-                if not self._drive_error(exc):
+                if self._drive_error(exc):
+                    return
+                # First review run, 2026-11-12: a file on the drive that cannot be read back (bad sector) raised
+                # the same error at every step, so nothing else was ever copied (and A-007 said "not running").
+                # After the usual attempts it is handled like a copy that does not verify: recorded as a problem
+                # (A-006) and skipped, so later recordings keep flowing.
+                key = f"io|{seg['segment_id']}|{drive_id}|{kind}"
+                n = self._verify_attempts.get(key, 0) + 1
+                self._verify_attempts[key] = n
+                if n < self.acfg.verify_attempts:
                     raise
+                self._skip.add(seg["segment_id"])
+                detail = f"{type(exc).__name__}: {exc}"
+                self.al.add_problem(drive_id, "verify_failed", detail, seg["segment_id"])
+                self._event("error", "archive_verify_failed", "An archive copy could not be read back from the "
+                            "archive drive", {"segment_id": seg["segment_id"], "kind": kind, "attempt": n,
+                                              "detail": detail})
                 return
 
     def _drive_error(self, exc: OSError) -> bool:
@@ -1413,11 +1552,14 @@ class ArchiveWorker:
         text = backlog_text(risk.seconds)
         st = self.stats
         notes = [] if self.state in (ST_SAFE, ST_REMOVE_MANUALLY) else [
-            x for x in (self._removal_text(), self._rollover_text()) if x]
+            x for x in (self._removal_text(), self._rollover_text(),
+                        self._awaiting_text() if self.state != ST_ABSENT else None) if x]
         message = " ".join(notes + [f"{self.message} {text}."])
         self.status.write(
             state=self.state, drive=drive, message=message, camera_id=self.camera_id,
             drives=self._drives_status(),
+            awaiting_return=[{"drive_id": k, "label": t.label or self._awaiting.get(k)}
+                             for k, t in sorted(self._awaiting_present.items())],
             removal=None if self._swapped_drive is None else {
                 "drive_id": self._swapped_drive, "label": self._swapped_label,
                 "safe": bool(self._swap_result and self._swap_result[0]), "text": self._removal_text()},
@@ -1456,6 +1598,9 @@ class ArchiveWorker:
                 "full": k in self._full_drives or (in_use and self.full), "free_bytes": free})
         if self._swapped_drive is not None:
             out.append({"drive_id": self._swapped_drive, "label": self._swapped_label, "use": "take_out",
+                        "full": False, "free_bytes": None})
+        for k, t in sorted(self._awaiting_present.items()):
+            out.append({"drive_id": k, "label": t.label or self._awaiting.get(k), "use": "awaiting_return",
                         "full": False, "free_bytes": None})
         return out
 

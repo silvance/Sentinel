@@ -107,7 +107,8 @@ def test_generated_icacls_commands_execute_and_produce_the_intended_acl(tmp_path
     child = d / "sub" / "seg.ts"
     child.write_bytes(b"x")
     subprocess.run(["icacls", str(child), "/grant", "*S-1-5-32-545:(R)"], check=True, capture_output=True)
-    restrict, owner, reset = restrict_dir_steps(d, me, "M")
+    restrict, owner, drop, reset = restrict_dir_steps(d, me, "M")
+    assert drop.action == "remove_account_aces" and drop.params == {"paths": [str(d)], "accounts": "users"}
     for step in (restrict, reset):
         assert step.argv is not None
         cp = subprocess.run(list(step.argv), capture_output=True, text=True)
@@ -163,3 +164,50 @@ def test_private_sddl_has_no_foreign_trustees() -> None:
 def test_real_programdata_is_flagged() -> None:
     from sentinel.platform import get_platform
     assert "can be changed by Users" in get_platform().write_access_problems(Path("C:/ProgramData"))
+
+
+# ---------------------------------------------------------------------- review 2026-11-12 (C-001)
+def test_strip_account_aces_keeps_everything_else_verbatim() -> None:
+    sddl = ("O:S-1-5-21-1-2-3-1001D:PAI(A;;FA;;;S-1-5-21-1-2-3-1001)(A;;FA;;;SY)(A;;FA;;;BA)"
+            "(A;;FR;;;S-1-5-80-9-9)")
+    new, removed = winacl.strip_account_aces(sddl, lambda s: s.startswith("S-1-5-21-"))
+    assert new == "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;S-1-5-80-9-9)" and removed == ["S-1-5-21-1-2-3-1001"]
+    # inherited entries are recomputed by Windows, never kept or dropped as explicit ones
+    new, removed = winacl.strip_account_aces("D:AI(A;ID;FA;;;S-1-5-21-1-2-3-1001)(A;;FA;;;BA)", lambda s: True)
+    assert new == "D:" and removed == ["S-1-5-32-544"]
+    assert winacl.strip_account_aces("D:P(A;;FA;;;SY)", lambda s: False)[0] == "D:P(A;;FA;;;SY)"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows ACLs")
+def test_a_secret_written_for_the_service_does_not_keep_the_writers_full_control(tmp_path: Path) -> None:
+    """The reviewers' C-001 reproduction: the writer's own Full Control stayed after icacls /grant:r and the
+    recorder service refused its credentials file. EXECUTED on this machine (no elevation needed)."""
+    from sentinel.winsvc.commands import secret_file_acl_argv
+    from sentinel.winsvc.credstore import write_protected_credentials
+
+    svc = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"   # TrustedInstaller stands in
+    target = tmp_path / "camera.dpapi"
+    write_protected_credentials(target, "cam", "pw", acl_argv=lambda p: secret_file_acl_argv(p, svc))
+    dacl = winacl.read_dacl(target)
+    assert winacl.disallowed_grants(dacl, {winacl.SID_SYSTEM, winacl.SID_ADMINISTRATORS, svc}) == []
+    assert winacl.current_user_sid() not in {a.sid for a in dacl.aces}
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows ACLs")
+def test_known_good_and_restored_secrets_keep_their_own_permissions(tmp_path: Path) -> None:
+    """First review run, 2026-11-12: copy2 gave camera.secret.good (and a restored secret) the configuration
+    folder's ACL, which grants Users read. EXECUTED on this machine."""
+    from sentinel.selfcheck import write_secret_like
+
+    me = winacl.current_user_sid()
+    cfg = tmp_path / "config"
+    cfg.mkdir()
+    winacl.set_dacl(cfg, f"D:P(A;OICI;FA;;;{me})(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)")
+    secret = cfg / "camera.secret"
+    winacl.write_private_file(secret, b"blob")
+    good = cfg / "camera.secret.good"
+    write_secret_like(good, secret.read_bytes(), secret)
+    assert winacl.SID_USERS not in {a.sid for a in winacl.read_dacl(good).aces}
+    assert good.read_bytes() == b"blob" and not list(cfg.glob("*.partial"))
+    (cfg / "plain").write_bytes(b"x")                     # (the folder does grant Users read)
+    assert winacl.SID_USERS in {a.sid for a in winacl.read_dacl(cfg / "plain").aces}

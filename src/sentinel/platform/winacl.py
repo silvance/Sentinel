@@ -30,6 +30,7 @@ import hashlib
 import re
 import struct
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -524,6 +525,77 @@ def set_dacl(path: Path, sddl: str) -> None:
         rc = adv.SetNamedSecurityInfoW(str(path), SE_FILE_OBJECT, info, None, None, pacl, None)
         if rc != 0:
             raise AclError(rc, f"SetNamedSecurityInfo({path}) failed (Windows error {rc})")
+
+
+def strip_account_aces(sddl: str, drop: Callable[[str], bool]) -> tuple[str, list[str]]:
+    """Pure: the DACL part of ``sddl`` without the explicit ACEs whose trustee ``drop`` selects,
+    and the trustees removed. Inherited ACEs (ID) are left out of an unprotected result: Windows
+    recomputes them from the parent. ACE text is kept verbatim."""
+    idx = sddl.find("D:")
+    if idx < 0:
+        return sddl, []
+    rest = sddl[idx + 2:]
+    end = re.search(r"[SOG]:", rest)
+    if end:
+        rest = rest[:end.start()]
+    head = rest.split("(", 1)[0]
+    protected = "P" in head.replace("NO_ACCESS_CONTROL", "")
+    kept: list[str] = []
+    removed: list[str] = []
+    for body in _ACE_RE.findall(rest):
+        parts = body.split(";")
+        flags = parts[1].upper() if len(parts) > 1 else ""
+        sid = sid_from_sddl(parts[5]) if len(parts) >= 6 else ""
+        inherited = "ID" in _split2(flags)
+        if not inherited and sid and drop(sid):
+            removed.append(sid)
+            continue
+        if inherited and not protected:
+            continue
+        kept.append(f"({body})")
+    return "D:" + ("P" if protected else "") + "".join(kept), sorted(set(removed))
+
+
+def sid_is_user_account(sid: str) -> bool:
+    """True for a local or domain *user* account (S-1-5-21-…, SidTypeUser), or such a SID that no
+    longer resolves (a deleted account). Groups, service accounts and well-known SIDs are False."""
+    sid = sid.upper()
+    if not sid.startswith("S-1-5-21-"):
+        return False
+    ctypes, wintypes, adv, k32 = _api()
+    adv.ConvertStringSidToSidW.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_void_p)]
+    adv.ConvertStringSidToSidW.restype = wintypes.BOOL
+    adv.LookupAccountSidW.argtypes = [wintypes.LPCWSTR, ctypes.c_void_p, wintypes.LPWSTR,
+                                      ctypes.POINTER(wintypes.DWORD), wintypes.LPWSTR,
+                                      ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(ctypes.c_int)]
+    adv.LookupAccountSidW.restype = wintypes.BOOL
+    psid = ctypes.c_void_p()
+    if not adv.ConvertStringSidToSidW(sid, ctypes.byref(psid)):
+        raise _fail(f"ConvertStringSidToSid({sid})")
+    try:
+        name, dom = ctypes.create_unicode_buffer(256), ctypes.create_unicode_buffer(256)
+        n, d, use = wintypes.DWORD(256), wintypes.DWORD(256), ctypes.c_int()
+        if not adv.LookupAccountSidW(None, psid, name, ctypes.byref(n), dom, ctypes.byref(d), ctypes.byref(use)):
+            return ctypes.get_last_error() == 1332          # ERROR_NONE_MAPPED: a deleted account
+        return use.value == 1                               # SidTypeUser
+    finally:
+        k32.LocalFree(psid)
+
+
+def sid_is_account(sid: str) -> bool:
+    """Any local or domain user or group account (S-1-5-21-…)."""
+    return sid.upper().startswith("S-1-5-21-")
+
+
+def remove_account_aces(path: Path, drop: Callable[[str], bool] = sid_is_user_account) -> list[str]:
+    """Remove the explicit ACEs of the accounts ``drop`` selects (default: user accounts) from
+    ``path``; returns the SIDs removed. Review 2026-11-12 (C-001 / install refusal): setup and the
+    credential writers give the account that ran them Full Control, and icacls ``/grant:r`` keeps
+    it, so the installed service refused its own credentials file and configuration folder."""
+    new, removed = strip_account_aces(get_sddl(path), drop)
+    if removed:
+        set_dacl(path, new)
+    return removed
 
 
 def write_private_file(path: Path, data: bytes, user_sid: str | None = None,

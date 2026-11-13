@@ -189,10 +189,12 @@ def test_install_registers_archive_service_after_folder_restriction() -> None:
     grants = [i for i, a in enumerate(argvs) if a[0] == "icacls" and "/grant" in a
               and any(str(x).startswith("*S-1-5-80-") and x.endswith(("RX", "M")) for x in a)
               and i > last_restrict]
-    assert len(grants) == 4
+    assert len(grants) == 6
     granted = {argvs[i][1]: argvs[i][3].split(":")[1] for i in grants}
+    # Review 2026-11-12: plus the operators' request folder (Swap / Cancel swap from the operator window).
     assert granted == {str(DIRS[0]): "(OI)(CI)RX", str(DIRS[1]): "(OI)(CI)M", str(DIRS[2]): "(OI)(CI)M",
-                       str(CFG.parent): "(OI)(CI)RX"}
+                       str(CFG.parent): "(OI)(CI)RX", r"C:\ProgramData\Sentinel\status": "RX",
+                       r"C:\ProgramData\Sentinel\status\requests": "(OI)(CI)M"}
     # Recorder starts first, then the archive copy.
     starts = [a[2] for a in argvs if a[:2] == ("sc.exe", "start") and a[2] != "w32time"]
     assert starts == ["SentinelRecorder", ARCHIVE_SERVICE_NAME]

@@ -48,12 +48,17 @@ def test_spring_forward_resume_time() -> None:
 
 # ---------------------------------------------------------------------- never records
 def test_expired_record_date_does_not_hide_a_never_recording_schedule() -> None:
+    """When the schedule is saved. Loading it later never fails because dates have passed (first review run,
+    2026-11-12: every Sentinel program then refused to start)."""
+    expired = {"enabled": True, "default": "pause",
+               "dates": [{"action": "record", "start": "2020-01-01", "end": "2020-01-02"}]}
     with pytest.raises(ScheduleError, match="never records"):
-        parse_schedule({"enabled": True, "default": "pause",
-                        "dates": [{"action": "record", "start": "2020-01-01", "end": "2020-01-02"}]}, "UTC")
+        parse_schedule(expired, "UTC", saving=True)
+    parse_schedule(expired, "UTC")                       # loading: accepted (the recorder simply stays paused)
     future = datetime.now().year + 1
     parse_schedule({"enabled": True, "default": "pause",
-                    "dates": [{"action": "record", "start": f"{future}-01-01", "end": f"{future}-01-02"}]}, "UTC")
+                    "dates": [{"action": "record", "start": f"{future}-01-01", "end": f"{future}-01-02"}]}, "UTC",
+                   saving=True)
 
 
 def test_far_future_end_date_is_a_config_message_not_a_crash() -> None:

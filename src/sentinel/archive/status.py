@@ -218,5 +218,6 @@ class RecorderArchiveView:
                 continue
         view = {"running": True, "state": doc.get("state"), "drive": doc.get("drive"), "message": doc.get("message"),
                 "backlog": doc.get("backlog") or backlog, "drive_label": doc.get("drive_label"),
-                "drives": doc.get("drives") or [], "removal": doc.get("removal")}
+                "drives": doc.get("drives") or [], "removal": doc.get("removal"),
+                "awaiting_return": doc.get("awaiting_return") or []}   # shows Cancel swap (review 2026-11-12)
         return view, _merge(alerts)

@@ -188,6 +188,15 @@ def cmd_prepare(env: _Env, args: argparse.Namespace, *, reader: Callable[[str], 
         for p in problems:
             print(f"  blocked: {p}")
         return EXIT_REFUSED
+    # Review 2026-11-12: bind the erase to the drive the person was shown (the window's list may be minutes old;
+    # another drive can get the same disk number), not to this new listing.
+    seen_fp = (getattr(args, "fingerprint", None) or "").strip()
+    seen_class = (getattr(args, "expect_class", None) or "").strip().upper()
+    if (seen_fp and seen_fp != c.disk.identity.fingerprint()) or (seen_class and seen_class != str(c.drive_class)):
+        print(f"\n{_alert_line('M-006')}\nDisk {args.disk} is not the drive that was shown when you confirmed: it "
+              f"was replaced or has changed (now: {c.message}). Nothing was erased. Press Refresh list, check "
+              "the drive and try again.")
+        return EXIT_REFUSED
 
     from ..db import Ledger
 
@@ -249,6 +258,9 @@ def cmd_prepare(env: _Env, args: argparse.Namespace, *, reader: Callable[[str], 
             typed = None
         who = args.who or _default_who()
         conf = Confirmation.for_classification(c, typed)
+        if seen_fp or seen_class:      # what the person saw, so prepare_drive's own re-check compares to that
+            conf = Confirmation(c.disk.disk_id, seen_fp or conf.fingerprint,
+                                DriveClass(seen_class) if seen_class else conf.drive_class, typed)
         auth = Authorization(who=who, administrator=admin, method=method)
         if env.windows:
             print("A Windows permission prompt will appear. Approve it to continue.")
@@ -355,6 +367,9 @@ def build_parser() -> argparse.ArgumentParser:
             p.add_argument("--yes", action="store_true", help="non-interactive confirmation (needs --serial-tail)")
             p.add_argument("--serial-tail", help="last characters of the drive's serial number (ERASE when the dock hides the serial)")
             p.add_argument("--dry-run", action="store_true", help="print the elevated script; change nothing")
+            p.add_argument("--fingerprint", help="refuse unless the disk is still the drive with this identity "
+                                                 "fingerprint (the one the person was shown)")
+            p.add_argument("--expect-class", help="refuse unless the disk is still in this class (e.g. BLANK)")
         if name == "eject":
             p.add_argument("--verbose", action="store_true")
         if name == "rename":

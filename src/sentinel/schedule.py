@@ -183,8 +183,11 @@ def _days(value: Any, where: str) -> tuple[int, ...]:
     return tuple(sorted(out))
 
 
-def parse_schedule(raw: Any, default_timezone: str) -> ScheduleConfig:
-    """``[schedule]`` table -> validated :class:`ScheduleConfig` (raises :class:`ScheduleError`)."""
+def parse_schedule(raw: Any, default_timezone: str, *, saving: bool = False) -> ScheduleConfig:
+    """``[schedule]`` table -> validated :class:`ScheduleConfig` (raises :class:`ScheduleError`).
+    ``saving``: the schedule is being saved now, so date periods that have already ended do not count as
+    recording time. Loading never depends on today's date (first review run, 2026-11-12: a schedule with
+    only dated record periods stopped every Sentinel program from starting once the last date had passed)."""
     if raw is None:
         return ScheduleConfig(timezone=default_timezone)
     if not isinstance(raw, dict):
@@ -228,11 +231,11 @@ def parse_schedule(raw: Any, default_timezone: str) -> ScheduleConfig:
             raise ScheduleError(f"{where}: end {d['end']!r} is not after start {d['start']!r}")
         dates.append(DatePeriod(_action(d, where), s, e, f"{where} ({d['action']} {d['start']} to {d['end']})"))
     cfg = ScheduleConfig(enabled, default, tz, tuple(weekly), tuple(dates))
-    _check_conflicts(cfg)
+    _check_conflicts(cfg, datetime.now() if saving else None)
     return cfg
 
 
-def _check_conflicts(cfg: ScheduleConfig) -> None:
+def _check_conflicts(cfg: ScheduleConfig, today: datetime | None = None) -> None:
     flat = [(s, e, w.action, w.text) for w in cfg.weekly for s, e in w.intervals()]
     for i, (s1, e1, a1, t1) in enumerate(flat):
         for s2, e2, a2, t2 in flat[i + 1:]:
@@ -249,8 +252,7 @@ def _check_conflicts(cfg: ScheduleConfig) -> None:
     # Would it ever record? (weekly coverage, ignoring dates that can only add "record" time).
     # Only date periods that have not ended yet count (review 2026-11-10: a long-expired
     # holiday "record" date made a never-recording schedule pass).
-    today = datetime.now()
-    if any(d.action != PAUSE and d.end > today for d in cfg.dates):
+    if any(d.action != PAUSE and (today is None or d.end > today) for d in cfg.dates):
         return
     pause = _merge([(s, e) for s, e, a, _ in flat if a == PAUSE])
     record = [(s, e) for s, e, a, _ in flat if a != PAUSE]

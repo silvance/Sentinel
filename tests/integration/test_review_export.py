@@ -811,3 +811,29 @@ def test_export_runs_in_parallel_with_live_recording_and_second_export_has_no_ho
     finally:
         e.close()
     print(f"two CLI exports during live recording took {elapsed:.1f}s")
+
+
+def test_a_recording_that_cannot_be_sealed_does_not_stop_later_exports(env: Env) -> None:
+    """Review 2026-11-12: a segment the finalizer gave up on (CLOSED, 5 attempts) capped every export at its
+    start until a restart; later drives were told there were no new recordings."""
+    segs = env.sealed()
+    assert len(segs) >= 3
+    stuck = segs[1]
+    with env.ledger.tx() as c:
+        c.execute("UPDATE segments SET state='CLOSED', finalize_attempts=5 WHERE segment_id=?", (stuck["segment_id"],))
+    a = env.drive("A")
+    r1 = env.export(a)
+    m1 = _check_drive(env, a, r1)
+    ids1 = {o["segment_id"] for o in m1["originals"]}
+    later = {s["segment_id"] for s in segs[2:]}
+    assert later <= ids1 and stuck["segment_id"] not in ids1          # exported past it
+    w = next(x for x in m1["warnings"] if x["code"] == "footage_not_sealed")
+    assert w["segment_ids"] == [stuck["segment_id"]]
+    # Sealed later (a restart's recovery): it follows on the next drive as a late recording.
+    with env.ledger.tx() as c:
+        c.execute("UPDATE segments SET state=?, finalize_attempts=0 WHERE segment_id=?",
+                  (stuck["state"], stuck["segment_id"]))
+    b = env.drive("B")
+    r2 = env.export(b)
+    m2 = _check_drive(env, b, r2)
+    assert stuck["segment_id"] in {o["segment_id"] for o in m2["originals"]}

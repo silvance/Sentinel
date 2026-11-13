@@ -80,7 +80,15 @@ def test_install_plan_exact_commands() -> None:
             "*S-1-5-18:F", "*S-1-5-32-544:F", f"*{SVC_SID}:R", "/Q") in argvs
     assert argvs[-1] == ("sc.exe", "start", "SentinelRecorder")
     actions = [s.action for s in steps if s.action]
-    assert actions == ["set_preshutdown_timeout", "make_dirs"]          # frozen build: no environment step
+    assert [a for a in actions if a != "remove_account_aces"] == ["set_preshutdown_timeout", "make_dirs"]
+    # Review 2026-11-12: what first-run setup left (its account's Full Control, ownership) is removed.
+    drops = [s.params for s in steps if s.action == "remove_account_aces"]
+    assert {"paths": [r"C:\ProgramData\Sentinel\config"], "accounts": "all_but",
+            "keep": ["S-1-5-18", "S-1-5-32-544", SVC_SID, "S-1-5-32-545"]} in drops
+    assert {"paths": [r"C:\ProgramData\Sentinel\config\camera.dpapi"], "accounts": "all_but",
+            "keep": ["S-1-5-18", "S-1-5-32-544", SVC_SID]} in drops
+    assert ("icacls", r"C:\ProgramData\Sentinel\config", "/setowner", "*S-1-5-32-544", "/Q") in argvs
+    assert ("icacls", r"C:\ProgramData\Sentinel\config\camera.dpapi", "/setowner", "*S-1-5-32-544", "/Q") in argvs
     pre = [s for s in steps if s.action == "set_preshutdown_timeout"][0]
     assert pre.params == {"service": "SentinelRecorder", "timeout_ms": 180000}
     assert ("net", "localgroup", "Sentinel Operators", "/add",
@@ -91,7 +99,8 @@ def test_install_plan_exact_commands() -> None:
     by_argv = {s.argv: s for s in steps if s.argv}
     assert not by_argv[("net", "localgroup", "Sentinel Operators")].may_fail       # group must exist
     cred = [s for s in steps if s.argv and "camera.dpapi" in " ".join(s.argv)]
-    assert len(cred) == 1 and not cred[0].may_fail                                 # review 2.6: fatal
+    assert len(cred) == 2 and not any(c.may_fail for c in cred)       # review 2.6: fatal (ACL, then owner)
+    assert not any(s.may_fail for s in steps if s.action == "remove_account_aces")
     mk = [s for s in steps if s.action == "make_dirs"][0]
     assert r"C:\ProgramData\Sentinel\status" in mk.params["paths"]
     # The service must exist before folder ACLs name its SID? Not required (SIDs are literal), but

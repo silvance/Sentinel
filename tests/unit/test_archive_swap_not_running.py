@@ -82,3 +82,33 @@ def test_swap_still_waits_for_safe_to_remove_while_the_copier_runs(cfg, capsys) 
         t.cancel()
     assert (cfg.data_path / CONTROL_DIR / SWAP_REQUEST).exists()
     assert "SAFE TO REMOVE DRIVE" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------- review 2026-11-12
+def test_two_drive_swap_is_reported_done_when_the_full_drive_is_prepared(cfg, capsys) -> None:  # noqa: ANN001
+    """With two drives the full one is prepared while copying goes on: the state stays COPYING."""
+    _status(cfg.data_path, "COPYING")
+
+    def answer() -> None:
+        (cfg.data_path / STATUS_FILE).write_text(json.dumps({
+            "state": "COPYING", "heartbeat_epoch": time.time() + 1,
+            "removal": {"drive_id": "d1", "label": "SSD_1", "safe": False,
+                        "text": "SSD_1 is ready to be taken out: Sentinel has finished writing to it."}}), "utf-8")
+    t = threading.Timer(0.6, answer)
+    t.start()
+    try:
+        t0 = time.monotonic()
+        assert arc_cli.main(["swap", "--config", "x.toml", "--timeout", "60"]) == 0
+        assert time.monotonic() - t0 < 10
+    finally:
+        t.cancel()
+    assert "SSD_1 is ready to be taken out" in capsys.readouterr().out
+
+
+def test_a_second_swap_while_a_drive_waits_to_be_taken_out_prepares_nothing(cfg, capsys) -> None:  # noqa: ANN001
+    (cfg.data_path / STATUS_FILE).write_text(json.dumps({
+        "state": "COPYING", "heartbeat_epoch": time.time(),
+        "removal": {"drive_id": "d1", "label": "SSD_1", "text": "SSD_1 is ready to be taken out."}}), "utf-8")
+    assert arc_cli.main(["swap", "--config", "x.toml", "--timeout", "60"]) == 0
+    assert not (cfg.data_path / CONTROL_DIR / SWAP_REQUEST).exists()
+    assert "Take that drive out first; nothing else was prepared" in capsys.readouterr().out

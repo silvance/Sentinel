@@ -817,7 +817,7 @@ def test_after_an_update_the_window_reports_once_and_goes_back_if_the_recorder_d
     went_back: list[tuple[str, bool]] = []
     monkeypatch.setattr(w.pages["system"].updates, "go_back", lambda reason="", ask=True: went_back.append((reason, ask)))
     bad = Report([Check("Settings file", True, "valid"), Check("Recorder running", False, "no status")])
-    monkeypatch.setattr(w, "check_now", lambda require_saved_file=True: bad)
+    monkeypatch.setattr(w, "check_now", lambda require_saved_file=True, ignore_alerts=frozenset(): bad)
     t = [0.0]
     w.clock = lambda: t[0]
     w._watch["started"] = 0.0

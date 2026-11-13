@@ -192,6 +192,10 @@ def restrict_dir_steps(directory: Path, svc_sid: str, service_rights: str = "M",
         Step(f"Restrict {d} to SYSTEM, Administrators and the service account",
              ("icacls", d, "/inheritance:r", "/grant:r", *grants, "/Q")),
         Step(f"Make Administrators the owner of {d}", ("icacls", d, "/setowner", _sid(SID_ADMINISTRATORS), "/Q")),
+        # Review 2026-11-12: /grant:r keeps other trustees, e.g. the Full Control first-run setup gave
+        # the account that ran it ('winsvc status' then reported WIDER THAN EXPECTED).
+        Step(f"Remove access that individual user accounts have to {d} (left by first-run setup)",
+             action="remove_account_aces", params={"paths": [d], "accounts": "users"}),
         # Fails harmlessly ("file not found") when the directory is empty.
         Step(f"Make existing contents of {d} inherit that ACL",
              ("icacls", str(PureWindowsPath(d) / "*"), "/reset", "/T", "/C", "/Q"), may_fail=True),
@@ -301,9 +305,33 @@ def install_plan(inp: InstallInputs, forbidden: Iterable[str] | None = None) -> 
                       ("icacls", str(cfg_dir), "/inheritance:r", "/grant:r",
                        f"{_sid(SID_SYSTEM)}:(OI)(CI)F", f"{_sid(SID_ADMINISTRATORS)}:(OI)(CI)F",
                        f"{_sid(sid)}:(OI)(CI)RX", f"{_sid(SID_USERS)}:(OI)(CI)RX", "/Q")))
+    # Review 2026-11-12: first-run setup leaves its account Full Control and (unelevated) ownership of
+    # the configuration folder; the code-write check (codeacl) then refuses the install and the service.
+    steps += [
+        Step(f"Remove every other account's access to {cfg_dir} (e.g. left by first-run setup)",
+             action="remove_account_aces",
+             params={"paths": [str(cfg_dir)], "accounts": "all_but",
+                     "keep": [SID_SYSTEM, SID_ADMINISTRATORS, sid, SID_USERS]}),
+        Step(f"Make Administrators the owner of {cfg_dir}",
+             ("icacls", str(cfg_dir), "/setowner", _sid(SID_ADMINISTRATORS), "/Q")),
+    ]
+    steps += [
+        Step(f"Make {inp.config_path.name} use the folder's permissions only",
+             ("icacls", str(inp.config_path), "/reset", "/Q")),
+        Step(f"Make Administrators the owner of {inp.config_path.name}",
+             ("icacls", str(inp.config_path), "/setowner", _sid(SID_ADMINISTRATORS), "/Q")),
+    ]
     if inp.credentials_path is not None:
-        steps.append(Step("Camera credentials file: Administrators and the service account only",
-                          secret_file_acl_argv(inp.credentials_path, sid)))
+        steps += [
+            Step("Camera credentials file: Administrators and the service account only",
+                 secret_file_acl_argv(inp.credentials_path, sid)),
+            Step("Camera credentials file: remove every other account's access",
+                 action="remove_account_aces",
+                 params={"paths": [str(inp.credentials_path)], "accounts": "all_but",
+                         "keep": [SID_SYSTEM, SID_ADMINISTRATORS, sid]}),
+            Step("Camera credentials file: Administrators are the owner",
+                 ("icacls", str(inp.credentials_path), "/setowner", _sid(SID_ADMINISTRATORS), "/Q")),
+        ]
     if inp.archive_host is not None:
         steps += archive_service_steps(inp, cfg_dir)
     steps += time_service_steps(inp.time_server)
@@ -354,6 +382,18 @@ def archive_service_steps(inp: InstallInputs, cfg_dir: Path) -> list[Step]:
         Step(f"Archive copy may read the configuration folder {cfg_dir}",
              ("icacls", str(cfg_dir), "/grant", f"{asid}:(OI)(CI)RX", "/Q")),
     ]
+    if inp.status_dir is not None:
+        # Review 2026-11-12: operators ask for Swap / Cancel swap with a file in <status>/requests; the archive
+        # service reads and deletes it. Without these grants it could not, and the operator's request was
+        # never carried out.
+        status = str(inp.status_dir)
+        requests = str(PureWindowsPath(status) / REQUESTS_SUBDIR)
+        steps += [
+            Step(f"Archive copy may look into {status} (this folder only)",
+                 ("icacls", status, "/grant", f"{asid}:RX", "/Q")),
+            Step(f"Archive copy may read and remove operators' swap requests in {requests}",
+                 ("icacls", requests, "/grant", f"{asid}:(OI)(CI)M", "/Q")),
+        ]
     return steps
 
 

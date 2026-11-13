@@ -107,13 +107,26 @@ def _cmd_swap(args: argparse.Namespace) -> int:
         print(COPIER_NOT_RUNNING, flush=True)
         return 3
     before = doc.get("heartbeat_epoch", 0)
+    waiting = doc.get("removal") if isinstance(doc.get("removal"), dict) else None
+    if waiting:
+        # Review 2026-11-12: a second Swap while one drive waits to be taken out prepared the other drive.
+        print(f"{waiting.get('text') or 'An archive drive is ready to be taken out.'} Take that drive out first; "
+              "nothing else was prepared.", flush=True)
+        return 0
     request_swap_file(cfg)
     print("Preparing the archive drive for removal. Do not remove it yet.", flush=True)
     end = time.monotonic() + args.timeout
     while time.monotonic() < end:
         doc = read_archive_status(path) or {}
-        if doc.get("heartbeat_epoch", 0) > before and doc.get("state") in (ST_SAFE, ST_REMOVE_MANUALLY, ST_ABSENT):
+        fresh = doc.get("heartbeat_epoch", 0) > before
+        removal = doc.get("removal") if isinstance(doc.get("removal"), dict) else None
+        if fresh and doc.get("state") in (ST_SAFE, ST_REMOVE_MANUALLY, ST_ABSENT):
             print(doc.get("message", ""), flush=True)
+            return 0
+        if fresh and removal:
+            # Review 2026-11-12: with two drives the FULL drive is prepared while copying goes on to the
+            # other one, so the state stays COPYING / UP_TO_DATE; the removal entry says it is done.
+            print(removal.get("text") or doc.get("message", ""), flush=True)
             return 0
         if not copier_running(doc):
             print("Archive copying stopped while the drive was being prepared. " + COPIER_NOT_RUNNING, flush=True)
@@ -226,6 +239,13 @@ def _cmd_return(args: argparse.Namespace) -> int:
     if not marker or marker.get("role") != "archive" or not marker.get("drive_uuid"):
         print(f"{args.drive} is not a Sentinel archive drive. Nothing was deleted.", file=sys.stderr)
         return 2
+    expect = (getattr(args, "expect_uuid", None) or "").strip().lower()
+    if expect and str(marker["drive_uuid"]).strip().lower() != expect:
+        # Review 2026-11-12: the window names the drive the person confirmed; another drive now at that letter
+        # (replugged, letters changed) is never cleared.
+        print(f"The drive at {args.drive} ({marker.get('label') or 'unnamed'}) is not the drive you selected. "
+              "Nothing was deleted. Press Refresh list and select the drive again.", file=sys.stderr)
+        return 2
     status_path = cfg.data_path / STATUS_FILE
     if not copier_running(read_archive_status(status_path) or {}):
         print("Archive copying is not running, so the drive cannot be returned to service now. Nothing was "
@@ -313,6 +333,8 @@ def main(argv: list[str] | None = None) -> int:
             p.add_argument("--checked", action="store_true",
                            help="every file was checked against SHA256SUMS.txt at the office and matched")
             p.add_argument("--timeout", type=float, default=1800.0)
+            p.add_argument("--expect-uuid", default=None,
+                           help="refuse unless the drive at --drive has this drive_uuid (the drive confirmed)")
         if name == "service-plan":
             p.add_argument("--host-command", default=None,
                            help="override; default: the Windows service host with --program archive")

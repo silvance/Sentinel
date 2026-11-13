@@ -96,3 +96,19 @@ def test_an_invalid_file_is_never_restored(tmp_path: Path) -> None:
     with pytest.raises(ConfigError):
         selfcheck.restore(p, bad)
     assert p.read_bytes() == before
+
+
+def test_the_check_after_a_change_ignores_alerts_the_change_did_not_cause(tmp_path: Path) -> None:
+    """First review run, 2026-11-12: an open archive alert (e.g. A-004, a swap is overdue) made every check
+    after a settings save fail, and the window put old settings back."""
+    now = time.time()
+    doc = status_doc(base_measurements(), now, last_segment_end=now - 30)
+    doc["alerts"] = [{"code": "A-004", "severity": 3}, {"code": "S-002", "severity": 3}]
+    cfg = _cfg(tmp_path)
+    assert not selfcheck.run_checks(cfg, _reader(doc), now).ok
+    before = {"alerts": [{"code": "S-002", "severity": 3}]}
+    ignore = selfcheck.unrelated_alerts(_reader(before))
+    assert {"A-004", "S-002"} <= ignore
+    assert selfcheck.run_checks(cfg, _reader(doc), now, ignore_alerts=ignore).ok
+    doc["alerts"].append({"code": "R-005", "severity": 3})     # a new recorder alert still fails the check
+    assert not selfcheck.run_checks(cfg, _reader(doc), now, ignore_alerts=ignore).ok

@@ -222,3 +222,28 @@ def test_safe_remove_not_reported_safe_while_disk_still_present(monkeypatch) -> 
     _patch(monkeypatch, FakeCM(other_parent=3))
     res = ej.safe_remove_windows(d, [d], protected_for(), enumerate_fn=lambda: [d], wait_s=0.1)
     assert not res.ok and "Do not unplug" in res.message
+
+
+def test_the_erase_is_bound_to_the_drive_the_person_was_shown(tmp_path: Path, calls, capsys) -> None:
+    """Review 2026-11-12: the window's list can be minutes old; a different drive (or the same drive, now
+    holding files) at that disk number is never erased."""
+    shown = blank_disk()
+    fp = shown.identity.fingerprint()
+    # Another drive now has disk number 9 (same serial-hiding dock: the confirmation word is the same).
+    other = foreign_disk()
+    assert other.disk_id == shown.disk_id == "9" and other.identity.fingerprint() != fp
+    env = FakeEnv(tmp_path, [other, system_disk()], inspector=FakeInspector())
+    args = _args("--yes", "--serial-tail", "abcd", "--who", "op1", "--admin", "--fingerprint", fp,
+                 "--expect-class", "BLANK")
+    assert cli.cmd_prepare(env, args, interactive=False) == cli.EXIT_REFUSED and calls == []
+    assert "is not the drive that was shown" in capsys.readouterr().out
+    # The same drive as shown: erased, and the confirmation carries what was shown.
+    env = FakeEnv(tmp_path, [shown, system_disk()])
+    args = _args("--yes", "--serial-tail", "abcd", "--who", "op1", "--fingerprint", fp, "--expect-class", "BLANK")
+    assert cli.cmd_prepare(env, args, interactive=False) == 0
+    assert calls[0][1].fingerprint == fp and str(calls[0][1].drive_class) == "BLANK"
+    # The same drive, but it now holds files: refused.
+    calls.clear()
+    args = _args("--yes", "--serial-tail", "abcd", "--who", "op1", "--fingerprint", fp, "--expect-class", "READY")
+    assert cli.cmd_prepare(env, args, interactive=False) == cli.EXIT_REFUSED and calls == []
+    assert "is not the drive that was shown" in capsys.readouterr().out

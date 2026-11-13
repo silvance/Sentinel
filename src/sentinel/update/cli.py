@@ -20,8 +20,8 @@ from .. import __version__
 from ..clock import iso_utc
 from ..paths import app_dir, find_config
 from .apply import (Folders, Pending, RecordingState, check_installed, finisher_script, folder_version,
-                    launch_finisher, read_result, record_event, stage, start_recording, stop_recording,
-                    write_result)
+                    launch_finisher, read_result, record_event, restart_after_refusal, stage, start_recording,
+                    stop_recording, write_result)
 from .package import UpdateRefused, read_package
 
 EXIT_OK, EXIT_REFUSED, EXIT_FAILED = 0, 2, 1
@@ -53,6 +53,11 @@ def _confirm(prompt: str, word: str) -> bool:
         return input(f"{prompt}\nType {word} and press Enter to continue: ").strip().upper() == word
     except (EOFError, KeyboardInterrupt):
         return False
+
+
+def _still_stopping(waited_s: float) -> None:
+    print(f"  still finishing the last recording file ({waited_s:.0f} s); please wait, do not close this window",
+          flush=True)
 
 
 def _pause() -> None:
@@ -141,11 +146,14 @@ def cmd_apply(args: argparse.Namespace) -> int:
         cfg_path = _config(args.config)
         print("Stopping the recorder (the current recording file is closed and saved first)...")
         try:
-            st = stop_recording(cfg_path)
-        except UpdateRefused:
+            st = stop_recording(cfg_path, on_wait=_still_stopping)
+        except UpdateRefused as exc:
             import shutil
 
             shutil.rmtree(staging, ignore_errors=True)
+            again = restart_after_refusal(exc, cfg_path)      # review 2026-11-12: never leave it stopped
+            if again:
+                raise UpdateRefused(exc.code, f"{exc} {again}") from None
             raise
         pending = Pending("update", __version__, pkg.version, str(app), str(staging), str(folders.previous),
                           str(cfg_path) if cfg_path else None, asdict(st), str(pkg.path), pkg.sha256, pkg.key_id,
@@ -190,10 +198,12 @@ def cmd_rollback(args: argparse.Namespace) -> int:
         print("Not confirmed. Nothing was changed.")
         return EXIT_REFUSED
     cfg_path = _config(args.config)
+    print("Stopping the recorder (the current recording file is closed and saved first)...")
     try:
-        st = stop_recording(cfg_path)
+        st = stop_recording(cfg_path, on_wait=_still_stopping)
     except UpdateRefused as exc:
-        print(f"Nothing was changed: {exc}")
+        again = restart_after_refusal(exc, cfg_path)          # review 2026-11-12: never leave it stopped
+        print(f"Sentinel did not go back to the previous version: {exc} {again}".rstrip())
         return EXIT_REFUSED
     pending = Pending("rollback", __version__, prev_version, str(app), str(folders.previous), str(folders.previous),
                       str(cfg_path) if cfg_path else None, asdict(st), who=_who(), started_utc=iso_utc(time.time()),

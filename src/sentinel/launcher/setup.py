@@ -359,6 +359,12 @@ def write_secret(path: Path, username: str, password: str, readers: tuple[str, .
             raise SetupError("The credentials file could not be made private: " + "; ".join(problems))
         os.replace(tmp, path)
         replaced = True
+        if readers and sys.platform == "win32":
+            # Review 2026-11-12 (C-001): the installed service reads this file and refuses it while a
+            # user account (the one running setup) holds Full Control.
+            from ..platform import winacl
+
+            winacl.remove_account_aces(path, winacl.sid_is_user_account)
         problems = secret_problems(path, readers) if readers else secret_problems(path)
         if problems:
             raise SetupError("The credentials file could not be made private: " + "; ".join(problems))

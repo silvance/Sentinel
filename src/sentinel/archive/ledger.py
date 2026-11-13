@@ -15,6 +15,7 @@ All writes leave Windows background mode while they hold the SQLite write lock
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 import uuid
@@ -292,6 +293,29 @@ class ArchiveLedger:
                                       {"copy_id": copy_id, "drive_id": row["drive_id"], "path": row["path"],
                                        "reason": reason, "segment_id": row["segment_id"],
                                        "removed_from_this_computer": bool(seg is not None and seg["local_deleted_utc"])}))
+
+    @retry_locked
+    def last_copy_id(self, drive_id: str) -> int:
+        """Highest copy_id ever recorded on the drive (0 = none): kept in the swap event, so a return
+        to service can tell which copies were on the drive when it went to the office."""
+        rows = self.ledger.query("SELECT MAX(copy_id) FROM archive_copies WHERE drive_id=?", (drive_id,))
+        return int(rows[0][0] or 0) if rows else 0
+
+    @retry_locked
+    def last_swap_since_return(self, drive_id: str) -> dict[str, Any] | None:
+        """The drive's latest 'prepared for removal' event if it is newer than its latest return to
+        service (review 2026-11-12), else None: {ts_utc, last_copy_id (None for swaps before 0.3.12)}."""
+        rows = self.ledger.query(
+            "SELECT code, ts_utc, detail FROM events WHERE code IN ('archive_swap_ready', 'archive_drive_returned') "
+            "AND json_extract(detail, '$.drive_id')=? ORDER BY event_id DESC LIMIT 1", (drive_id,))
+        if not rows or rows[0]["code"] != "archive_swap_ready":
+            return None
+        try:
+            detail = json.loads(rows[0]["detail"] or "{}")
+        except ValueError:
+            detail = {}
+        last = detail.get("last_copy_id") if isinstance(detail, dict) else None
+        return {"ts_utc": rows[0]["ts_utc"], "last_copy_id": int(last) if isinstance(last, int) else None}
 
     @retry_locked
     def record_transfer(self, drive_id: str, copy_ids: list[int], detail: dict[str, Any]) -> int:

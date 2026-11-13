@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sys
 import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
@@ -63,10 +64,12 @@ class Report:
 
 
 def run_checks(cfg_path: Path, read_status: Callable[[], tuple[dict[str, Any] | None, str | None]],
-               now: float | None = None, require_saved_file: bool = True) -> Report:
+               now: float | None = None, require_saved_file: bool = True,
+               ignore_alerts: frozenset[str] = frozenset()) -> Report:
     """``read_status`` returns (status document, problem) like ``sentinel.status.read_status``.
     ``require_saved_file``: also require a recording file saved recently (off right after a
-    restart, when the first file of the new run is not due yet)."""
+    restart, when the first file of the new run is not due yet). ``ignore_alerts``: critical alert
+    codes that do not fail the check (the check after a settings change: alerts the change did not cause)."""
     from .config import ConfigError, load_config
 
     now = time.time() if now is None else now
@@ -114,13 +117,27 @@ def run_checks(cfg_path: Path, read_status: Callable[[], tuple[dict[str, Any] | 
             rep.checks.append(Check("Recordings being saved", True, "the first file of this recording is still open"))
         else:
             rep.checks.append(Check("Recordings being saved", False, "no recording file saved yet"))
-    critical = [a for a in doc.get("alerts") or [] if isinstance(a, dict) and a.get("severity") == 3]
+    critical = [a for a in doc.get("alerts") or [] if isinstance(a, dict) and a.get("severity") == 3
+                and str(a.get("code")) not in ignore_alerts]
     rep.checks.append(Check("No critical alerts", not critical,
                             "none" if not critical else "; ".join(str(a.get("code")) for a in critical)))
     warns = [a for a in doc.get("alerts") or [] if isinstance(a, dict) and a.get("severity") == 2]
     if warns:
         rep.checks.append(Check("Warnings", True, ", ".join(str(a.get("code")) for a in warns), warning=True))
     return rep
+
+
+def unrelated_alerts(read_status: Callable[[], tuple[dict[str, Any] | None, str | None]]) -> frozenset[str]:
+    """Critical alerts a settings change cannot have caused (first review run, 2026-11-12: the check after a
+    save rolled the settings back because of them): every archive-drive alert (A-…), and the alerts already
+    open before the change."""
+    try:
+        doc, _problem = read_status()
+    except Exception:  # noqa: BLE001 - no status: nothing open before
+        doc = None
+    before = {str(a.get("code")) for a in (doc or {}).get("alerts") or [] if isinstance(a, dict)
+              and a.get("severity") == 3}
+    return frozenset(before | {"A-001", "A-002", "A-003", "A-004", "A-005", "A-006", "A-007", "A-008", "A-009"})
 
 
 # ---------------------------------------------------------------------- known good and history
@@ -144,6 +161,29 @@ def _copy_atomic(src: Path, dest: Path) -> None:
     os.replace(tmp, dest)
 
 
+def write_secret_like(dest: Path, data: bytes, like: Path | None) -> None:
+    """Write a camera-account file with the permissions of ``like`` (Windows: its DACL; POSIX: 0600), never the
+    folder's. First review run, 2026-11-12: copies made with copy2 took the configuration folder's ACL
+    (Users: read), and the DPAPI machine-scope secret can be decrypted by any local account."""
+    tmp = dest.with_name(dest.name + ".partial")
+    tmp.unlink(missing_ok=True)
+    try:
+        if sys.platform == "win32":
+            from .platform import winacl
+
+            sddl = winacl.get_sddl(like) if like is not None and like.exists() else None
+            winacl.write_private_file(tmp, data)          # private from creation
+            if sddl and sddl.startswith("D:P"):
+                winacl.set_dacl(tmp, sddl)                # exactly the original's (protected) permissions
+        else:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(data)
+        os.replace(tmp, dest)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 def mark_known_good(cfg_path: Path, report: Report) -> Path:
     """Remember the current settings, and the camera account file, as working (passing report only)."""
     assert report.ok
@@ -151,7 +191,7 @@ def mark_known_good(cfg_path: Path, report: Report) -> Path:
     _copy_atomic(cfg_path, dest)
     secret = _secret_of(cfg_path)
     if secret is not None and secret.is_file():
-        _copy_atomic(secret, secret.with_name(secret.name + GOOD_SUFFIX))
+        write_secret_like(secret.with_name(secret.name + GOOD_SUFFIX), secret.read_bytes(), secret)
     cfg_path.with_name(cfg_path.name + GOOD_INFO_SUFFIX).write_text(json.dumps(report.to_dict(), indent=1),
                                                                     encoding="utf-8")
     return dest
@@ -183,7 +223,8 @@ def restore_known_good(cfg_path: Path, clock: Callable[[], float] = time.time) -
     if secret is not None:
         good_secret = secret.with_name(secret.name + GOOD_SUFFIX)
         if good_secret.is_file() and not same_settings(good_secret, secret):
-            _copy_atomic(good_secret, secret)
+            # the live file's permissions (an older .good copy may still have the folder's)
+            write_secret_like(secret, good_secret.read_bytes(), secret if secret.exists() else good_secret)
     return backup
 
 

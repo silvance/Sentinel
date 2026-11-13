@@ -55,7 +55,27 @@ def _act_wait_stopped(service: str, timeout_s: float) -> None:
         raise RuntimeError(f"service still {info.state_name} after {timeout_s:.0f} s")
 
 
+def _act_remove_account_aces(paths: list[str], accounts: str = "users", keep: list[str] | None = None) -> None:
+    """Remove explicit ACEs from each existing path (review 2026-11-12): of individual user accounts
+    ("users"), or of every trustee not in ``keep`` ("all_but")."""
+    from ..platform import winacl
+
+    if accounts == "all_but":
+        kept = {winacl.sid_from_sddl(k.lstrip("*")) for k in keep or ()}
+        if not kept:
+            raise ValueError("all_but needs the trustees to keep")
+
+        def drop(sid: str) -> bool:
+            return sid not in kept
+    else:
+        drop = winacl.sid_is_user_account
+    for p in paths:
+        if Path(p).exists():
+            winacl.remove_account_aces(Path(p), drop)
+
+
 _ACTIONS: dict[str, Callable[..., None]] = {
+    "remove_account_aces": _act_remove_account_aces,
     "set_preshutdown_timeout": _act_set_preshutdown_timeout,
     "set_service_environment": _act_set_service_environment,
     "make_dirs": _act_make_dirs,
@@ -139,7 +159,15 @@ def preflight(cfg_path: Path) -> tuple[InstallInputs | None, list[str], list[str
     if not cfg.storage.status_dir:
         errors.append("[storage] status_dir is not set: operators could not read the recorder status "
                       "(use a separate folder, e.g. C:\\ProgramData\\Sentinel\\status)")
-    errors += [f"code could be changed by a non-administrator: {p}" for p in code_write_problems(cfg, cfg_path, host)]
+    # Review 2026-11-12: the configuration file and folder are made Administrators-only by the install
+    # itself (exact owner, accounts removed, file reset to the folder's ACL), so what first-run setup
+    # left there (its account's Full Control and ownership) is reported, not refused.
+    cfg_items = (str(cfg_path) + " ", str(cfg_path.parent) + " ")
+    for p in code_write_problems(cfg, cfg_path, host):
+        if p.startswith(cfg_items):
+            warnings.append(f"the installation corrects these permissions: {p}")
+        else:
+            errors.append(f"code could be changed by a non-administrator: {p}")
     inp = InstallInputs(cfg_path, (cfg.spool_path, cfg.data_path, cfg.log_path),
                         creds if creds is not None and creds.exists() else None, host,
                         status_dir=cfg.status_dir_path if cfg.storage.status_dir else None,

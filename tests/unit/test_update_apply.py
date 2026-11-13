@@ -251,3 +251,40 @@ def test_process_counts_survive_windows_powershell_unrolling(tmp_path: Path) -> 
     s = ap.finisher_script(p, folders, None)
     assert not re.search(r"(?<!@)\((From-App|Recorders)\)\.Count", s)
     assert "$others = @(From-App)" in s and s.count("@(Recorders).Count") == 2
+
+
+@pytest.mark.skipif(__import__("sys").platform != "win32", reason="Windows services")
+def test_a_stop_that_gives_up_starts_the_services_again() -> None:
+    """Review 2026-11-12: the update gave up after 90 s, said 'Nothing was changed' and left both services
+    stopped (a requested stop is never restarted by the service manager)."""
+    asked, started = [], []
+
+    def sc(args: list[str]) -> subprocess.CompletedProcess:
+        if args[0] == "stop":
+            asked.append(args[1])
+        if args[0] == "start":
+            started.append(args[1])
+            return subprocess.CompletedProcess(args, 0, "", "")
+        state = "3  STOP_PENDING" if args[1] in asked else "4  RUNNING"
+        return subprocess.CompletedProcess(args, 0, f"STATE : {state}", "")
+    with pytest.raises(UpdateRefused) as e:
+        ap.stop_recording(None, sc=sc, sleep=lambda _s: None, timeout_s=0.0)
+    st = e.value.state
+    assert st.service_managed and st.services == ["SentinelRecorder", "SentinelArchive"]
+    assert "Nothing was changed" not in str(e.value)
+    import sentinel.update.apply as apply_mod
+    orig = apply_mod.start_recording
+    try:
+        apply_mod.start_recording = lambda s, c: orig(s, c, sc=sc)
+        assert ap.restart_after_refusal(e.value, None) == "Recording was started again."
+    finally:
+        apply_mod.start_recording = orig
+    assert started == ["SentinelRecorder", "SentinelArchive"]
+
+
+def test_the_update_waits_as_long_as_the_services_may_take_to_stop() -> None:
+    from sentinel.winsvc.scm import ServiceHost
+    import inspect
+
+    deadline = inspect.signature(ServiceHost.__init__).parameters["stop_deadline_s"].default
+    assert ap.STOP_TIMEOUT_S > deadline

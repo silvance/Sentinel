@@ -97,7 +97,8 @@ class LiveState:
     lag_baseline_s: float | None = None
     drift_since_mono: float | None = None
     drift_break_stream_s: float | None = None
-    drift_lag_at_start: float = 0.0
+    drift_lag_at_start: float = 0.0          # lowest lag (by > 0.5 s steps) since the drift started
+    drift_low_mono: float | None = None       # when that lowest lag was last lowered (still catching up)
     last_ok_out_time_s: float | None = None
     internal_errors: int = 0
     # time accuracy (docs/03 §4.2): measured drift of the current run and the correction applied
@@ -483,6 +484,7 @@ class RecordingSupervisor:
                     media_seen, last_adv, last_t = lv.media_seen, lv.last_advance_mono, lv.last_out_time_s
                     drift_since, lag, lag0, brk = (lv.drift_since_mono, lv.lag_s, lv.drift_lag_at_start,
                                                    lv.drift_break_stream_s)
+                    drift_low = lv.drift_low_mono
                     baseline = lv.lag_baseline_s or 0.0
                 if not media_seen and now - mono0 > rec.connect_timeout_s:
                     reason = RunEndReason.CONNECT_TIMEOUT
@@ -495,7 +497,8 @@ class RecordingSupervisor:
                     self._stop_ffmpeg(proc, graceful=True, grace=3.0)
                     break
                 if (drift_since is not None and now - drift_since >= rec.timeline_drift_persist_s
-                        and lag >= lag0 - 0.5 and brk is not None):
+                        and lag >= lag0 - 0.5 and brk is not None
+                        and (drift_low is None or now - drift_low >= rec.timeline_drift_persist_s)):
                     # Stream time is persistently behind real time and is not catching up: real
                     # time passed that is not in the recording. Record where and how much.
                     reason = RunEndReason.TIMELINE_DISCONTINUITY
@@ -863,7 +866,14 @@ class RecordingSupervisor:
                         elif lv.drift_since_mono is None:
                             lv.drift_since_mono = mono
                             lv.drift_lag_at_start = lag
+                            lv.drift_low_mono = mono
                             lv.drift_break_stream_s = lv.last_ok_out_time_s
+                        elif lag < lv.drift_lag_at_start - 0.5:
+                            # Still catching up. First review run, 2026-11-12: comparing with the FIRST lag
+                            # only, a partial burst catch-up after a freeze never counted as "stopped
+                            # catching up", and every segment was held unsealed for the rest of the run.
+                            lv.drift_lag_at_start = lag
+                            lv.drift_low_mono = mono
                 lv.fps = snap.fps
 
     def _read_stderr(self, proc: subprocess.Popen[bytes], tail: deque[str], run_id: str) -> None:

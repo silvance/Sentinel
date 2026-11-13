@@ -73,5 +73,11 @@ def write_protected_credentials(path: Path, username: str, password: str, *, sco
         if back.username != username or back.password != password or back.protection != "dpapi":
             raise CredentialError("verification failed: the protected file did not decrypt to the same values")
         os.replace(tmp, path)
+        if acl_argv is not None and sys.platform == "win32":
+            # Review 2026-11-12 (C-001): icacls /grant:r keeps the Full Control the file was created
+            # with for this account, and the service refuses a secret any user account can open.
+            from ..platform import winacl
+
+            winacl.remove_account_aces(path, winacl.sid_is_user_account)
     finally:
         tmp.unlink(missing_ok=True)

@@ -50,7 +50,8 @@ def _letters(d: dict[str, Any]) -> list[str]:
 
 
 
-_USE_WORDS = {"in_use": "In use", "full": "Full (swap it)", "standby": "Next", "take_out": "Ready to take out"}
+_USE_WORDS = {"in_use": "In use", "full": "Full (swap it)", "standby": "Next", "take_out": "Ready to take out",
+              "awaiting_return": "Back from the office (return it to service)"}
 
 
 SWAP_STATES = (ST_SWAP_PENDING, ST_SAFE, ST_REMOVE_MANUALLY)
@@ -59,7 +60,8 @@ SWAP_STATES = (ST_SWAP_PENDING, ST_SAFE, ST_REMOVE_MANUALLY)
 def swap_under_way(arc: dict[str, Any]) -> bool:
     """A swap is being prepared, or a drive was made safe to remove and is still waiting to be taken out
     (with two drives, copying goes on meanwhile: the state is then COPYING and ``removal`` is set)."""
-    return bool(arc.get("running")) and (arc.get("state") in SWAP_STATES or bool(arc.get("removal")))
+    return bool(arc.get("running")) and (arc.get("state") in SWAP_STATES or bool(arc.get("removal"))
+                                         or bool(arc.get("awaiting_return")))
 
 
 def archive_drives_text(arc: dict[str, Any]) -> str:
@@ -413,8 +415,10 @@ class DrivesPage(Page):
             what = f"the word {HIDDEN_SERIAL_WORD}" if dlg.hidden else f"exactly {chars} characters of the serial number"
             self.problem(f"Enter your name and {what}. Nothing was erased.")
             return
+        seen = [*(["--fingerprint", str(d["fingerprint"])] if d.get("fingerprint") else []),
+                *(["--expect-class", str(d["class"])] if d.get("class") else [])]
         self.log.run(sentinel_argv("drives", "prepare", "--config", self._cfg(), "--disk", str(d["disk_id"]),
-                                   "--who", who, "--admin", "--yes", "--serial-tail", tail),
+                                   "--who", who, "--admin", "--yes", "--serial-tail", tail, *seen),
                      f"Erase and set up disk {d['disk_id']}", busy=[self.erase_btn],
                      on_done=lambda _c, _cmd: self.list.refresh())
 
@@ -474,7 +478,9 @@ class DrivesPage(Page):
         dlg = ReturnDialog(d, self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
-        self.log.run(sentinel_argv("archive", "return", "--config", self._cfg(), "--drive", letters[0], *dlg.args()),
+        expect = ["--expect-uuid", str(d["drive_uuid"])] if d.get("drive_uuid") else []
+        self.log.run(sentinel_argv("archive", "return", "--config", self._cfg(), "--drive", letters[0], *expect,
+                                   *dlg.args()),
                      f"Return {d.get('label') or letters[0]} to service", busy=[self.return_btn],
                      on_done=lambda _c, _cmd: self.list.refresh())
 

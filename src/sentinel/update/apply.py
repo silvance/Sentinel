@@ -53,7 +53,10 @@ STATE_NAME = "pending.json"
 RESULT_NAME = "last_update.json"
 LOG_NAME = "update.log"
 SERVICES = ("SentinelRecorder", "SentinelArchive")
-STOP_TIMEOUT_S = 90.0
+# Review 2026-11-12: a normal recorder stop seals the segment just closed (up to an hour of video) and waits
+# for the content-hash worker, so it can take minutes; the services end themselves after 600 s
+# (winsvc.scm stop_deadline_s). 90 s gave up early and left both services stopped.
+STOP_TIMEOUT_S = 660.0
 
 
 # ---------------------------------------------------------------------- folders
@@ -220,11 +223,31 @@ class RecordingState:
     recorder_running: bool = False
 
 
+def _not_stopped(st: RecordingState, message: str) -> UpdateRefused:
+    exc = UpdateRefused("not_stopped", message)
+    exc.state = st              # type: ignore[attr-defined]  # what was stopped: the caller starts it again
+    return exc
+
+
+def restart_after_refusal(exc: BaseException, cfg_path: Path | None) -> str:
+    """After ``stop_recording`` gave up: start again what it had stopped. A sentence for the operator."""
+    st = getattr(exc, "state", None)
+    if not isinstance(st, RecordingState) or not (st.services or st.recorder_running):
+        return ""
+    ok, detail = start_recording(st, cfg_path)
+    if ok:
+        return "Recording was started again."
+    return (f"Recording could not be started again ({detail}). Restart the computer so that recording starts, "
+            "and contact technical support.")
+
+
 def stop_recording(cfg_path: Path | None, *, control_factory: Callable[..., Any] | None = None,
                    sc: Callable[[list[str]], subprocess.CompletedProcess] = _sc,
-                   sleep: Callable[[float], None] = time.sleep, timeout_s: float = STOP_TIMEOUT_S) -> RecordingState:
+                   sleep: Callable[[float], None] = time.sleep, timeout_s: float = STOP_TIMEOUT_S,
+                   on_wait: Callable[[float], None] | None = None) -> RecordingState:
     """Remember how recording ran, then stop it gracefully. Raises UpdateRefused if the recorder does
-    not stop (nothing has been swapped; the caller restarts what it stopped)."""
+    not stop (no program file has been changed); the exception's ``state`` says what was stopped, and
+    the caller starts it again (:func:`restart_after_refusal`)."""
     st = RecordingState()
     if sys.platform == "win32":
         running = [s for s in SERVICES if service_state(s, sc) == "RUNNING"]
@@ -233,12 +256,18 @@ def stop_recording(cfg_path: Path | None, *, control_factory: Callable[..., Any]
         st.services = running
         for name in reversed(running):          # archive copier first, then the recorder
             sc(["stop", name])
-        end = time.monotonic() + timeout_s
+        st.recorder_running = "SentinelRecorder" in running
+        t0 = time.monotonic()
+        end = t0 + timeout_s
+        next_note = t0 + 30.0
         while any(service_state(s, sc) not in ("STOPPED", None) for s in running):
             if time.monotonic() > end:
-                raise UpdateRefused("not_stopped", "The recorder service did not stop. Nothing was changed.")
+                raise _not_stopped(st, "The recorder service did not stop in time, so the update was not "
+                                       "applied (no program file was changed).")
+            if on_wait is not None and time.monotonic() >= next_note:
+                on_wait(time.monotonic() - t0)
+                next_note += 30.0
             sleep(1.0)
-        st.recorder_running = "SentinelRecorder" in running
         if st.service_managed:
             return st
     if cfg_path is None or not Path(cfg_path).is_file():
@@ -253,7 +282,8 @@ def stop_recording(cfg_path: Path | None, *, control_factory: Callable[..., Any]
     control = (control_factory or select_control)(Path(cfg_path), cfg)
     st.recorder_running = bool(control.is_running())
     if st.recorder_running and not control.stop(timeout_s):
-        raise UpdateRefused("not_stopped", "The recorder did not stop within 90 seconds. Nothing was changed.")
+        raise _not_stopped(st, "The recorder did not stop in time, so the update was not applied (no program "
+                               "file was changed).")
     return st
 
 

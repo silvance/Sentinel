@@ -177,6 +177,13 @@ def unaccounted(start: float, end: float, spans: list[tuple[float, float]], min_
     return [(a, b) for a, b in holes if b - a >= min_hole_s]
 
 
+def _stuck(seg: dict[str, Any]) -> bool:
+    """A recording the finalizer has given up on (sealed again only by a restart's recovery)."""
+    from ..recorder.finalizer import MAX_FINALIZE_ATTEMPTS
+
+    return int(seg.get("finalize_attempts") or 0) >= MAX_FINALIZE_ATTEMPTS
+
+
 # ------------------------------------------------------------------------------ planner
 class Planner:
     def __init__(self, ledger: Ledger, spool: Path, camera_id: str, tz: ZoneInfo) -> None:
@@ -203,6 +210,11 @@ class Planner:
             return start, None
         caps = []
         for s in self._rows(f"SELECT * FROM segments WHERE camera_id=? AND state NOT IN ({marks})", (cam, *TERMINAL)):
+            if _stuck(s):
+                # Review 2026-11-12: a recording the finalizer gave up on stayed un-sealed until the next restart
+                # and stopped every later export at its start ("no new recordings"). Export past it; the plan
+                # names it (footage_not_sealed) and it follows as a late recording once it is sealed.
+                continue
             if s["start_utc"]:
                 caps.append(s["start_utc"])
                 continue
@@ -275,6 +287,17 @@ class Planner:
                                             "after a restart) were removed from this computer before they could be "
                                             "exported. They are kept only on archive drives and are not on this "
                                             "review drive.", "seconds": None})
+        stuck = [x for x in self._rows(f"SELECT segment_id, start_utc, end_utc, finalize_attempts FROM segments "
+                                       f"WHERE camera_id=? AND state NOT IN ({marks}) AND start_utc IS NOT NULL",
+                                       (cam, *TERMINAL)) if _stuck(x)]
+        stuck = [x for x in stuck
+                 if start and end and x["start_utc"] < end and (x["end_utc"] or x["start_utc"]) > start]
+        if stuck:
+            warnings.append({"code": "footage_not_sealed", "segment_ids": [x["segment_id"] for x in stuck],
+                             "periods": [{"start_utc": x["start_utc"], "end_utc": x["end_utc"]} for x in stuck],
+                             "message": "Some recordings in this period could not be sealed (alert V-001), so they are "
+                                        "not on this review drive. They stay on this computer and are exported to a "
+                                        "later review drive once they are sealed.", "seconds": None})
         all_gaps = self._rows("SELECT * FROM recording_gaps WHERE camera_id=? ORDER BY gap_id", (cam,))
         late_ids = {s["segment_id"] for s in late}
 
@@ -356,6 +379,9 @@ class Planner:
                             (cam, *TERMINAL, end, start)):
             spans.append((parse_iso_utc(s["start_utc"]), parse_iso_utc(s["end_utc"])))
         recorded = sum(max(0.0, min(b, e_t) - max(a, s_t)) for a, b in spans)
+        for x in stuck:              # named above (footage_not_sealed), not "neither recordings nor a gap"
+            if x["end_utc"]:
+                spans.append((parse_iso_utc(x["start_utc"]), parse_iso_utc(x["end_utc"])))
         for g in gaps:
             g0 = _t(g["start_utc"]) if g["start_utc"] else s_t
             g1 = _t(g["end_utc"]) if g["end_utc"] else e_t

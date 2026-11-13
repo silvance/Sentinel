@@ -1,6 +1,6 @@
 # Office transfer: moving a full archive drive to office storage
 
-Sentinel 0.3.9. Two parts: the **office** copies the archive drive (an external SSD such as `SSD_1`)
+Sentinel 0.3.9 (0.3.12: see "Safeguards" below). Two parts: the **office** copies the archive drive (an external SSD such as `SSD_1`)
 to its larger drive and checks the copy; the **agent** then returns the SSD to service on the laptop, which
 records where the recordings went and empties the SSD. No Sentinel software is needed at the office.
 
@@ -44,6 +44,20 @@ and only after the copy has been checked. A Sentinel SSD reformatted elsewhere c
    used for copying again; it keeps its name.
 
 If it says recordings are "missing or changed", nothing was deleted: contact technical support.
+
+## Safeguards (0.3.12, review 2026-11-12)
+
+* A drive taken out with **Swap archive drive** is not copied to again when it is plugged back in. The
+  Drives page says it is back from the office and waits to be returned to service; copying goes on to
+  another drive, or the recordings wait on the laptop. (To keep using the drive without an office copy,
+  press **Cancel swap**.) So the office copy always holds everything Return to service deletes. With a
+  one-bay dock, the drive taken out only to make room for the returned one (step 1 above) is used again
+  as usual once the returned drive is back in service.
+* Return to service refuses, and deletes nothing, when the selected drive is the one Sentinel is copying to
+  now, was not taken out with Swap since it was set up or last returned, was prepared for removal but never
+  taken out, or had recordings copied to it after its swap. It also refuses when the drive at that letter is not the one selected (press Refresh list).
+* With two drives, pressing Swap again while one drive is waiting to be taken out prepares nothing else:
+  take that drive out first.
 
 ## Drive names (0.3.11)
 

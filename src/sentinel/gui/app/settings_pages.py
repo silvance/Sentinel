@@ -349,9 +349,9 @@ class CameraPage(SettingsPage):
             if data is None:
                 path.unlink(missing_ok=True)
             else:
-                tmp = path.with_name(path.name + ".restore")
-                tmp.write_bytes(data)
-                tmp.replace(path)
+                from ...selfcheck import write_secret_like     # its own permissions, not the folder's
+
+                write_secret_like(path, data, path if path.exists() else None)
         except OSError as exc:
             self.problem(f"The previous camera account could not be put back ({exc}). Enter the camera "
                          "account again and save.")
@@ -786,7 +786,8 @@ class SchedulePage(SettingsPage):
 
         cfg = self.cfg
         try:
-            sc = parse_schedule(self.tables()["schedule"], cfg.recording.display_timezone if cfg else "UTC")
+            sc = parse_schedule(self.tables()["schedule"], cfg.recording.display_timezone if cfg else "UTC",
+                                saving=True)
             self.plan.setPlainText(render_plan(RecordingSchedule(sc), time.time(), days=14))
         except ScheduleError as exc:
             self.plan.setPlainText(f"Not valid yet: {exc}")

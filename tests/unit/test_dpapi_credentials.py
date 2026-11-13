@@ -72,7 +72,11 @@ def test_protected_file_restricts_acl_before_writing_the_secret(tmp_path: Path) 
     f = tmp_path / "camera.dpapi"
     write_protected_credentials(f, "viewer", "pw", acl_argv=lambda p: ["icacls", str(p), "/inheritance:r"], run=run)
     assert len(seen) == 1 and seen[0][1] == 0 and seen[0][0][1] != str(f)
-    assert load_credentials(f).protection == "dpapi"
+    # (The file was read back and decrypted before it replaced the target.) Review 2026-11-12 (C-001): the
+    # account that wrote it keeps no access of its own; SYSTEM, Administrators and the service read it.
+    from sentinel.platform import winacl
+
+    assert winacl.current_user_sid() not in {a.sid for a in winacl.read_dacl(f).aces}
 
 
 @win
