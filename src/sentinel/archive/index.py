@@ -105,8 +105,12 @@ def previous_entries(index_json: bytes | None, journal: bytes | None) -> dict[st
             pass
     if journal:
         for j in parse_journal(journal):
+            try:
+                size = int(j["size_bytes"])
+            except ValueError:      # a damaged journal line (review 2026-11-12): skipped, never fatal
+                continue
             out.setdefault(j["path"], {"path": j["path"], "kind": j["kind"], "sha256": j["sha256"],
-                                       "size_bytes": int(j["size_bytes"]), "segment_id": j["segment_id"],
+                                       "size_bytes": size, "segment_id": j["segment_id"],
                                        "verified_utc": j["verified_utc"], "ledger_instance": None,
                                        "from": "journal"})
     return out

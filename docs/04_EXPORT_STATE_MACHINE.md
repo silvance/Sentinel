@@ -58,8 +58,10 @@ Operator presses **Swap Archive Drive** →
 1. copy pauses at the next segment boundary (recording continues on the SSD);
 2. in-flight file is finished and verified (or its `.partial` is discarded — never claimed);
 3. index/manifests written and read back; `sync`; UDisks2 Unmount → PowerOff;
-4. screen shows **SAFE TO REMOVE DRIVE** (large, green), plus "Recording continues. Not yet
-   archived: 0 h".
+4. screen says which drive to take out and how, plus "Recording continues. Not yet archived: 0 h". The
+   deployed Windows copier has no software eject (review 2026-11-12), so it never shows **SAFE TO REMOVE**:
+   with one archive drive it says to use Windows' "Safely Remove Hardware" first; with two it names the drive
+   that "is ready to be taken out". (SAFE TO REMOVE appears only where a software eject is wired in.)
 
 Inserting the next drive → identification (§5) → copy resumes from the oldest segment not yet
 verified on *that* drive, or (policy) not yet verified on *any* archive drive.
@@ -90,6 +92,14 @@ TRANSFERRED (audit event `archive_drive_returned`, hash chain), and only then de
 playlists from the drive. The drive keeps its marker and label and is used again. Transferred recordings
 count as archived (not copied again, no A-006) and, for local retention, as copies that left the laptop.
 Erasing a drive that held recordings stays refused; this is the way to reuse one.
+Review 2026-11-12: the return is idempotent. A return interrupted after the transfer was recorded is finished
+when the drive is next seen (or by pressing Return to service again); TRANSFERRED files a return could not
+delete (file open, antivirus) are deleted on the next attach and before each later index write, so the next
+office check does not report them NOT LISTED. Only TRANSFERRED copies with their recorded size are deleted;
+a VERIFIED copy never is. Cancel swap releases only the drive whose swap it cancels and drives inserted at
+that moment; drives at the office stay waiting for their return. A swap pressed while the inserted drive is
+refused, or whose drive is removed without preparing, is dropped instead of preparing the next drive attached.
+One scan that misses the drive in use is not a removal even when another archive drive is inserted.
 
 **Swap while archive copying is stopped (0.3.10, field report 2026-11-12).** With the copier not running
 (A-007), Swap used to wait its full 10 minutes in silence while every other Drives-page button answered "Wait

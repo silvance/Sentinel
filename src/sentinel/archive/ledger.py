@@ -318,6 +318,29 @@ class ArchiveLedger:
         return {"ts_utc": rows[0]["ts_utc"], "last_copy_id": int(last) if isinstance(last, int) else None}
 
     @retry_locked
+    def return_since_swap(self, drive_id: str) -> dict[str, Any] | None:
+        """The drive's latest return to service if it is newer than its latest 'prepared for removal' event, else
+        None (review 2026-11-12: a return interrupted after record_transfer is finished from this)."""
+        rows = self.ledger.query(
+            "SELECT code, ts_utc, detail FROM events WHERE code IN ('archive_swap_ready', 'archive_drive_returned') "
+            "AND json_extract(detail, '$.drive_id')=? ORDER BY event_id DESC LIMIT 1", (drive_id,))
+        if not rows or rows[0]["code"] != "archive_drive_returned":
+            return None
+        try:
+            detail = json.loads(rows[0]["detail"] or "{}")
+        except ValueError:
+            detail = {}
+        return {"ts_utc": rows[0]["ts_utc"], **(detail if isinstance(detail, dict) else {})}
+
+    @retry_locked
+    def transferred_on(self, drive_id: str) -> list[sqlite3.Row]:
+        """Copies on the drive recorded as moved to the office (TRANSFERRED): what a return may delete."""
+        return self.ledger.query(
+            "SELECT a.copy_id, a.path, a.size_bytes FROM archive_copies a JOIN segments s ON s.segment_id=a.segment_id "
+            f"WHERE a.drive_id=? AND a.state='{TRANSFERRED}' AND s.camera_id=? ORDER BY a.copy_id",
+            (drive_id, self.camera_id))
+
+    @retry_locked
     def record_transfer(self, drive_id: str, copy_ids: list[int], detail: dict[str, Any]) -> int:
         """"Return drive to service" (0.3.9): an administrator confirmed that the drive's recordings were
         copied to an office drive and checked there. Every listed VERIFIED copy becomes TRANSFERRED (it

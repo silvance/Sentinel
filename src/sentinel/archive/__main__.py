@@ -1,7 +1,7 @@
 """Command line for the archive copy.
 
     python -m sentinel.archive run    --config <toml>     continuous worker (its own process)
-    python -m sentinel.archive swap   --config <toml>     "Swap Archive Drive": wait for SAFE TO REMOVE
+    python -m sentinel.archive swap   --config <toml>     "Swap Archive Drive": wait until it says what to take out
     python -m sentinel.archive resume --config <toml>     cancel a swap / keep using the same drive
     python -m sentinel.archive status --config <toml>
     python -m sentinel.archive designate   --config <toml> --drive <drive root> --admin-id <id>   (administrator)
@@ -46,8 +46,8 @@ from pathlib import Path
 
 from ..config import ConfigError, load_config
 from ..logging_setup import FORMAT, RedactingFilter, RedactingFormatter
-from .status import (COPIER_NOT_RUNNING, STATUS_FILE, ST_ABSENT, ST_REMOVE_MANUALLY, ST_SAFE, copier_running,
-                     read_archive_status)
+from .status import (COPIER_NOT_RUNNING, STATUS_FILE, ST_ABSENT, ST_REMOVE_MANUALLY, ST_SAFE, ST_UNUSABLE,
+                     copier_running, read_archive_status)
 from .worker import ArchiveWorker, request_resume_file, request_swap_file
 
 
@@ -113,6 +113,11 @@ def _cmd_swap(args: argparse.Namespace) -> int:
         print(f"{waiting.get('text') or 'An archive drive is ready to be taken out.'} Take that drive out first; "
               "nothing else was prepared.", flush=True)
         return 0
+    if doc.get("state") == ST_UNUSABLE:
+        # Review 2026-11-12: nothing is attached; a swap would only prepare the next good drive inserted.
+        print(f"{doc.get('message') or 'The inserted drive cannot be used as an archive drive.'} Nothing was "
+              "prepared for removal: Sentinel is not copying to that drive.", flush=True)
+        return 2
     request_swap_file(cfg)
     print("Preparing the archive drive for removal. Do not remove it yet.", flush=True)
     end = time.monotonic() + args.timeout
@@ -128,6 +133,12 @@ def _cmd_swap(args: argparse.Namespace) -> int:
             # other one, so the state stays COPYING / UP_TO_DATE; the removal entry says it is done.
             print(removal.get("text") or doc.get("message", ""), flush=True)
             return 0
+        if fresh and doc.get("state") == ST_UNUSABLE:
+            # Review 2026-11-12: the copier drops a swap pressed while the inserted drive is refused (it would
+            # otherwise prepare the next good drive inserted); say so instead of waiting the full timeout.
+            print(f"{doc.get('message') or 'The inserted drive cannot be used as an archive drive.'} Nothing was "
+                  "prepared for removal: Sentinel is not copying to that drive.", flush=True)
+            return 2
         if not copier_running(doc):
             print("Archive copying stopped while the drive was being prepared. " + COPIER_NOT_RUNNING, flush=True)
             return 3
@@ -313,7 +324,8 @@ def main(argv: list[str] | None = None) -> int:
         p = sub.add_parser(name)
         p.add_argument("--config", required=True)
         if name == "swap":
-            p.add_argument("--timeout", type=float, default=600.0, help="seconds to wait for SAFE TO REMOVE")
+            p.add_argument("--timeout", type=float, default=600.0,
+                           help="seconds to wait until the drive is ready to be taken out")
         if name == "run":
             p.add_argument("--allow-same-volume", action="store_true",
                            help="development/test only: allow an archive folder on the recording storage volume")
