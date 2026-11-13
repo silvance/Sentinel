@@ -54,7 +54,7 @@ may delete a local segment only when it is sealed, older than `retention_days`, 
 
 ## 3. Swapping the archive drive (operator)
 
-Operator presses **Swap Archive Drive** →
+Operator presses **Swap and safely remove** →
 1. copy pauses at the next segment boundary (recording continues on the SSD);
 2. in-flight file is finished and verified (or its `.partial` is discarded — never claimed);
 3. index/manifests written and read back; `sync`; UDisks2 Unmount → PowerOff;

@@ -218,7 +218,7 @@ def test_the_drive_in_use_or_one_never_taken_out_is_not_returned(env) -> None:  
     _request(cfg, drive)
     w._poll_return(w.locator.scan())
     res = _result(cfg)
-    assert not res["ok"] and "not taken out with Swap archive drive" in res["message"]
+    assert not res["ok"] and "not taken out with Swap and safely remove" in res["message"]
     assert _states(led) == {"VERIFIED": 2}
 
 

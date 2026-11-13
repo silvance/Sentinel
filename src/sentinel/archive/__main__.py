@@ -1,7 +1,7 @@
 """Command line for the archive copy.
 
     python -m sentinel.archive run    --config <toml>     continuous worker (its own process)
-    python -m sentinel.archive swap   --config <toml>     "Swap Archive Drive": wait until it says what to take out
+    python -m sentinel.archive swap   --config <toml>     "Swap and safely remove": wait until it says what to take out
     python -m sentinel.archive resume --config <toml>     cancel a swap / keep using the same drive
     python -m sentinel.archive status --config <toml>
     python -m sentinel.archive designate   --config <toml> --drive <drive root> --admin-id <id>   (administrator)

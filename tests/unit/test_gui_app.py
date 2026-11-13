@@ -1194,3 +1194,42 @@ def test_the_drive_a_swap_could_not_eject_gets_its_own_safely_remove_button(
     page.on_status(SimpleNamespace(doc={"archive": two}))
     assert page.remove_btn.isHidden()
     w.close()
+
+
+def test_swap_and_safely_remove_ejects_the_drive_the_copier_could_not(
+        app: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Owner request 2026-11-13: one button swaps and safely removes; the page ejects the drive when the copier
+    reports it finished but could not make it safe to remove by itself."""
+    from types import SimpleNamespace
+
+    w = _window(app, tmp_path, admin=True)
+    page = w.pages["drives"]
+    assert page.swap_btn.text().strip() == "Swap and safely remove"
+    monkeypatch.setattr(page.list, "refresh", lambda: None)
+    runs: list[list[str]] = []
+    monkeypatch.setattr(page.log, "run", lambda argv, *a, **k: runs.append(argv))
+    page.list.drives = [{"disk_id": "1", "class": "READY", "role": "archive", "label": "SENTINEL_4",
+                         "drive_uuid": "u4", "fingerprint": "fp4", "size_bytes": 2 * 10**12, "mount_paths": ["E:\\"]}]
+    page._show_drives()
+    page._arc_running = True
+    page._swap()
+    assert runs[-1][runs[-1].index("archive") + 1] == "swap"
+    copying = {"running": True, "state": "SWAP_PENDING", "heartbeat_epoch": time.time()}
+    page.on_status(SimpleNamespace(doc={"archive": copying}))
+    assert len(runs) == 1                                       # still copying: nothing removed yet
+    waiting = {"running": True, "state": "REMOVE_MANUALLY", "heartbeat_epoch": time.time(),
+               "removal": {"drive_id": "drive_uuid:u4", "label": "SENTINEL_4", "safe": False}}
+    page.on_status(SimpleNamespace(doc={"archive": waiting}))
+    assert len(runs) == 2 and runs[1][runs[1].index("drives") + 1] == "eject" and "fp4" in runs[1]
+    page.on_status(SimpleNamespace(doc={"archive": waiting}))
+    assert len(runs) == 2                                       # once only (the button stays for a retry)
+    # Cancel swap: no removal afterwards.
+    page._swap()
+    page._resume = page._resume                                 # noqa: PLW0127
+    monkeypatch.setattr(drive_pages, "Command", lambda *a, **k: SimpleNamespace(
+        output=SimpleNamespace(connect=lambda *_: None), finished=SimpleNamespace(connect=lambda *_: None),
+        start=lambda: None))
+    page._resume()
+    page.on_status(SimpleNamespace(doc={"archive": waiting}))
+    assert len(runs) == 3                                       # the swap command only
+    w.close()

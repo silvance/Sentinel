@@ -335,7 +335,7 @@ def cmd_eject(env: _Env, args: argparse.Namespace) -> int:
     if arc is not None and _copier_running(env) and not prepared:
         # Review 2026-11-12: the copier may be writing to it; Swap finishes the copy and records the removal.
         print(f"{_alert_line('M-007')}\n{arc.get('label') or 'This drive'} is an archive drive and archive copying "
-              "is running. Press Swap archive drive instead: it finishes the copying and records the drive as "
+              "is running. Press Swap and safely remove instead: it finishes the copying and records the drive as "
               "taken out. Nothing was removed.")
         return EXIT_REFUSED
     try:
@@ -355,7 +355,7 @@ def _record_removal(env: _Env, marker: dict[str, Any], record: Callable[..., Non
     """Record an archive drive taken out with Safely remove like one taken out with Swap (review 2026-11-12:
     otherwise Return to service refuses it for ever). The sentence for the person."""
     name = marker.get("label") or "The archive drive"
-    later = ("When it comes back from the office, plug it in and press Swap archive drive before returning it "
+    later = ("When it comes back from the office, plug it in and press Swap and safely remove before returning it "
              "to service, or contact technical support.")
     if env.cfg is None:
         return f"{name} was taken out, but Sentinel could not record it (no configuration given). {later}"
@@ -382,7 +382,7 @@ def _record_removal(env: _Env, marker: dict[str, Any], record: Callable[..., Non
     except OSError as exc:
         return (f"{name} is recorded as taken out, but the archive copier's list could not be updated ({exc}). "
                 f"{later}")
-    return f"{name} is recorded as taken out for the office (as with Swap archive drive)."
+    return f"{name} is recorded as taken out for the office (as with Swap and safely remove)."
 
 
 def cmd_rename(env: _Env, args: argparse.Namespace) -> int:

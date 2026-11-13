@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import getpass
 import json
+import time
 from typing import Any
 
 from PySide6.QtCore import QDate, QTimer
@@ -80,6 +81,7 @@ _USE_WORDS = {"in_use": "In use", "full": "Full (swap it)", "standby": "Next", "
 
 
 SWAP_STATES = (ST_SWAP_PENDING, ST_SAFE, ST_REMOVE_MANUALLY)
+AUTO_REMOVE_S = 900.0     # after Swap and safely remove: eject the drive when the copier reports it finished
 
 
 def swap_under_way(arc: dict[str, Any]) -> bool:
@@ -240,9 +242,9 @@ class DrivesPage(Page):
         al.addWidget(self.arc_text)
         row = QHBoxLayout()
         c = ctx.palette.text
-        self.swap_btn = icon_button("Swap archive drive", "swap", c)
-        self.swap_btn.setToolTip("Finish copying and prepare the drive for removal; take it out when this page "
-                                 "says it is ready to be taken out")
+        self.swap_btn = icon_button("Swap and safely remove", "swap", c)
+        self.swap_btn.setToolTip("Finish copying to the archive drive and make it safe to remove; take it out when "
+                                 "this page says it is safe to remove")
         # Owner request 2026-11-11: "Keep using this drive" was always shown, though it only undoes a swap.
         # Now "Cancel swap", shown only while a swap is being prepared or a drive waits to be taken out.
         self.resume_btn = icon_button("Cancel swap", "play", c)
@@ -318,6 +320,7 @@ class DrivesPage(Page):
         self.remove_btn.clicked.connect(self._remove_swapped)
         self.remove_btn.setEnabled(ctx.admin)
         self._removal: dict[str, Any] | None = None
+        self._auto_remove_until: float | None = None
         self.ack_btn.setEnabled(ctx.admin)
         # Swapping is an operator task (every few days): operators ask the archive copier through
         # its request folder; erasing, designating and removing drives stay administrator-only
@@ -372,7 +375,10 @@ class DrivesPage(Page):
         # says to take the drive out as it is: a removal there could stop the other drive too.
         self._removal = rem if (isinstance(rem, dict) and not rem.get("safe") and not rem.get("text")
                                 and arc.get("state") == ST_REMOVE_MANUALLY) else None
+        if isinstance(rem, dict) and rem.get("safe"):
+            self._auto_remove_until = None       # the copier made it safe to remove by itself
         self._update_remove_btn()
+        self._auto_remove()
         if not arc:
             self.arc_text.setText("Archive copying is off. Turn it on in Settings › Storage.")
             return
@@ -435,12 +441,34 @@ class DrivesPage(Page):
         if not self.ctx.admin:
             self._operator_request("swap")
             return
-        self._arc("swap", "--timeout", "600",
-                  stop_note="If the archive copier was already preparing the drive, it carries on: wait until "
-                            "this page says the drive is ready to be taken out, or press Cancel swap.")
+        # Owner request 2026-11-13: one button does both. When the copier cannot make the drive safe to remove by
+        # itself, the page does it as soon as the copier reports the drive finished (see _auto_remove).
+        self._auto_remove_until = (self.ctx.clock or time.time)() + AUTO_REMOVE_S
+        self.log.run(sentinel_argv("archive", "swap", "--config", self._cfg(), "--timeout", "600"),
+                     "Swap and safely remove", busy=[self.swap_btn],
+                     stop_note="If the archive copier was already preparing the drive, it carries on: wait until "
+                               "this page says the drive is ready to be taken out, or press Cancel swap.",
+                     on_done=lambda _c, _cmd: self._auto_remove())
+
+    def _auto_remove(self) -> None:
+        """After Swap and safely remove: the copier finished with the drive but could not eject it (it runs as a
+        service); eject it from here, once."""
+        until = self._auto_remove_until
+        if until is None:
+            return
+        if (self.ctx.clock or time.time)() > until or (self.log.current is not None and self.log.current.running()):
+            if (self.ctx.clock or time.time)() > until:
+                self._auto_remove_until = None
+            return
+        d = self._swapped_drive()
+        if d is None:
+            return
+        self._auto_remove_until = None
+        self._run_eject(d)
 
     def _resume(self) -> None:
         """Cancel a swap / keep using the drive: its own command, even while a swap is waiting."""
+        self._auto_remove_until = None
         if not self.ctx.admin:
             self._operator_request("resume")
             return
@@ -481,6 +509,7 @@ class DrivesPage(Page):
                     break
         self._update_actions()
         self._update_remove_btn()
+        self._auto_remove()
         self.problems.setText(("Erasing is blocked: " + "; ".join(self.list.problems)) if self.list.problems else "")
         then, self._after_load = self._after_load, None
         if then is not None:

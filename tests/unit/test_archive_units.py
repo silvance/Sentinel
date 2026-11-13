@@ -891,7 +891,7 @@ def test_alert_rules_and_catalog() -> None:
     assert evaluate_alerts(c) == []
     msg = evaluate_alerts(Condition(state="FULL", backlog_s=0, threshold_s=1, full=True))[0].message
     assert msg == ("Error A-002: The archive drive is full. Recording continues on this system. Do not unplug the "
-                   "archive drive yet: press Swap Archive Drive and wait until the screen says which drive to "
+                   "archive drive yet: press Swap and safely remove and wait until the screen says which drive to "
                    "take out and how. Take out only that drive, then insert an empty archive drive.")
     assert "SAFE TO REMOVE" not in msg       # review 2026-11-12: the deployed copier never shows those words
 

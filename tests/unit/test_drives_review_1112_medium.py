@@ -246,7 +246,7 @@ def test_safely_removing_an_archive_drive_while_copying_runs_is_refused(tmp_path
     arc, insp = _ready_archive()
     env = EjectEnv(tmp_path, [arc, SYS], insp)
     assert cli.cmd_eject(env, _eject_args()) == cli.EXIT_REFUSED and removals == []
-    assert "Swap archive drive" in capsys.readouterr().out
+    assert "Swap and safely remove" in capsys.readouterr().out
     assert _events(ledger, "archive_swap_ready") == []
 
 

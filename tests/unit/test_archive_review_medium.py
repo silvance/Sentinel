@@ -506,5 +506,5 @@ def test_a_finished_return_is_not_repeated_and_a_drive_not_swapped_again_is_refu
     _request(cfg, drive, request_id="r-2")
     w._poll_return(w.locator.scan())
     res = _result(cfg)
-    assert not res["ok"] and "not taken out with Swap archive drive" in res["message"]
+    assert not res["ok"] and "not taken out with Swap and safely remove" in res["message"]
     assert _states(led) == {"TRANSFERRED": 1, "VERIFIED": 1} and len(_videos(Path(drive.root))) == 1

@@ -9,17 +9,17 @@ and only after the copy has been checked. A Sentinel SSD reformatted elsewhere c
 
 ## At the office
 
-1. **The SSD must have been taken out with "Swap archive drive"** on the laptop (so its index lists every
+1. **The SSD must have been taken out with "Swap and safely remove"** on the laptop (so its index lists every
    file). If it was simply unplugged, first take it back to the laptop:
    * **Only this SSD in the laptop** (one-bay dock such as the Sabrent, or one SSD at a time): if another SSD
-     is in use, press Swap archive drive and take that one out when the screen says so. Plug this SSD in,
-     wait until the Drives page shows it **In use** (or **Full**), press Swap archive drive, and take it out
+     is in use, press Swap and safely remove and take that one out when the screen says so. Plug this SSD in,
+     wait until the Drives page shows it **In use** (or **Full**), press Swap and safely remove, and take it out
      when the screen says so. Put the other SSD back; if the Drives page says it is back from the office,
      press **Cancel swap** (it was only taken out to make room).
    * **Two SSDs connected at the same time** (two separate USB drives): plug this SSD in next to the other
-     one. Swap archive drive prepares the SSD that is *in use*, which is not this one, so: press Swap archive
-     drive once and **take nothing out**; wait until the Drives page shows this SSD **In use** (or **Full**);
-     press **Cancel swap**; then press Swap archive drive again. Take out only the SSD the screen names, and
+     one. Swap and safely remove prepares the SSD that is *in use*, which is not this one, so: press Swap and safely
+     remove once and **take nothing out**; wait until the Drives page shows this SSD **In use** (or **Full**);
+     press **Cancel swap**; then press Swap and safely remove again. Take out only the SSD the screen names, and
      only when it names this SSD (for example "SSD_1 is ready to be taken out"). Never take out an SSD the
      screen has not named.
 2. Plug the SSD into the office computer. It shows as `SSD_1` (or `SSD_2`, …), the name on its sticker.
@@ -43,7 +43,7 @@ and only after the copy has been checked. A Sentinel SSD reformatted elsewhere c
 
 ## On the laptop (agent)
 
-1. Plug the returned SSD in. (With the Sabrent dock: Swap archive drive first and take the drive in use
+1. Plug the returned SSD in. (With the Sabrent dock: Swap and safely remove first and take the drive in use
    out; only one drive at a time in that dock.)
 2. Open the Drives page; the SSD appears by itself. Select it (it shows as "archive drive", named SSD_1).
 3. Press **Return to service…** and fill in from the transfer sheet: where it was copied, who copied it, the
@@ -65,7 +65,7 @@ moved to the office are deleted.
 
 ## Safeguards (0.3.12, review 2026-11-12)
 
-* A drive taken out with **Swap archive drive** is not copied to again when it is plugged back in. The
+* A drive taken out with **Swap and safely remove** is not copied to again when it is plugged back in. The
   Drives page says it is back from the office and waits to be returned to service; copying goes on to
   another drive, or the recordings wait on the laptop. (To keep using the drive without an office copy,
   press **Cancel swap** while it is plugged in.) So the office copy always holds everything Return to service

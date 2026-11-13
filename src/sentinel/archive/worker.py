@@ -109,7 +109,7 @@ REVIEW_LAYOUT = ("README_FIRST.txt", "Recordings", "Manifests", "Originals")
 
 # Review 2026-11-12: the deployed copier has no software eject (ManualRemovalFallback), so the screen never says
 # SAFE TO REMOVE; it says which drive to take out and how (Safely Remove Hardware, or "ready to be taken out").
-MSG_FULL = ("Do not unplug the archive drive yet. It is full: press Swap Archive Drive and wait until the screen "
+MSG_FULL = ("Do not unplug the archive drive yet. It is full: press Swap and safely remove and wait until the screen "
             "says which drive to take out and how, then take out only that drive and insert an empty archive drive.")
 FULL_RECHECK_S = 600.0           # a full drive left in the dock is looked at again after this long
 MSG_REMOVED = ("The archive drive was removed without preparing it. No recordings were lost; copying will "
@@ -226,7 +226,7 @@ class ArchiveWorker:
 
     # ================================================================== public control
     def request_swap(self) -> None:
-        """Operator pressed "Swap Archive Drive": pause at the next segment boundary, then make the
+        """Operator pressed "Swap and safely remove": pause at the next segment boundary, then make the
         drive safe to remove. Recording is not affected."""
         if self._swapped_drive is not None:
             # Review 2026-11-12: a second press while a drive waits to be taken out armed a swap that then
@@ -915,7 +915,7 @@ class ArchiveWorker:
                 return True, msg + self._not_deleted_text(failed), {"files": 0, "bytes": 0, "resumed": True,
                                                                     "not_deleted": len(failed)}
         if swap is None:
-            return False, (f"{label} was not taken out with Swap archive drive since it was set up or last returned "
+            return False, (f"{label} was not taken out with Swap and safely remove since it was set up or last returned "
                            "to service, so the office copy cannot be of it. Nothing was deleted. Select the drive "
                            "that came back from the office."), {}
         last = swap["last_copy_id"]
@@ -1198,7 +1198,7 @@ class ArchiveWorker:
             return None
         names = ", ".join(sorted(str(t.label or self._awaiting.get(k) or "An archive drive")
                                  for k, t in self._awaiting_present.items()))
-        return (f"{names} was taken out with Swap archive drive, so Sentinel does not copy to it until it is "
+        return (f"{names} was taken out with Swap and safely remove, so Sentinel does not copy to it until it is "
                 "returned to service (Drives › Return to service…, after the office has copied it). "
                 "To keep using it without an office copy, press Cancel swap.")
 
@@ -1300,7 +1300,7 @@ class ArchiveWorker:
         if idle is None or self.att is None:
             return None
         return (f"{idle.label or 'One archive drive'} is full; copying continues on "
-                f"{self.att.target.label or 'the other drive'}. Press Swap Archive Drive to take the full drive out.")
+                f"{self.att.target.label or 'the other drive'}. Press Swap and safely remove to take the full drive out.")
 
     def _waiting_for_removal(self) -> None:
         ejected = bool(self._swap_result and self._swap_result[0])
@@ -1310,9 +1310,10 @@ class ArchiveWorker:
             self._set(ST_REMOVE_MANUALLY, self._removal_text() or "Take out the archive drive.")
         elif os.name == "nt":
             # Field report 2026-11-13: one place to do it, the button the Drives page shows for this drive.
-            self._set(ST_REMOVE_MANUALLY, "Copying to the archive drive has finished, but it could not be made safe "
-                                          "to remove by itself. Do not unplug it yet: press Safely remove on "
-                                          "Sentinel's Drives page, and unplug it when it says it is safe to remove.")
+            self._set(ST_REMOVE_MANUALLY, "Do not unplug the archive drive yet. Copying to it has finished, but it "
+                                          "could not be made safe to remove by itself: press Safely remove on "
+                                          "Sentinel's Drives page (or use Windows' \"Safely Remove Hardware\" icon "
+                                          "near the clock), and unplug it when it says it is safe to remove.")
         else:
             self._set(ST_REMOVE_MANUALLY, "Do not unplug the archive drive yet. Use the \"Eject\" or \"Safely "
                                           "remove\" option for this drive and unplug it only after it has "
