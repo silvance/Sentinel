@@ -57,7 +57,12 @@ of values inside ``record``; only ``record``, ``prev_hash`` and ``entry_hash`` c
    at 0 and ``adopted`` only directly after it. This is what stops a well-formed APPENDED entry from
    changing history the recorder treats as final; a key-less chain cannot stop rule-compliant
    appends after the last head copied off the machine (docs/07).
-Anchor log line: ``<anchored UTC> seq=<n> hash=<64 hex> entry_utc=<UTC of entry n> reason=<word>``.
+Anchor log line: ``<anchored UTC> seq=<n> hash=<64 hex> entry_utc=<UTC of entry n> reason=<word>
+[chain=<64 hex>]``. ``chain`` (written since review 2026-11-12; absent from older lines) is the
+``entry_hash`` of entry 0 of the log the head belongs to, so heads of another log on a shared or reused
+drive can be told apart. It is a label, not evidence: a head is only ever confirmed by its ``hash``.
+Review export manifests carry the same values in ``recording_log_head`` (``seq``, ``hash``, ``utc``,
+``chain``).
 """
 
 from __future__ import annotations
@@ -79,7 +84,7 @@ from json.encoder import encode_basestring as _escape   # C-accelerated; = json.
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .clock import iso_utc
+from .clock import iso_utc, parse_iso_utc
 
 if TYPE_CHECKING:
     from .db import Ledger
@@ -333,9 +338,16 @@ class ChainHead:
     seq: int
     hash: str
     utc: str            # when entry `seq` was written (host clock)
+    # Which recording log this head belongs to: entry_hash of entry 0 (review 2026-11-12). Written with
+    # every anchor so a drive used with another ledger (another computer, an earlier installation) can
+    # be told apart. Not part of equality: two heads of the same entry are the same head.
+    chain: str | None = field(default=None, compare=False)
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        d: dict[str, Any] = {"seq": self.seq, "hash": self.hash, "utc": self.utc}
+        if self.chain:
+            d["chain"] = self.chain
+        return d
 
 
 @dataclass
@@ -380,7 +392,8 @@ def head_in(c: sqlite3.Connection) -> ChainHead | None:
         utc = json.loads(row[2]).get("utc", "")
     except (ValueError, AttributeError):
         utc = ""
-    return ChainHead(int(row[0]), str(row[1]), str(utc))
+    first = c.execute("SELECT entry_hash FROM ledger_chain WHERE seq=0").fetchone()
+    return ChainHead(int(row[0]), str(row[1]), str(utc), str(first[0]) if first is not None else None)
 
 
 def append_entry(c: sqlite3.Connection, kind: str, table: str | None, key: str | None, data: Any,
@@ -515,13 +528,20 @@ class Anchor:
     hash: str
     source: str                 # where this copy of the head came from
     anchored_utc: str | None = None
+    chain: str | None = None    # entry_hash of entry 0 of the log it was copied from (None: older line)
+    drive: str | None = None    # the drive / folder it was read from (--anchors-from); None: kept locally
+    camera: str | None = None   # drive anchors: the camera folder / manifest camera_id it was found under
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        d: dict[str, Any] = {"seq": self.seq, "hash": self.hash, "source": self.source,
+                             "anchored_utc": self.anchored_utc}
+        if self.chain:
+            d["chain"] = self.chain
+        return d
 
 
 _ANCHOR_RE = re.compile(r"^(?P<utc>\S+) seq=(?P<seq>\d+) hash=(?P<hash>[0-9a-f]{64}) entry_utc=(?P<eutc>\S*) "
-                        r"reason=(?P<reason>\S+)$")
+                        r"reason=(?P<reason>\S+?)(?: chain=(?P<chain>[0-9a-f]{64}))?$")
 
 
 def current_chain_head(source: Ledger | sqlite3.Connection | Path | str) -> ChainHead | None:
@@ -548,7 +568,8 @@ def append_anchor(log_path: Path, head: ChainHead, reason: str,
     """Append one line to the append-only anchor log and fsync it. Returns the line."""
     if not re.fullmatch(r"[a-z0-9_]+", reason):
         raise ValueError(f"anchor reason must be a lowercase word: {reason!r}")
-    line = f"{iso_utc(time.time())} seq={head.seq} hash={head.hash} entry_utc={head.utc} reason={reason}\n"
+    chain = f" chain={head.chain}" if head.chain and re.fullmatch(r"[0-9a-f]{64}", head.chain) else ""
+    line = f"{iso_utc(time.time())} seq={head.seq} hash={head.hash} entry_utc={head.utc} reason={reason}{chain}\n"
     new = not log_path.exists()
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with open(log_path, "a", encoding="ascii", newline="\n") as fh:
@@ -574,7 +595,8 @@ def read_anchor_log(path: Path | None) -> tuple[list[Anchor], list[str]]:
         if m is None:
             problems.append(f"line {i} of the saved-fingerprint log could not be read")
             continue
-        anchors.append(Anchor(int(m["seq"]), m["hash"], f"in {path.name} line {i} ({m['reason']})", m["utc"]))
+        anchors.append(Anchor(int(m["seq"]), m["hash"], f"in {path.name} line {i} ({m['reason']})", m["utc"],
+                              m["chain"]))
     return anchors, problems
 
 
@@ -582,25 +604,52 @@ def anchors_from(path: Path) -> tuple[list[Anchor], list[str]]:
     """Every copy of the chain head found on a drive or folder that left the machine (review
     2026-11-10): archive drives (``Sentinel/<camera>/INDEX/chain_heads.log``), review drives
     (``Manifests/*/Export_Manifest.json`` field ``recording_log_head``), or one such file given
-    directly. Returns (anchors, notes); unreadable files are noted, not fatal."""
+    directly. Returns (anchors, notes); unreadable files are noted, not fatal.
+
+    (review 2026-11-12) If ``path`` is a folder inside the drive (for example ``E:\\Sentinel\\CAM01``),
+    the fingerprints are looked for in its parent folders up to the drive's top folder. Every anchor
+    carries ``drive=str(path)``, so verification can tell what each drive contributed."""
     path = Path(path)
+    key = str(path)
     anchors: list[Anchor] = []
     notes: list[str] = []
-    logs = [path] if path.is_file() and path.suffix == ".log" else sorted(path.glob("Sentinel/*/INDEX/chain_heads.log"))
-    manifests = [path] if path.is_file() and path.suffix == ".json" else sorted(path.glob("Manifests/*/Export_Manifest.json"))
+    logs: list[Path] = []
+    manifests: list[Path] = []
+    if path.is_file():
+        logs = [path] if path.suffix == ".log" else []
+        manifests = [path] if path.suffix == ".json" else []
+    else:
+        for base in (path, *path.parents):
+            try:
+                logs = sorted(base.glob("Sentinel/*/INDEX/chain_heads.log"))
+                manifests = sorted(base.glob("Manifests/*/Export_Manifest.json"))
+            except OSError:
+                logs, manifests = [], []
+            if logs or manifests:
+                if base != path:
+                    notes.append(f"{path} is a folder inside a drive; the saved fingerprints were read from its "
+                                 f"top folder {base}")
+                break
     for lg in logs:
         found, problems = read_anchor_log(lg)
-        anchors += [Anchor(a.seq, a.hash, f"on {path} ({a.source})", a.anchored_utc) for a in found]
+        camera = lg.parent.parent.name if lg.parent.name == "INDEX" and lg.parent.parent.parent.name == "Sentinel" \
+            else None
+        anchors += [Anchor(a.seq, a.hash, f"on {path} ({a.source})", a.anchored_utc, a.chain, key, camera)
+                    for a in found]
         notes += problems
     for m in manifests:
         try:
-            head = json.loads(m.read_text("utf-8")).get("recording_log_head")
-        except (OSError, ValueError) as exc:
+            doc = json.loads(m.read_text("utf-8"))
+            head = doc.get("recording_log_head")
+        except (OSError, ValueError, AttributeError) as exc:
             notes.append(f"{m}: not readable ({exc})")
             continue
-        if isinstance(head, dict) and isinstance(head.get("seq"), int) and re.fullmatch(r"[0-9a-f]{64}",
-                                                                                        str(head.get("hash"))):
-            anchors.append(Anchor(head["seq"], head["hash"], f"in the review export manifest {m}", head.get("utc")))
+        if isinstance(head, dict) and type(head.get("seq")) is int and re.fullmatch(r"[0-9a-f]{64}",
+                                                                                     str(head.get("hash"))):
+            chain = head.get("chain") if re.fullmatch(r"[0-9a-f]{64}", str(head.get("chain"))) else None
+            camera = doc.get("camera_id") if isinstance(doc.get("camera_id"), str) else None
+            anchors.append(Anchor(head["seq"], head["hash"], f"in the review export manifest {m}",
+                                  head.get("utc") if isinstance(head.get("utc"), str) else None, chain, key, camera))
     if not logs and not manifests:
         notes.append(f"{path}: no recording-log fingerprints found (not an archive or review drive?)")
     return anchors, notes
@@ -724,6 +773,11 @@ class VerifyReport:
     head: ChainHead | None = None
     findings: list[Finding] = field(default_factory=list)   # signs of alteration -> V-003
     faults: list[Finding] = field(default_factory=list)     # protection gaps (system faults) -> V-004
+    # (review 2026-11-12) what was asked for but could not be checked: a drive with nothing of this log
+    # on it, or a drive fingerprint that cannot be tied to this log. Never reported as INTACT (exit 2).
+    unconfirmed: list[Finding] = field(default_factory=list)
+    drive_anchors_compared: dict[str, int] = field(default_factory=dict)   # per --anchors-from drive
+    files_removed_by_retention: int = 0
     notes: list[str] = field(default_factory=list)
     anchors_checked: int = 0
     rows_checked: int = 0
@@ -756,8 +810,12 @@ class VerifyReport:
                 "findings_total": len(self.findings),
                 "protection_gaps": [f.to_dict() for f in self._sorted(self.faults)[:max_findings]],
                 "protection_gaps_total": len(self.faults), "notes": self.notes,
+                "not_checked": [f.to_dict() for f in self._sorted(self.unconfirmed)[:max_findings]],
+                "not_checked_total": len(self.unconfirmed),
+                "drive_anchors_compared": dict(self.drive_anchors_compared),
                 "anchors_checked": self.anchors_checked, "rows_checked": self.rows_checked,
-                "files_checked": self.files_checked, "seconds": round(self.seconds, 3),
+                "files_checked": self.files_checked, "files_removed_by_retention": self.files_removed_by_retention,
+                "seconds": round(self.seconds, 3),
                 "transactions": self.transactions, "longest_read_s": round(self.longest_read_s, 3)}
 
     def render_text(self, max_findings: int = 50) -> str:
@@ -768,6 +826,10 @@ class VerifyReport:
             where = f"at log entry {f.position}" if f.position is not None else "(position unknown)"
             lines += ["RESULT: ALTERED - the recording log has been altered.",
                       f"First problem {where}: {f.message}"]
+        elif self.unconfirmed:
+            lines += ["RESULT: NOT CONFIRMED - no sign of alteration was found, but part of what was asked could not "
+                      "be checked (see 'Not checked' below).",
+                      f"First item not checked: {self._sorted(self.unconfirmed)[0].message}"]
         elif self.faults:
             lines.append(f"RESULT: INTACT, WITH {len(self.faults)} PROTECTION GAP(S) - no sign of alteration, but "
                          "some log entries could not be written when they should have been (system fault).")
@@ -775,9 +837,16 @@ class VerifyReport:
             lines.append("RESULT: INTACT - no sign that the recording log was altered.")
         lines.append(f"Checked: {self.entries} log entries, {self.rows_checked} records, "
                      f"{self.anchors_checked} saved copies of the log fingerprint, {self.files_checked} recording files.")
+        for drive, n in sorted(self.drive_anchors_compared.items()):
+            lines.append(f"  of which {n} saved on {drive}")
+        if self.files_removed_by_retention:
+            lines.append(f"Not on this computer: {self.files_removed_by_retention} recording file(s) removed by the "
+                         "retention rule after they were archived (recorded in the log); check them on the archive "
+                         "drives.")
         if self.head:
             lines.append(f"Log head: entry {self.head.seq}, fingerprint {self.head.hash}, written {self.head.utc}")
-        for title, items in (("All problems", self.findings), ("Protection gaps", self.faults)):
+        for title, items in (("All problems", self.findings), ("Not checked", self.unconfirmed),
+                             ("Protection gaps", self.faults)):
             if len(items) > (1 if items is self.findings else 0):
                 lines += ["", f"{title} ({len(items)}):"]
                 for x in self._sorted(items)[:max_findings]:
@@ -861,9 +930,23 @@ def status_anchor(status_path: Path) -> Anchor | None:
 MAX_MARKERS = 10_000            # bound on remembered discrepancy / protection-gap positions
 
 
+def _well_typed(rec: Any) -> bool:
+    """The record has the member types of format 1 (rule 4): v and seq integers (not booleans), utc and
+    kind strings, table and key strings or null, data an object or null."""
+    if not isinstance(rec, dict):
+        return False
+    v, seq = rec.get("v"), rec.get("seq")
+    return (type(v) is int and v == CHAIN_FORMAT and type(seq) is int
+            and type(rec.get("utc")) is str and type(rec.get("kind")) is str
+            and (rec.get("table") is None or type(rec.get("table")) is str)
+            and (rec.get("key") is None or type(rec.get("key")) is str)
+            and (rec.get("data") is None or type(rec.get("data")) is dict))
+
+
 def verify_ledger(db_path: Path | str, *, spool_path: Path | None = None, check_files: bool = False,
                   anchors: Iterable[Anchor] = (), use_local_anchors: bool = True, chunk: int = 2000,
-                  pause_s: float = 0.0, status_path: Path | None = None) -> VerifyReport:
+                  pause_s: float = 0.0, status_path: Path | None = None,
+                  drives: Iterable[str] = (), camera_id: str | None = None) -> VerifyReport:
     """Verify the chain of the ledger at ``db_path`` (opened read-only; safe while recording).
 
     Works in many SHORT read transactions of at most ``chunk`` entries/keys/rows each (with
@@ -875,10 +958,19 @@ def verify_ledger(db_path: Path | str, *, spool_path: Path | None = None, check_
 
     ``status_path``: where the recorder writes ``status.json`` (``cfg.status_path``; with the
     Windows service layout it is in ``[storage] status_dir``, not beside the ledger). Default:
-    beside the ledger, as before (integration, docs/INTEGRATION.md)."""
+    beside the ledger, as before (integration, docs/INTEGRATION.md).
+
+    ``drives``: the drives / folders whose fingerprints (``anchors_from``, ``Anchor.drive``) the log
+    must be checked against (review 2026-11-12). A drive that contributes no fingerprint of this log
+    makes the result NOT CONFIRMED (``rep.unconfirmed``), never INTACT. Drive fingerprints that name
+    another recording log are not compared; see ``_Verifier.anchor_problem``. ``camera_id``: this
+    recorder's camera, so another camera's fingerprints on a shared drive are told apart."""
     t0 = time.monotonic()
     db_path = Path(db_path)
     rep = VerifyReport(checked_utc=iso_utc(time.time()))
+    drive_keys = [str(d) for d in drives]
+    for d in drive_keys:
+        rep.drive_anchors_compared.setdefault(d, 0)
     all_anchors = list(anchors)
     if use_local_anchors:
         logged, problems = read_anchor_log(db_path.parent / ANCHOR_LOG_NAME)
@@ -892,21 +984,30 @@ def verify_ledger(db_path: Path | str, *, spool_path: Path | None = None, check_
         return rep
     conn = _ro_connect(db_path)
     try:
-        _Verifier(conn, rep, all_anchors, max(1, chunk), pause_s).run(spool_path, check_files)
+        _Verifier(conn, rep, all_anchors, max(1, chunk), pause_s, camera_id).run(spool_path, check_files)
     finally:
         conn.close()
+    for d in drive_keys:
+        if not rep.drive_anchors_compared.get(d):
+            rep.unconfirmed.append(Finding(None, "drive_not_compared",
+                                           f"Nothing on {d} could be compared with this recording log: no saved "
+                                           "fingerprint of this log was found there. Choose the top folder of an "
+                                           "archive or review drive that was used with this computer."))
     rep.seconds = time.monotonic() - t0
     return rep
 
 
 class _Verifier:
     def __init__(self, conn: sqlite3.Connection, rep: VerifyReport, anchors: list[Anchor], chunk: int,
-                 pause_s: float) -> None:
+                 pause_s: float, camera_id: str | None = None) -> None:
         self.conn, self.rep, self.anchors, self.chunk, self.pause_s = conn, rep, anchors, chunk, pause_s
+        self.camera_id = camera_id
         self.disc: dict[tuple[str, str], list[int]] = {}      # discrepancy entry positions per row
         self.pending: dict[tuple[str, str], tuple[str, str]] = {}
         self.end = -1
         self.broken = False
+        self.genesis: tuple[str, str] | None = None             # (entry_hash, utc) of entry 0: this log's identity
+        self.set_aside: dict[tuple[str, str], int] = {}          # (drive, why) -> drive fingerprints not compared
 
     # ---------------------------------------------------------------- helpers
     @contextmanager
@@ -928,6 +1029,79 @@ class _Verifier:
     def fault(self, pos: int | None, code: str, msg: str) -> None:
         self.rep.faults.append(Finding(pos, code, msg))
 
+    # ---------------------------------------------------------------- drive fingerprints (review 2026-11-12)
+    # A drive (--anchors-from) may also hold fingerprints of ANOTHER recording log: a drive shared with
+    # another recording computer, or a drive reused after a fresh installation. Lines written since this
+    # fix name their log (chain=<hash of entry 0>); older lines do not. Rules, so that nothing that was
+    # not compared is ever counted as confirming the log, and a log rebuilt from its first entry is never
+    # reported INTACT on the strength of a drive:
+    #   * a fingerprint naming THIS log, or any fingerprint kept on this computer: compared as always;
+    #   * a fingerprint naming another log: not compared. Saved before this log was started, or found under
+    #     another camera's folder / manifest -> a note (earlier installation, another computer); otherwise
+    #     NOT CONFIRMED (exit 2): this computer's own older fingerprints name another log only if the log
+    #     was rebuilt from its first entry;
+    #   * an older drive fingerprint (no log named) that does not match: saved before this log was started,
+    #     or another camera's -> a note; otherwise NOT CONFIRMED (another computer, or the log was rewritten).
+    def _other_log(self, a: Anchor) -> bool:
+        return a.drive is not None and a.chain is not None and self.genesis is not None and a.chain != self.genesis[0]
+
+    def _other_camera(self, a: Anchor) -> bool:
+        return bool(self.camera_id and a.camera and a.camera != self.camera_id)
+
+    def _before_this_log(self, a: Anchor) -> bool:
+        if self.genesis is None or not a.anchored_utc:
+            return False
+        try:
+            return parse_iso_utc(a.anchored_utc) < parse_iso_utc(self.genesis[1])
+        except (ValueError, TypeError, OverflowError):
+            return False
+
+    def _drive_compared(self, a: Anchor) -> None:
+        """``a`` was compared with this log (it matched, or its difference is a finding)."""
+        self.rep.anchors_checked += 1
+        if a.drive is not None:
+            self.rep.drive_anchors_compared[a.drive] = self.rep.drive_anchors_compared.get(a.drive, 0) + 1
+
+    def _set_aside(self, a: Anchor, why: str) -> None:
+        k = (str(a.drive), why)
+        self.set_aside[k] = self.set_aside.get(k, 0) + 1
+
+    def anchor_problem(self, a: Anchor, pos: int, code: str, msg: str) -> None:
+        """A saved fingerprint of the log that does not fit it (mismatch or a longer log)."""
+        if a.drive is not None and a.chain is None:
+            if self._before_this_log(a) or self._other_camera(a):
+                self._set_aside(a, "earlier" if self._before_this_log(a) else "camera")
+                return
+            self.rep.unconfirmed.append(Finding(pos, code, msg + " This fingerprint was saved by an older version that "
+                                                "did not record which recording log it belongs to: it may come from "
+                                                "another recording computer or an earlier installation, or the log was "
+                                                "rewritten."))
+            return
+        self._drive_compared(a)
+        self.find(pos, code, msg)
+
+    def other_log_anchors(self) -> None:
+        for a in self.anchors:
+            if self._other_log(a):
+                self._set_aside(a, "earlier" if self._before_this_log(a) else
+                                "camera" if self._other_camera(a) else "later")
+        started = self.genesis[1] if self.genesis else "?"
+        for (drive, why), n in sorted(self.set_aside.items()):
+            if why == "earlier":
+                self.rep.notes.append(f"{n} saved fingerprint(s) on {drive} belong to another recording log saved "
+                                      f"before this log was started ({started}): an earlier installation or another "
+                                      "computer. They were not compared.")
+            elif why == "camera":
+                self.rep.notes.append(f"{n} saved fingerprint(s) on {drive} belong to the recording log of another "
+                                      f"camera (not {self.camera_id}). They were not compared.")
+            else:
+                self.rep.unconfirmed.append(Finding(None, "anchor_other_log",
+                                                    f"{n} saved fingerprint(s) on {drive} belong to a different "
+                                                    f"recording log, although they were saved after this log was "
+                                                    f"started ({started}): either another recording computer also "
+                                                    "uses this drive, or this log was rebuilt from its first entry. "
+                                                    "They could not be compared."))
+
     # ---------------------------------------------------------------- passes
     def run(self, spool_path: Path | None, check_files: bool) -> None:
         with self.snapshot() as c:
@@ -946,15 +1120,16 @@ class _Verifier:
         if expected == 0 and self.end < 0:
             self.find(0, "chain_empty", "The recording log's tamper-evidence chain is empty: its entries were removed.")
         for a in self.anchors:
-            if a.seq >= expected:
-                self.rep.anchors_checked += 1
+            if a.seq >= expected and not self._other_log(a):
                 when = f" at {a.anchored_utc}" if a.anchored_utc else ""
-                self.find(expected, "log_truncated",
-                          f"The log ends at entry {expected - 1} but a copy of its fingerprint saved {a.source}{when} "
-                          f"shows it had reached entry {a.seq}: entries were removed from the end.")
+                self.anchor_problem(a, expected, "log_truncated",
+                                    f"The log ends at entry {expected - 1} but a copy of its fingerprint saved "
+                                    f"{a.source}{when} shows it had reached entry {a.seq}: entries were removed from "
+                                    "the end.")
+        self.other_log_anchors()
         if self.broken:
             self.rep.notes.append("Checks after the first broken entry are reported but cannot be fully trusted.")
-        files: list[tuple[int, str, str, int | None]] = []
+        files: list[tuple[int, str, str, int | None, bool]] = []
         for table in COVERED:
             self.key_pass(table, files if check_files else None, spool_path)
             self.unlogged_pass(table, expected)
@@ -991,7 +1166,9 @@ class _Verifier:
                 try:
                     rec = json.loads(row[4])
                     data = rec.get("data")
-                    well_formed = (rec.get("v") == CHAIN_FORMAT and make_record(
+                    # (review 2026-11-12) the types are part of the format: a kind, table or key that is a
+                    # JSON list or object re-creates the same text but is not something the recorder writes.
+                    well_formed = (_well_typed(rec) and make_record(
                         rec["seq"], rec["utc"], rec["kind"], rec["table"], rec["key"], canonical_json(data)) == row[4])
                 except (ValueError, KeyError, TypeError, AttributeError):
                     rec, data, well_formed = None, None, False
@@ -1017,21 +1194,30 @@ class _Verifier:
                     self.broken = True
                     break
                 kind, table, key = rec["kind"], rec["table"], rec["key"]
+                if seq == 0:
+                    self.genesis = (h, str(rec["utc"]))
                 if (row[1], row[2], row[3]) != (kind, table, key):
                     self.find(seq, "entry_index_altered", f"The look-up columns of log entry {seq} were altered.")
-                self.kind_rules(seq, kind, table, key, data, prev_kind, rec.get("utc"))
+                try:
+                    self.kind_rules(seq, kind, table, key, data, prev_kind, rec.get("utc"))
+                except (TypeError, ValueError, AttributeError, KeyError) as exc:
+                    # (review 2026-11-12) a value of a type the recorder never writes: a finding, never a crash
+                    self.find(seq, "illegal_entry", f"Log entry {seq} holds values of a kind the recording software "
+                                                    f"never writes ({type(exc).__name__}).")
                 for a in by_seq.get(seq, []):
-                    self.rep.anchors_checked += 1
+                    if self._other_log(a):
+                        continue                                  # another recording log: see other_log_anchors
                     if a.hash != h:
                         since = f"after entry {last_confirmed}" if last_confirmed is not None else "anywhere"
                         when = f" at {a.anchored_utc}" if a.anchored_utc else ""
-                        self.find(seq, "anchor_mismatch", f"Log entry {seq} differs from the copy of the log fingerprint "
-                                                          f"saved {a.source}{when}: the log was rewritten ({since} up "
-                                                          f"to entry {seq}).")
+                        self.anchor_problem(a, seq, "anchor_mismatch",
+                                            f"Log entry {seq} differs from the copy of the log fingerprint saved "
+                                            f"{a.source}{when}: the log was rewritten ({since} up to entry {seq}).")
                     else:
+                        self._drive_compared(a)
                         last_confirmed = seq if last_confirmed is None else max(last_confirmed, seq)
                 prev, prev_kind, expected = h, kind, seq + 1
-                self.rep.head = ChainHead(seq, h, str(rec.get("utc", "")))
+                self.rep.head = ChainHead(seq, h, str(rec.get("utc", "")), self.genesis[0] if self.genesis else None)
         return expected
 
     def kind_rules(self, seq: int, kind: str, table: Any, key: Any, data: Any, prev_kind: str | None,
@@ -1069,7 +1255,7 @@ class _Verifier:
             self.find(seq, "illegal_entry", f"Log entry {seq} removes a record from protection, which the recording "
                                             "software never does.")
 
-    def key_pass(self, table: str, files: list[tuple[int, str, str, int | None]] | None,
+    def key_pass(self, table: str, files: list[tuple[int, str, str, int | None, bool]] | None,
                  spool_path: Path | None) -> None:
         noun, last = _NOUN[table], ""
         while True:
@@ -1077,13 +1263,19 @@ class _Verifier:
                 keys = [r[0] for r in c.execute("SELECT DISTINCT ref_key FROM ledger_chain WHERE ref_table=? AND "
                                                 "ref_key > ? ORDER BY ref_key LIMIT ?", (table, last, self.chunk))]
                 for key in keys:
-                    self.check_key(c, table, noun, str(key), files)
+                    try:
+                        self.check_key(c, table, noun, str(key), files)
+                    except (TypeError, ValueError, AttributeError, KeyError) as exc:
+                        # (review 2026-11-12) values of a type the recorder never writes: a finding, never a crash
+                        self.find(None, "illegal_entry", f"The log entries for the {noun} #{key} hold values of a "
+                                                         f"kind the recording software never writes "
+                                                         f"({type(exc).__name__}).")
             if not keys:
                 return
             last = keys[-1]
 
     def check_key(self, c: sqlite3.Connection, table: str, noun: str, key: str,
-                  files: list[tuple[int, str, str, int | None]] | None) -> None:
+                  files: list[tuple[int, str, str, int | None, bool]] | None) -> None:
         pk, _ = COVERED[table]
         prev_seq, prev = None, None
         last_seq, last = None, None
@@ -1096,7 +1288,10 @@ class _Verifier:
             if not isinstance(data, dict):
                 continue
             if prev is not None and not any(prev_seq < d < seq for d in self.disc.get((table, key), ())):
-                why = illegal_changes(table, prev, data)
+                try:
+                    why = illegal_changes(table, prev, data)
+                except (TypeError, ValueError, AttributeError, KeyError) as exc:
+                    why = [f"it holds a value of a kind the recording software never writes ({type(exc).__name__})"]
                 if why:
                     self.find(seq, "illegal_change",
                               f"Log entry {seq} records a change the recording software never makes to the {noun} "
@@ -1122,7 +1317,11 @@ class _Verifier:
             return
         if not _same(p, last):
             pend = self.pending.get((table, key))
-            if pend is not None and not illegal_changes(table, last, p):
+            try:
+                legal = pend is not None and not illegal_changes(table, last, p)
+            except (TypeError, ValueError, AttributeError, KeyError):
+                legal = False
+            if legal and pend is not None:
                 self.fault(last_seq, "not_yet_protected",
                            f"The latest change to the {noun} {_label(table, key, p)} could not be entered in the log "
                            f"at {pend[0]} ({_short(pend[1])}); it will be re-recorded at the next write.")
@@ -1130,7 +1329,22 @@ class _Verifier:
                 self.find(last_seq, "record_altered", f"The {noun} {_label(table, key, last)} was changed after log "
                                                       f"entry {last_seq} recorded it: {_diff(last, p)}.")
         if files is not None and table == "segments" and last.get("sha256"):
-            files.append((last_seq, str(last.get("rel_path")), str(last["sha256"]), last.get("size_bytes")))
+            files.append((last_seq, str(last.get("rel_path")), str(last["sha256"]), last.get("size_bytes"),
+                          self._removed_by_retention(c, key, last)))
+
+    @staticmethod
+    def _removed_by_retention(c: sqlite3.Connection, key: str, last: dict[str, Any]) -> bool:
+        """(review 2026-11-12) The local original was removed by the retention rule after it was archived:
+        its latest entry has local_deleted_utc set (a chained, set-once column) and the retention rule's
+        own record of the removal (retention_deletions, chained in the same transaction) names the segment
+        with the same SHA-256. Such a file is expected to be absent from this computer."""
+        if last.get("local_deleted_utc") is None:
+            return False
+        try:
+            return c.execute("SELECT 1 FROM retention_deletions WHERE segment_id=? AND sha256=? LIMIT 1",
+                             (key, str(last["sha256"]))).fetchone() is not None
+        except sqlite3.OperationalError:
+            return False
 
     def unlogged_pass(self, table: str, end_pos: int) -> None:
         pk, _ = COVERED[table]
@@ -1178,14 +1392,19 @@ class _Verifier:
                                   "the log was removed.")
                 last_rowid = int(rows[-1]["_rowid_"])
 
-    def check_files(self, files: list[tuple[int, str, str, int | None]], spool_path: Path) -> None:
+    def check_files(self, files: list[tuple[int, str, str, int | None, bool]], spool_path: Path) -> None:
         from .hashing import sha256_file
-        for seq, rel, sha, size in sorted(files):          # outside any read snapshot: hashing is slow
+        for seq, rel, sha, size, removed in sorted(files):   # outside any read snapshot: hashing is slow
             p = spool_path / rel
-            self.rep.files_checked += 1
             if not p.exists():
+                if removed:
+                    # Removed by the retention rule as recorded in the log: not checked here, and not missing.
+                    self.rep.files_removed_by_retention += 1
+                    continue
+                self.rep.files_checked += 1
                 self.find(seq, "file_missing", f"The recording file {rel} recorded in log entry {seq} is missing.")
                 continue
+            self.rep.files_checked += 1
             got, n = sha256_file(p)
             if got != sha or (size is not None and n != size):
                 self.find(seq, "file_altered", f"The recording file {rel} no longer matches the fingerprint recorded "
@@ -1198,7 +1417,8 @@ def main(argv: list[str] | None = None, prog: str = "python -m sentinel.ledgerch
 
     ap = argparse.ArgumentParser(prog=prog,   # "Sentinel ledger" from the built program (review 2026-11-10)
                                  description="Check the recording log for alteration. Exit status: 0 intact, "
-                                             "1 altered, 2 cannot check, 3 intact with protection gaps.")
+                                             "1 altered, 2 cannot check (or a drive given with --anchors-from "
+                                             "could not be compared), 3 intact with protection gaps.")
     sub = ap.add_subparsers(dest="cmd", required=True)
     v = sub.add_parser("verify", help="recompute and check the recording log's hash chain")
     v.add_argument("--config", required=True)
@@ -1237,16 +1457,30 @@ def main(argv: list[str] | None = None, prog: str = "python -m sentinel.ledgerch
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 2
+    drives = []
     for src in args.anchors_from:
         found, notes = anchors_from(Path(src))
         expected += found
+        drives.append(str(Path(src)))
         for n in notes:
             print(f"note: {n}")
         print(f"{len(found)} saved fingerprint(s) found on {src}")
+        if not found:
+            print(f"Nothing to compare on {src}: the result below cannot confirm the log against it.")
     rep = verify_ledger(db, spool_path=cfg.spool_path, check_files=args.check_files, anchors=expected,
-                        use_local_anchors=not args.no_local_anchors, status_path=cfg.status_path)
+                        use_local_anchors=not args.no_local_anchors, status_path=cfg.status_path, drives=drives,
+                        camera_id=cfg.camera.id)
     print(json.dumps(rep.to_dict(), indent=2) if args.json else rep.render_text())
-    return 1 if not rep.ok else (3 if rep.faults else 0)   # 0 intact, 1 altered, 2 cannot check, 3 gaps
+    return exit_status(rep)
+
+
+def exit_status(rep: VerifyReport) -> int:
+    """0 intact, 1 altered, 2 cannot check (also: something asked for was not compared), 3 intact with gaps."""
+    if not rep.ok:
+        return 1
+    if rep.unconfirmed:
+        return 2
+    return 3 if rep.faults else 0
 
 
 if __name__ == "__main__":

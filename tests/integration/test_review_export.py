@@ -86,8 +86,8 @@ class Env:
     def set_export(self, **export: Any) -> None:
         self.cfg = make_config(self.tmp, "tcp://127.0.0.1:9", recording=self.recording, export=export)
 
-    def verify_content(self, target: ExportTarget) -> ExportResult:
-        return ReviewExporter(self.cfg, target, ledger=self.ledger, allow_same_volume=True).verify_content()
+    def verify_content(self, target: ExportTarget, io: TargetIO | None = None) -> ExportResult:
+        return ReviewExporter(self.cfg, target, ledger=self.ledger, io=io, allow_same_volume=True).verify_content()
 
     def close(self) -> None:
         self.ledger.close()
@@ -837,3 +837,180 @@ def test_a_recording_that_cannot_be_sealed_does_not_stop_later_exports(env: Env)
     r2 = env.export(b)
     m2 = _check_drive(env, b, r2)
     assert stuck["segment_id"] in {o["segment_id"] for o in m2["originals"]}
+
+
+# ------------------------------------------------------------------ review 2026-11-12 (export, medium)
+class FlakyMp4ReadIO(TargetIO):
+    """The first read-back of an MP4 returns one wrong byte (a USB read glitch); later reads are fine."""
+
+    def __init__(self) -> None:
+        self.flipped = False
+
+    def read_back(self, path: Path) -> tuple[Iterator[bytes], str]:
+        chunks, method = super().read_back(path)
+        if path.suffix != ".mp4" or self.flipped:
+            return chunks, method
+        self.flipped = True
+
+        def gen() -> Iterator[bytes]:
+            for i, c in enumerate(chunks):
+                yield (bytes([c[0] ^ 1]) + c[1:]) if i == 0 and c else c
+        return gen(), method
+
+
+def test_retry_after_an_mp4_verification_failure_keeps_times_and_flags(env: Env) -> None:
+    t = env.drive("RT")
+    io = FlakyMp4ReadIO()
+    r1 = env.export(t, io=io)
+    assert r1.state == "FAILED" and r1.code == "E-003", r1
+    failed = [i for i in env.items(r1.batch_id) if i["state"] == "FAILED"]  # type: ignore[arg-type]
+    assert failed and failed[0]["kind"] == "mp4"
+    kept = json.loads(failed[0]["detail"])
+    assert kept["start_utc"] and kept["end_utc"] and "flags" in kept and "failure" in kept
+    r2 = env.export(t, io=io)                                  # "Export" pressed again on the same drive
+    man = _check_drive(env, t, r2)
+    plan = json.loads(env.batch(r2.batch_id)["plan"])  # type: ignore[arg-type]
+    groups = {g["dest_rel_path"]: g for g in plan["groups"]}
+    for d in man["derivatives"]:
+        g = groups[d["path"]]
+        assert (d["start_utc"], d["end_utc"]) == (g["start_utc"], g["end_utc"]) and d["start_local"]
+        assert set(g["flags"]) <= set(d["flags"])
+    html = next((t.root / "Reports").iterdir()).read_text("utf-8")
+    assert "<td></td><td></td><td>0 s</td>" not in html
+
+
+def test_planner_times_are_restored_for_an_item_whose_detail_an_earlier_version_replaced(env: Env) -> None:
+    """A ledger written by an earlier version: the failed item's detail holds only the failure data."""
+    t = env.drive("RL")
+    io = FlakyMp4ReadIO()
+    r1 = env.export(t, io=io)
+    assert r1.state == "FAILED"
+    bad = [i for i in env.items(r1.batch_id) if i["state"] == "FAILED"][0]  # type: ignore[arg-type]
+    env.ledger.query("UPDATE export_items SET detail=? WHERE item_id=?",
+                     (json.dumps({"written_sha256": "x", "read_back_sha256": "y"}), bad["item_id"]))
+    man = _check_drive(env, t, env.export(t, io=io))
+    d = next(x for x in man["derivatives"] if x["path"] == bad["dest_rel_path"])
+    assert d["start_utc"] and d["end_utc"] and d["start_local"]
+
+
+def test_verify_content_failure_is_not_permanent_and_never_reported_as_all_checked(
+        env: Env, monkeypatch: pytest.MonkeyPatch) -> None:
+    env.set_export(content_check="deferred")
+    t = env.drive("VC")
+    _check_drive(env, t, env.export(t))
+    _skew_lists(monkeypatch, "middle", 1)
+    r1 = env.verify_content(t)
+    assert r1.state == "FAILED" and r1.code == "E-003", r1
+    mp4s = env.q("SELECT * FROM export_items WHERE kind='mp4'")
+    assert mp4s and all(i["state"] == "VERIFIED" for i in mp4s), "a picture check never fails an exported video"
+    assert all(i["content_check"] == "mismatch" for i in mp4s)
+    doc = json.loads(next(t.root.rglob("Content_Verification_*.json")).read_text("utf-8"))
+    assert {v["result"] for v in doc["videos"]} == {"FAILED"} and {v["outcome"] for v in doc["videos"]} == {"mismatch"}
+    monkeypatch.undo()
+    r2 = env.verify_content(t)                              # checked again, not "already checked"
+    assert r2.state == "COMPLETE", r2
+    assert all(i["content_check"] == "full" for i in env.q("SELECT * FROM export_items WHERE kind='mp4'"))
+    assert env.verify_content(t).state == "NOTHING_TO_EXPORT"
+
+
+def test_verify_content_decoder_problem_is_recorded_as_not_checked(env: Env, monkeypatch: pytest.MonkeyPatch) -> None:
+    from sentinel.export import engine
+    from sentinel.export.media import MediaError
+
+    env.set_export(content_check="deferred")
+    t = env.drive("VE")
+    _check_drive(env, t, env.export(t))
+
+    def broken(*a: Any, **kw: Any) -> Any:
+        raise MediaError("decoder killed")
+
+    monkeypatch.setattr(engine, "frame_hashes_from_stream", broken)
+    r1 = env.verify_content(t)
+    assert r1.state == "FAILED"
+    mp4s = env.q("SELECT * FROM export_items WHERE kind='mp4'")
+    assert all(i["state"] == "VERIFIED" and i["content_check"] == "error" for i in mp4s)
+    monkeypatch.undo()
+    assert env.verify_content(t).state == "COMPLETE"
+
+
+def test_legacy_failed_picture_check_is_reported_not_called_checked(env: Env) -> None:
+    """An earlier version moved a video that failed verify-content to FAILED: it must not be forgotten."""
+    env.set_export(content_check="deferred")
+    t = env.drive("VL")
+    _check_drive(env, t, env.export(t))
+    first = env.q("SELECT * FROM export_items WHERE kind='mp4' ORDER BY item_id")[0]
+    env.ledger.query("UPDATE export_items SET state='FAILED', content_check='mismatch' WHERE item_id=?",
+                     (first["item_id"],))
+    for _ in range(2):                                       # the other videos are checked; this one is reported
+        res = env.verify_content(t)
+        assert res.state == "FAILED" and res.code == "E-003" and "earlier picture check" in (res.detail or ""), res
+    others = env.q("SELECT * FROM export_items WHERE kind='mp4' AND item_id!=?", (first["item_id"],))
+    assert all(i["content_check"] == "full" for i in others)
+
+
+def test_verify_content_interrupted_before_the_proof_is_written_checks_again(env: Env) -> None:
+    env.set_export(content_check="deferred")
+    t = env.drive("VI")
+    _check_drive(env, t, env.export(t))
+    r1 = env.verify_content(t, io=FaultyIO(unplug_on_write_file=1))    # unplugged while writing the proof
+    assert r1.state == "INTERRUPTED", r1
+    mp4s = env.q("SELECT * FROM export_items WHERE kind='mp4'")
+    assert all(i["content_check"] == "deferred" for i in mp4s), "nothing entered without proof on the drive"
+    r2 = env.verify_content(t)
+    assert r2.state == "COMPLETE", r2
+    proofs = [p for p in t.root.rglob("Content_Verification_*.json")]
+    assert len(proofs) == 1
+    doc = json.loads(proofs[0].read_text("utf-8"))
+    assert len(doc["videos"]) == len(mp4s) and {v["result"] for v in doc["videos"]} == {"OK"}
+    assert all(i["content_check"] == "full" for i in env.q("SELECT * FROM export_items WHERE kind='mp4'"))
+
+
+class UnplugAfterRenameIO(TargetIO):
+    """The drive is pulled just after the summary HTML was renamed into place, before it was recorded."""
+
+    def __init__(self) -> None:
+        self.unplugged = False
+        self.done = False
+
+    def root_present(self, root: Path) -> bool:
+        return not self.unplugged and super().root_present(root)
+
+    def write_new(self, dest: Path, chunks: Iterable[bytes], expected_sha256: str | None = None,
+                  fsync_every: int | None = None) -> tuple[str, int]:
+        out = super().write_new(dest, chunks, expected_sha256, fsync_every)
+        if dest.suffix == ".html" and not self.done:
+            self.done = self.unplugged = True
+            raise OSError(errno.ENODEV, "The device is not connected")
+        return out
+
+
+def test_interrupted_manifest_stage_finishes_on_the_next_attempt(env: Env) -> None:
+    t = env.drive("MI")
+    io = UnplugAfterRenameIO()
+    r1 = env.export(t, io=io)
+    assert r1.state == "INTERRUPTED" and r1.code == "E-002", r1
+    env.ledger.add_event("info", "recorder", "later", "the recording log moved on meanwhile")
+    io.unplugged = False                                     # the same drive is plugged in again
+    r2 = env.export(t, io=io)
+    man = _check_drive(env, t, r2)
+    b = env.batch(r2.batch_id)  # type: ignore[arg-type]
+    frozen = json.loads(b["document_inputs"])
+    assert man["recording_log_head"] == frozen["log_head"] and frozen["log_head"]["chain"]
+    html = next((t.root / "Reports").iterdir()).read_text("utf-8")
+    assert man["recording_log_head"]["hash"] in html, "summary and manifest name the same log head"
+
+
+def test_a_document_an_earlier_attempt_wrote_completely_is_kept(env: Env) -> None:
+    """An older batch with no frozen inputs: the regenerated summary differs, but the file the first attempt
+    wrote completely is kept and listed with its own hash instead of failing with E-007 on every attempt."""
+    t = env.drive("MK")
+    io = UnplugAfterRenameIO()
+    r1 = env.export(t, io=io)
+    assert r1.state == "INTERRUPTED"
+    env.ledger.query("UPDATE export_batches SET document_inputs=NULL WHERE batch_id=?", (r1.batch_id,))
+    env.ledger.add_event("info", "recorder", "later", "the recording log moved on meanwhile")
+    io.unplugged = False
+    r2 = env.export(t, io=io)
+    _check_drive(env, t, r2)
+    summary = next(i for i in env.items(r2.batch_id) if i["dest_rel_path"].endswith(".html"))  # type: ignore[arg-type]
+    assert summary["state"] == "VERIFIED" and json.loads(summary["detail"]) == {"written_by_an_earlier_attempt": True}

@@ -102,11 +102,29 @@ The head `(sequence, hash, UTC)` is copied to:
   attached, hourly while copying, and at every swap. Each drive that leaves the building therefore
   carries the head as it was when the drive was made safe to remove;
 * **every review export** (2026-11-10): `Export_Manifest.json` field `recording_log_head`
-  (`seq`, `hash`, `utc`), also printed in the export summary;
+  (`seq`, `hash`, `utc`, and since 2026-11-12 `chain`), also printed in the export summary. The
+  head, like the drive identity and organisation, is frozen in the export the first time its
+  documents are made, so documents written again after an interruption are identical;
 * by hand: `Sentinel.exe ledger head` (Command Prompt **as administrator** in the program folder:
   the data folder is service-only; `--config FILE` if not the installed one; from a source
   checkout `python -m sentinel.ledgerchain head --config …`) prints a head an administrator can
   write down or photograph at each drive swap.
+
+**Which log a head belongs to** (review 2026-11-12). Every anchor line written since then ends with
+`chain=<hash of log entry 0>`, and the review manifest carries the same value. A drive can hold heads
+of another recording log: a drive shared with another recording computer, or a drive reused after a
+fresh installation (it keeps its old `chain_heads.log`). When a drive is checked (`--anchors-from`),
+heads that name another log are not compared and never count as confirming this log:
+* saved before this log was started, or found under another camera's folder or manifest: a note;
+* otherwise: **NOT CONFIRMED** (exit status 2). This computer's own earlier heads name another log
+  only if the log was rebuilt from its first entry, which a key-less chain cannot tell apart from a
+  second computer writing to the same drive.
+Older lines (no `chain=`) are compared as before; one that does not match is noted if it was saved
+before this log was started (or under another camera's folder), and otherwise reported as
+NOT CONFIRMED with "may come from another recording computer or an earlier installation, or the log
+was rewritten" rather than ALTERED. A head that names this log and does not match is ALTERED, as
+always. Heads kept on this computer and `--expect-head` are always compared, whatever log they name.
+The `chain` value is a label, not evidence: a head is only ever confirmed by its hash.
 
 What anchoring buys: once a head has been copied, any later rewrite of the log up to that entry
 changes that entry's hash, so the copy no longer matches. To hide an edit an attacker must find
@@ -122,7 +140,10 @@ head with a higher sequence number shows the end of the log was removed.
 `--anchors-from` reads every head saved on an archive or review drive, repeatable; in the window: System ›
 Check and history › "Check the log against a drive…";
 from a source checkout `python -m sentinel.ledgerchain verify --config …`) checks the log. It is read-only and safe while recording. Exit status: 0 = intact, 1 = altered,
-2 = cannot check, 3 = intact with protection gaps. The integrity worker also runs it every
+2 = cannot check, 3 = intact with protection gaps. `--anchors-from` given a folder inside a drive
+(for example `E:\Sentinel\CAM01`) reads the heads from the drive's top folder. A drive that gives no
+head of this log to compare (wrong folder, empty or foreign drive) makes the result
+**NOT CONFIRMED** with exit status 2 ("Nothing on … could be compared"), never INTACT. The integrity worker also runs it every
 `chain_verify_interval_s` (default 1 h; the first run is about 90 s after start):
 1. recompute every entry hash and link; first missing / reordered / edited entry is reported;
 2. **recorder rules across each row's entries** (review finding C1, below): a later entry may only
@@ -140,7 +161,13 @@ from a source checkout `python -m sentinel.ledgerchain verify --config …`) che
 4. compare with every saved head found (`chain_heads.log`, `status.json`, `--expect-head`);
 5. `--check-files`: re-hash every sealed recording file against the SHA-256 in the chain
    (the periodic check skips this — the rolling audit already compares files with their rows,
-   and rows are compared with the chain).
+   and rows are compared with the chain). An original removed by the retention rule after it was
+   archived (its chained `local_deleted_utc` is set and a chained `retention_deletions` record with
+   the same SHA-256 names it) is reported as "removed by the retention rule; check it on the
+   archive drives", not as missing. Any other missing file is still ALTERED.
+A log entry whose members have types the recorder never writes (for example a kind, table or key
+that is a JSON list or object, or a value that cannot be compared) is reported as altered at that
+entry; it never stops the check.
 It works in many short read snapshots (at most 2 000 entries, keys or rows each, with a short
 pause between them), not in one long snapshot, so memory stays bounded. The chain is append-only.
 It is verified up to the head seen at the start, and each row is compared with its entries inside
@@ -210,6 +237,9 @@ verification reports it as a failure: wiping the chain cannot silently restart i
 * **Downgrades.** Older software writes rows without chain entries; verification then reports
   them (correctly) as unlogged. A fresh installation must archive the old `chain_heads.log`
   together with the old database, or its saved heads will (correctly) not match the new log.
+  Heads of the old log on archive or review drives are told apart as described under "Which log a
+  head belongs to" (noted, or NOT CONFIRMED; not ALTERED). A drive cleared by "Return to service"
+  or erased holds none.
 * There is no acknowledgement mechanism: once V-003 is raised it stays raised for that ledger.
 * `ledger_chain_pending` is not chained. Someone who writes a pending marker for a row can make a
   later *rule-compliant* change to it be reported as a protection gap (V-004) rather than an
