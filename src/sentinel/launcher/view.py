@@ -51,13 +51,23 @@ class ConsoleStatusView:
         self.clock, self.sleep = clock, sleep
         self.refresh_s, self.startup_grace_s = refresh_s, startup_grace_s
         self._ansi = False
+        self._problem_since: float | None = None
 
     def render(self, status_path: Path, camera_name: str, started_after: float | None = None,
                start_problem: str | None = None) -> tuple[str, bool]:
-        """(screen text, healthy)."""
-        if start_problem:
-            return alert_banner(start_problem), False
+        """(screen text, healthy). A start problem is shown until the recorder writes a fresh heartbeat
+        after it (review 2026-11-12: it used to stay on screen for good, also once recording ran again)."""
         doc, problem = read_status(status_path)
+        if start_problem:
+            if self._problem_since is None:
+                self._problem_since = started_after if started_after is not None else self.clock()
+            recovered = (doc is not None and not problem
+                         and float(doc.get("heartbeat_epoch", 0)) > self._problem_since)
+            if not recovered:
+                stamp = datetime.fromtimestamp(self.clock()).strftime("%H:%M:%S")
+                return (f"{alert_banner(start_problem)}\n\nCamera: {camera_name or 'Camera'}    Checked at {stamp}",
+                        False)
+            started_after = None
         fresh = doc is not None and float(doc.get("heartbeat_epoch", 0)) >= (started_after or 0) - 1.0
         if started_after is not None and not fresh and self.clock() - started_after < self.startup_grace_s:
             text = message_banner("STARTING", "The recorder is starting. Please wait.")

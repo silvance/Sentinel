@@ -44,7 +44,7 @@ def test_services_are_stopped_and_started_again_in_order() -> None:
     stops = [c[1] for c in calls if c[0] == "stop"]
     assert stops == ["SentinelArchive", "SentinelRecorder"]          # archive copier first
     assert set(states.values()) == {"STOPPED"}
-    ok, _ = ap.start_recording(st, None, sc=sc)
+    ok, _ = ap.start_recording(st, None, sc=sc, sleep=lambda _s: None)
     assert ok and [c[1] for c in calls if c[0] == "start"] == ["SentinelRecorder", "SentinelArchive"]
 
 
@@ -265,7 +265,7 @@ def test_a_stop_that_gives_up_starts_the_services_again() -> None:
         if args[0] == "start":
             started.append(args[1])
             return subprocess.CompletedProcess(args, 0, "", "")
-        state = "3  STOP_PENDING" if args[1] in asked else "4  RUNNING"
+        state = "4  RUNNING" if args[1] in started else "3  STOP_PENDING" if args[1] in asked else "4  RUNNING"
         return subprocess.CompletedProcess(args, 0, f"STATE : {state}", "")
     with pytest.raises(UpdateRefused) as e:
         ap.stop_recording(None, sc=sc, sleep=lambda _s: None, timeout_s=0.0)
@@ -275,11 +275,257 @@ def test_a_stop_that_gives_up_starts_the_services_again() -> None:
     import sentinel.update.apply as apply_mod
     orig = apply_mod.start_recording
     try:
-        apply_mod.start_recording = lambda s, c: orig(s, c, sc=sc)
+        apply_mod.start_recording = lambda s, c: orig(s, c, sc=sc, sleep=lambda _s: None)
         assert ap.restart_after_refusal(e.value, None) == "Recording was started again."
     finally:
         apply_mod.start_recording = orig
     assert started == ["SentinelRecorder", "SentinelArchive"]
+
+
+# ---------------------------------------------------------------------- review 2026-11-12 (medium findings)
+def _sc_states(seq: dict[str, list[str]]):  # noqa: ANN202
+    """sc fake: 'start' accepted; each query returns the next state of that service (the last one repeats)."""
+    calls: list[list[str]] = []
+
+    def sc(args: list[str]) -> subprocess.CompletedProcess:
+        calls.append(args)
+        if args[0] in ("start", "stop"):
+            return subprocess.CompletedProcess(args, 0, "", "")
+        states = seq[args[1]]
+        state = states.pop(0) if len(states) > 1 else states[0]
+        out = f"STATE : {state}\n WIN32_EXIT_CODE : 1066 (0x42a)\n SERVICE_EXIT_CODE : 2 (0x2)\n"
+        return subprocess.CompletedProcess(args, 0, out, "")
+    return sc, calls
+
+
+def test_a_service_that_stops_while_starting_fails_the_update_check() -> None:
+    """'sc start' returns once the process connected; a new version that then fails was kept."""
+    st = ap.RecordingState(service_managed=True, services=["SentinelRecorder"], recorder_running=True)
+    sc, _ = _sc_states({"SentinelRecorder": ["2  START_PENDING", "1  STOPPED"]})
+    ok, detail = ap.start_recording(st, None, sc=sc, sleep=lambda _s: None)
+    assert not ok and "SentinelRecorder stopped while starting (exit 2)" in detail
+    sc, _ = _sc_states({"SentinelRecorder": ["2  START_PENDING", "4  RUNNING", "1  STOPPED"]})
+    ok, detail = ap.start_recording(st, None, sc=sc, sleep=lambda _s: None)
+    assert not ok and "stopped again right after starting" in detail
+    sc, _ = _sc_states({"SentinelRecorder": ["2  START_PENDING", "4  RUNNING"]})
+    assert ap.start_recording(st, None, sc=sc, sleep=lambda _s: None) == (True, "services started")
+
+
+def test_finish_stops_the_services_it_started_when_the_check_fails(tmp_path: Path, monkeypatch) -> None:
+    """Otherwise the recorder runs from the new folder and the swap back fails ('Going back failed')."""
+    app = _installed(tmp_path / "Sentinel")
+    folders = ap.Folders(app)
+    p = ap.Pending("update", "0.3.0", __version__, str(app), str(folders.staging(__version__)), str(folders.previous),
+                   None, asdict(ap.RecordingState(True, ["SentinelRecorder", "SentinelArchive"], True)))
+    p.write(folders.state)
+    stopped: list[list[str]] = []
+    monkeypatch.setattr(ucli, "start_recording", lambda st, c: (False, "SentinelArchive: 1053"))
+    monkeypatch.setattr(ucli, "stop_services", lambda names: stopped.append(list(names)) or True)
+    assert ucli.cmd_finish(argparse.Namespace(state=str(folders.state))) == 1
+    assert stopped == [["SentinelRecorder", "SentinelArchive"]]
+    assert "1053" in ap.Pending.read(folders.state).reason
+
+
+def test_stop_services_stops_the_archive_first_and_waits() -> None:
+    sc, calls = _sc_states({"SentinelRecorder": ["4  RUNNING", "1  STOPPED"], "SentinelArchive": ["1  STOPPED"]})
+    assert ap.stop_services(["SentinelRecorder", "SentinelArchive"], sc=sc, sleep=lambda _s: None)
+    assert [c[1] for c in calls if c[0] == "stop"] == ["SentinelArchive", "SentinelRecorder"]
+
+
+def test_a_result_with_a_byte_order_mark_is_read(tmp_path: Path) -> None:
+    """Windows PowerShell 5.1 'Set-Content -Encoding UTF8' writes a BOM; json.loads refused it, so 'Going back
+    failed ... the previous version is in ...' was never shown."""
+    folders = ap.Folders(tmp_path / "Sentinel")
+    folders.work.mkdir(parents=True)
+    folders.result.write_bytes(b"\xef\xbb\xbf" + json.dumps({"outcome": "failed", "message": "Going back failed"}
+                                                             ).encode("utf-8"))
+    assert ap.read_result(folders)["message"] == "Going back failed"
+    ap.mark_result(folders, shown=True)
+    assert ap.read_result(folders)["shown"] is True
+    p = ap.Pending("update", "0.3.0", "0.3.1", str(folders.app), str(folders.staging("0.3.1")), str(folders.previous),
+                   None, asdict(ap.RecordingState()))
+    s = ap.finisher_script(p, folders, None)
+    assert "Set-Content -LiteralPath $result" not in s and "New-Object Text.UTF8Encoding $false" in s
+
+
+@pytest.mark.skipif(__import__("sys").platform != "win32", reason="Windows PowerShell")
+def test_windows_powershell_writes_a_result_python_can_read(tmp_path: Path) -> None:
+    import os
+
+    ps = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "WindowsPowerShell" / "v1.0"
+    ps = ps / "powershell.exe"
+    if not ps.is_file():
+        pytest.skip("no Windows PowerShell")
+    folders = ap.Folders(tmp_path / "Sentinel")
+    folders.work.mkdir(parents=True)
+    p = ap.Pending("update", "0.3.0", "0.3.1", str(folders.app), str(folders.staging("0.3.1")), str(folders.previous),
+                   None, asdict(ap.RecordingState()))
+    s = ap.finisher_script(p, folders, None)
+    head = s[:s.index("# Every use is wrapped")]                 # variables and functions only
+    script = tmp_path / "t.ps1"
+    script.write_text(head + "\nFail-Plain 'Going back failed: locked. Call technical support'\n", encoding="utf-8-sig")
+    r = subprocess.run([str(ps), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+                       capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert not folders.result.read_bytes().startswith(b"\xef\xbb\xbf")
+    res = ap.read_result(folders)
+    assert res["outcome"] == "failed" and "Going back failed" in res["message"] and res["to_version"] == "0.3.1"
+
+
+@pytest.mark.skipif(__import__("sys").platform != "win32", reason="Windows PowerShell")
+def test_the_finisher_script_parses_in_windows_powershell(tmp_path: Path) -> None:
+    import os
+
+    ps = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "WindowsPowerShell" / "v1.0"
+    ps = ps / "powershell.exe"
+    if not ps.is_file():
+        pytest.skip("no Windows PowerShell")
+    folders = ap.Folders(tmp_path / "O'Brien" / "Sentinel")
+    for action, services in (("update", ["SentinelRecorder", "SentinelArchive"]), ("rollback", [])):
+        p = ap.Pending(action, "0.3.0", "0.3.1", str(folders.app), str(folders.staging("0.3.1")),
+                       str(folders.previous), None, asdict(ap.RecordingState(bool(services), services, True)))
+        f = tmp_path / f"{action}.ps1"
+        f.write_text(ap.finisher_script(p, folders, 1234), encoding="utf-8-sig")
+        check = ("$e = $null; [void][System.Management.Automation.Language.Parser]::ParseFile("
+                 f"'{f}', [ref]$null, [ref]$e); $e | ForEach-Object {{ $_.ToString() }}; exit @($e).Count")
+        r = subprocess.run([str(ps), "-NoProfile", "-Command", check], capture_output=True, text=True, timeout=120)
+        assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_every_way_out_of_the_finisher_removes_its_state(tmp_path: Path) -> None:
+    """A cancelled or failed update left pending.json, so the window said 'Updating…: recording restarts by
+    itself' for an hour instead of the real status."""
+    import re
+
+    app = tmp_path / "Sentinel"
+    folders = ap.Folders(app)
+    for action in ("update", "rollback"):
+        p = ap.Pending(action, "0.3.0", "0.3.1", str(app), str(folders.staging("0.3.1")), str(folders.previous),
+                       None, asdict(ap.RecordingState(True, ["SentinelRecorder", "SentinelArchive"], True)))
+        lines = ap.finisher_script(p, folders, None).splitlines()
+        exits = [i for i, line in enumerate(lines) if re.search(r"\bexit (\d|\$rc)", line)]
+        assert len(exits) == 4
+        for i in exits:
+            assert any("End-Update" in line for line in lines[max(0, i - 5):i]), lines[i]
+        body = "\n".join(lines)
+        assert "Remove-Item -LiteralPath $state" in body and "Remove-Item -LiteralPath $pidf" in body
+
+
+def test_the_finisher_stops_the_services_before_going_back(tmp_path: Path) -> None:
+    app = tmp_path / "Sentinel"
+    folders = ap.Folders(app)
+    p = ap.Pending("update", "0.3.0", "0.3.1", str(app), str(folders.staging("0.3.1")), str(folders.previous),
+                   None, asdict(ap.RecordingState(True, ["SentinelRecorder", "SentinelArchive"], True)))
+    s = ap.finisher_script(p, folders, None)
+    assert "$services = @('SentinelRecorder', 'SentinelArchive')" in s
+    back = s.index("The check failed")
+    assert back < s.index("Stop-Services", back) < s.index("Move-Item -LiteralPath $app -Destination $failed")
+    assert "$try -le 4" in s
+    none = ap.Pending("update", "0.3.0", "0.3.1", str(app), str(folders.staging("0.3.1")), str(folders.previous),
+                      None, asdict(ap.RecordingState()))
+    assert "$services = @()" in ap.finisher_script(none, folders, None)
+
+
+def test_a_finished_or_abandoned_update_does_not_hide_the_status(tmp_path: Path) -> None:
+    folders = ap.Folders(tmp_path / "Sentinel")
+    _pending(folders.app, None)
+    (folders.work / ap.FINISHER_PID_NAME).write_text("4242", "utf-8")
+    assert ap.in_progress(folders, alive=lambda _pid: True) == f"Updating to Sentinel {__version__}"
+    assert ap.in_progress(folders, alive=lambda _pid: None) is not None          # cannot tell: as before
+    assert ap.in_progress(folders, alive=lambda _pid: False) is None              # the update window is gone
+    assert ap.abandoned(folders, alive=lambda _pid: False) is not None
+    assert ap.abandoned(folders, alive=lambda _pid: True) is None
+    ap.write_result(folders, "aborted", None, "cancelled")                        # a result after the state
+    assert ap.in_progress(folders, alive=lambda _pid: True) is None
+    ap.end_state(folders)
+    assert not folders.state.exists() and not (folders.work / ap.FINISHER_PID_NAME).exists()
+
+
+def test_launch_finisher_notes_the_window_process(tmp_path: Path) -> None:
+    folders = ap.Folders(tmp_path / "Sentinel")
+    ap.launch_finisher("# script", folders, popen=lambda *_a, **_k: type("P", (), {"pid": 31337})())
+    assert (folders.work / ap.FINISHER_PID_NAME).read_text("utf-8") == "31337"
+
+
+def test_an_old_state_file_with_more_fields_is_still_read(tmp_path: Path) -> None:
+    state = _pending(tmp_path / "Sentinel", None)
+    doc = json.loads(state.read_text("utf-8"))
+    doc["added_later"] = 1
+    state.write_bytes(b"\xef\xbb\xbf" + json.dumps(doc).encode("utf-8"))
+    assert ap.Pending.read(state).to_version == __version__
+
+
+def _apply_world(tmp_path: Path, monkeypatch, fail_at: str):  # noqa: ANN202
+    app = _installed(tmp_path / "Sentinel")
+    st = ap.RecordingState(True, ["SentinelRecorder", "SentinelArchive"], True)
+    started: list[ap.RecordingState] = []
+    pkg = type("Pkg", (), {"version": "9.9.9", "path": tmp_path / "u.sntu", "sha256": "ab" * 32, "key_id": "k",
+                           "summary": lambda self: "Sentinel 9.9.9"})()
+    monkeypatch.setattr(ucli.sys, "platform", "win32")
+    monkeypatch.setattr(ucli, "_app", lambda: app)
+    monkeypatch.setattr(ucli, "_is_admin", lambda: True)
+    monkeypatch.setattr(ucli, "_config", lambda _c: None)
+    monkeypatch.setattr(ucli, "read_package", lambda *_a, **_k: pkg)
+    monkeypatch.setattr(ucli, "stage", lambda *_a, **_k: None)
+    monkeypatch.setattr(ucli, "stop_recording", lambda *_a, **_k: st)
+    monkeypatch.setattr(ucli, "start_recording", lambda s, c: started.append(s) or (True, "services started"))
+
+    def boom(*_a, **_k):  # noqa: ANN002, ANN003, ANN202
+        raise OSError(1260, "This program is blocked by group policy")
+    if fail_at == "launch":
+        monkeypatch.setattr(ucli, "launch_finisher", boom)
+    else:
+        monkeypatch.setattr(ap.Pending, "write", boom)
+    return ap.Folders(app), started
+
+
+@pytest.mark.parametrize("fail_at", ["launch", "state"])
+def test_a_failure_after_stopping_starts_recording_again(tmp_path: Path, monkeypatch, fail_at: str,
+                                                          capsys: pytest.CaptureFixture[str]) -> None:
+    """Only UpdateRefused restarted the services; PowerShell blocked by policy left recording stopped (and
+    pending.json written) with a console that closed at once."""
+    folders, started = _apply_world(tmp_path, monkeypatch, fail_at)
+    rc = ucli.cmd_apply(argparse.Namespace(file=str(tmp_path / "u.sntu"), config=None, yes=True, window_pid=None))
+    assert rc == ucli.EXIT_FAILED and len(started) == 1 and started[0].services == ["SentinelRecorder",
+                                                                                     "SentinelArchive"]
+    assert not folders.state.exists()
+    res = ap.read_result(folders)
+    assert res["outcome"] == "failed" and "group policy" in res["message"] and "started again" in res["message"]
+    assert "Recording was started again." in capsys.readouterr().out
+
+
+@pytest.mark.skipif(__import__("sys").platform != "win32", reason="Windows services")
+def test_sc_timing_out_while_stopping_is_a_refusal_that_restarts() -> None:
+    asked: list[str] = []
+
+    def sc(args: list[str]) -> subprocess.CompletedProcess:
+        if args[0] == "stop":
+            asked.append(args[1])
+            return subprocess.CompletedProcess(args, 0, "", "")
+        if asked:
+            raise subprocess.TimeoutExpired(["sc.exe", *args], 60)
+        return subprocess.CompletedProcess(args, 0, "STATE : 4  RUNNING", "")
+    with pytest.raises(UpdateRefused) as e:
+        ap.stop_recording(None, sc=sc, sleep=lambda _s: None)
+    assert e.value.code == "not_stopped" and e.value.state.services == ["SentinelRecorder", "SentinelArchive"]
+
+
+def test_a_new_update_restarts_what_an_abandoned_one_stopped(tmp_path: Path) -> None:
+    folders = ap.Folders(tmp_path / "Sentinel")
+    p = ap.Pending("update", "0.3.0", "0.3.1", str(folders.app), "s", "p", None,
+                   asdict(ap.RecordingState(True, ["SentinelRecorder", "SentinelArchive"], True)))
+    p.write(folders.state)
+    (folders.work / ap.FINISHER_PID_NAME).write_text("1", "utf-8")
+    import sentinel.update.apply as apply_mod
+
+    orig = apply_mod._process_alive
+    try:
+        apply_mod._process_alive = lambda _pid: False
+        assert ucli._busy(folders) is None
+        st = ucli._take_over(ap.RecordingState(True, [], False), folders)
+    finally:
+        apply_mod._process_alive = orig
+    assert st.services == ["SentinelRecorder", "SentinelArchive"] and st.recorder_running
 
 
 def test_the_update_waits_as_long_as_the_services_may_take_to_stop() -> None:

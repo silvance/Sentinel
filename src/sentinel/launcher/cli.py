@@ -135,15 +135,20 @@ def cmd_launch(args: argparse.Namespace) -> int:
         # status folder, which is what this window shows.
         log.info("Sentinel %s launcher: recorder is managed by the %s", __version__, control.name)
         started_after = None
-        start_problem = None
         if not args.no_start and not control.is_running():
-            started_after = time.time()
+            asked = time.time()
             result = control.start()
             log.info("start via %s: ok=%s %s", control.name, result.ok, result.detail)
-            if not result.ok:
-                start_problem = result.code
+            # Review 2026-11-12: a failed start is NOT shown as a frozen "Error C-003" console. Standard users
+            # may not start the service (access denied), and Windows restarts it by itself after a failure;
+            # the service writes its own state (for example C-001) into status.json. The window shows that
+            # file and how old it is, and follows the service when it comes back.
+            if result.ok:
+                started_after = asked
+        if not args.no_start and hasattr(control, "start_archive"):
+            control.start_archive()   # best effort; standard users may not start services (logged)
         return select_view(cfg).run(cfg.status_path, cfg.camera.name, started_after=started_after,
-                                 once=args.once, start_problem=start_problem)
+                                 once=args.once, start_problem=None)
     # Refuse before creating anything: configuration, credentials, tools and data folders must
     # not be changeable by other accounts; bundled tools must be present (no PATH fallback).
     problems = location_problems(cfg_path, cfg) + check_tools(cfg)

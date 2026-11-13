@@ -272,3 +272,173 @@ def test_invalid_time_servers_are_refused(host: str) -> None:
         validate_time_server(host)
     with pytest.raises(PlanError):
         time_service_steps(host)
+
+
+# ------------------------------------------------------------------ review 2026-11-12: install / repair
+def _archive_inputs(existing: frozenset[str]) -> InstallInputs:
+    inp = _inputs()
+    ahost = host_command(inp.config_path, frozen=True, executable=r"C:\Program Files\Sentinel\SentinelService.exe",
+                         program="archive")
+    return InstallInputs(inp.config_path, inp.data_dirs, inp.credentials_path, inp.host, status_dir=inp.status_dir,
+                         archive_host=ahost, existing=existing)
+
+
+def test_repair_updates_the_registration_in_place_and_sets_every_permission_again() -> None:
+    """'Install / repair service' on an installed computer stopped at 'already installed', so the 0.3.12
+    permission fixes (camera secret, configuration folder, archive access to status\\requests) never arrived."""
+    from sentinel.platform.winacl import service_sid
+
+    steps = install_plan(_archive_inputs(frozenset({"SentinelRecorder", "SentinelArchive"})), forbidden=FORBIDDEN)
+    argvs = [s.argv for s in steps if s.argv]
+    assert not any(a[:2] == ("sc.exe", "create") for a in argvs)
+    rec = [a for a in argvs if a[:3] == ("sc.exe", "config", "SentinelRecorder")]
+    arc = [a for a in argvs if a[:3] == ("sc.exe", "config", "SentinelArchive")]
+    assert rec and rec[0][3:] == ("binPath=", _inputs().host.command_line, "start=", "auto", "obj=",
+                                  "NT SERVICE\\SentinelRecorder", "DisplayName=", "Sentinel Recorder")
+    assert arc and arc[0][5:7] == ("start=", "delayed-auto")
+    # the recorder is never stopped; the archive copy is paused first and started again at the end
+    assert ("sc.exe", "stop", "SentinelRecorder") not in argvs
+    assert argvs[0] == ("sc.exe", "stop", "SentinelArchive") and steps[0].may_fail
+    ends = [s for s in steps if s.action == "ensure_running"]
+    assert [s.params["service"] for s in ends] == ["SentinelRecorder", "SentinelArchive"] and steps[-1] is ends[-1]
+    assert not any(a[:2] == ("sc.exe", "start") and a[2].startswith("Sentinel") for a in argvs)
+    # every permission step of a fresh installation runs again
+    fresh = install_plan(_archive_inputs(frozenset()), forbidden=FORBIDDEN)
+    acl = [s.argv for s in fresh if s.argv and s.argv[0] == "icacls"]
+    assert acl and all(a in argvs for a in acl)
+    assert ("icacls", r"C:\ProgramData\Sentinel\status\requests", "/grant",
+            f"*{service_sid('SentinelArchive')}:(OI)(CI)M", "/Q") in argvs
+    assert [s.params for s in steps if s.action == "remove_account_aces"] == \
+           [s.params for s in fresh if s.action == "remove_account_aces"]
+
+
+def test_repair_registers_an_archive_service_that_was_not_installed() -> None:
+    steps = install_plan(_archive_inputs(frozenset({"SentinelRecorder"})), forbidden=FORBIDDEN)
+    argvs = [s.argv for s in steps if s.argv]
+    assert any(a[:3] == ("sc.exe", "config", "SentinelRecorder") for a in argvs)
+    assert any(a[:3] == ("sc.exe", "create", "SentinelArchive") for a in argvs)
+    assert ("sc.exe", "stop", "SentinelArchive") not in argvs
+    assert argvs[-1] == ("sc.exe", "start", "SentinelArchive")
+
+
+class _Info:
+    def __init__(self, state: int, win32: int = 0, svc: int = 0, binary: str = "") -> None:
+        self.state, self.win32_exit_code, self.service_exit_code, self.binary_path = state, win32, svc, binary
+
+
+def _install_world(monkeypatch: pytest.MonkeyPatch, installed: set[str], ok: bool = True):  # noqa: ANN202
+    import sys
+
+    from sentinel.winsvc import __main__ as cli
+    from sentinel.winsvc import scm
+
+    inp = _archive_inputs(frozenset())
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(cli, "preflight", lambda _p: (inp, [], []))
+    monkeypatch.setattr(scm, "query_service", lambda n: _Info(4, binary="old") if n in installed else None)
+    monkeypatch.setattr(scm, "is_admin", lambda: True)
+    ran: list[list] = []
+    monkeypatch.setattr(cli, "execute", lambda steps: ran.append(steps) or ok)
+    started: list[str] = []
+    monkeypatch.setitem(cli._ACTIONS, "ensure_running", lambda service, timeout_s: started.append(service))
+    return cli, ran, started
+
+
+def _install_args(dry_run: bool):  # noqa: ANN202
+    import argparse
+
+    return argparse.Namespace(config="c.toml", dry_run=dry_run, no_start=False, status_readers="group",
+                              time_server=None, keep_power_settings=False)
+
+
+def test_install_on_an_installed_computer_repairs_instead_of_refusing(monkeypatch: pytest.MonkeyPatch,
+                                                                       capsys: pytest.CaptureFixture[str]) -> None:
+    cli, ran, _started = _install_world(monkeypatch, {"SentinelRecorder", "SentinelArchive"})
+    assert cli.cmd_install(_install_args(dry_run=True)) == 0 and not ran
+    out = capsys.readouterr().out
+    assert "REPAIR:" in out and "sc.exe config SentinelRecorder" in out and "Run 'uninstall' first" not in out
+    assert "runs with its previous command until it is restarted" in out          # binPath differs
+    assert cli.cmd_install(_install_args(dry_run=False)) == 0
+    assert "Repaired." in capsys.readouterr().out
+    assert any(s.argv and s.argv[:3] == ("sc.exe", "config", "SentinelRecorder") for s in ran[0])
+
+
+def test_a_failed_repair_starts_the_services_again(monkeypatch: pytest.MonkeyPatch,
+                                                   capsys: pytest.CaptureFixture[str]) -> None:
+    cli, _ran, started = _install_world(monkeypatch, {"SentinelRecorder", "SentinelArchive"}, ok=False)
+    assert cli.cmd_install(_install_args(dry_run=False)) == 1
+    assert started == ["SentinelRecorder", "SentinelArchive"] and "Repair stopped" in capsys.readouterr().out
+
+
+def test_ensure_running_starts_only_a_stopped_service_and_reports_a_failed_start() -> None:
+    from types import SimpleNamespace
+
+    from sentinel.winsvc import scm
+    from sentinel.winsvc.__main__ import _act_ensure_running
+
+    def world(states: list[_Info]) -> tuple[SimpleNamespace, list[str]]:
+        calls: list[str] = []
+
+        def query(_n: str) -> _Info:
+            return states.pop(0) if len(states) > 1 else states[0]
+        return SimpleNamespace(query_service=query, start_service=lambda n: calls.append(n) or 0,
+                               SERVICE_RUNNING=scm.SERVICE_RUNNING, SERVICE_STOPPED=scm.SERVICE_STOPPED,
+                               SERVICE_START_PENDING=scm.SERVICE_START_PENDING,
+                               ERROR_SERVICE_ALREADY_RUNNING=scm.ERROR_SERVICE_ALREADY_RUNNING), calls
+
+    fake, calls = world([_Info(scm.SERVICE_RUNNING)])
+    _act_ensure_running("SentinelRecorder", scm=fake, sleep=lambda _s: None)
+    assert calls == []                                                   # running: left alone
+    fake, calls = world([_Info(scm.SERVICE_STOPPED), _Info(scm.SERVICE_START_PENDING), _Info(scm.SERVICE_RUNNING)])
+    _act_ensure_running("SentinelRecorder", scm=fake, sleep=lambda _s: None)
+    assert calls == ["SentinelRecorder"]
+    fake, _ = world([_Info(scm.SERVICE_STOPPED), _Info(scm.SERVICE_STOPPED, 1066, 2)])
+    with pytest.raises(RuntimeError, match="exit 2"):
+        _act_ensure_running("SentinelRecorder", scm=fake, sleep=lambda _s: None)
+
+
+def test_the_archive_service_logs_to_its_own_file(tmp_path: Path) -> None:
+    """Two services rotating one recorder.log on Windows lose records; the archive service writes archive.log."""
+    import logging
+
+    from conftest import base_config_dict
+    from gui_support import write_toml
+
+    from sentinel.winsvc.__main__ import run_archive_in_host
+
+    class Host:
+        def on_stop(self, cb) -> None:  # noqa: ANN001
+            self.cb = cb
+
+        def report_running(self) -> None:
+            pass
+
+    class Worker:
+        def __init__(self, _cfg) -> None:  # noqa: ANN001
+            pass
+
+        def stop(self, _code: int) -> None:
+            pass
+
+        def run(self, whole_process: bool) -> None:
+            logging.getLogger("sentinel.archive").warning("copy note")
+            host.cb()
+
+    d = base_config_dict(tmp_path)
+    d["archive"] = {"enabled": True, "drive_path": str(tmp_path / "arch")}
+    host = Host()
+    root = logging.getLogger()
+    saved = (list(root.handlers), root.level)
+    try:
+        assert run_archive_in_host(host, str(write_toml(tmp_path / "c.toml", d)), worker_factory=Worker,
+                                   event_log=lambda _m: None) == 0
+    finally:
+        for h in list(root.handlers):
+            root.removeHandler(h)
+            h.close()
+        for h in saved[0]:
+            root.addHandler(h)
+        root.setLevel(saved[1])
+    logs = Path(d["storage"]["log_dir"])
+    assert "copy note" in (logs / "archive.log").read_text("utf-8")
+    assert not (logs / "recorder.log").exists()

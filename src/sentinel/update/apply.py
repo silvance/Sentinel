@@ -216,6 +216,18 @@ def service_state(name: str, sc: Callable[[list[str]], subprocess.CompletedProce
     return m.group(1).upper() if m else None
 
 
+def _exit_code(name: str, sc: Callable[[list[str]], subprocess.CompletedProcess]) -> str:
+    """'exit 2' from ``sc query`` (the service's own code when WIN32_EXIT_CODE is 1066), or ''."""
+    try:
+        out = sc(["query", name]).stdout or ""
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    w = re.search(r"WIN32_EXIT_CODE\s*:\s*(\d+)", out)
+    s = re.search(r"SERVICE_EXIT_CODE\s*:\s*(\d+)", out)
+    code = s.group(1) if w and w.group(1) == "1066" and s else (w.group(1) if w else "")
+    return f"exit {code}" if code else ""
+
+
 @dataclass
 class RecordingState:
     service_managed: bool = False
@@ -254,20 +266,27 @@ def stop_recording(cfg_path: Path | None, *, control_factory: Callable[..., Any]
         installed = [s for s in SERVICES if service_state(s, sc) is not None]
         st.service_managed = bool(installed)
         st.services = running
-        for name in reversed(running):          # archive copier first, then the recorder
-            sc(["stop", name])
         st.recorder_running = "SentinelRecorder" in running
-        t0 = time.monotonic()
-        end = t0 + timeout_s
-        next_note = t0 + 30.0
-        while any(service_state(s, sc) not in ("STOPPED", None) for s in running):
-            if time.monotonic() > end:
-                raise _not_stopped(st, "The recorder service did not stop in time, so the update was not "
-                                       "applied (no program file was changed).")
-            if on_wait is not None and time.monotonic() >= next_note:
-                on_wait(time.monotonic() - t0)
-                next_note += 30.0
-            sleep(1.0)
+        try:
+            for name in reversed(running):          # archive copier first, then the recorder
+                sc(["stop", name])
+            t0 = time.monotonic()
+            end = t0 + timeout_s
+            next_note = t0 + 30.0
+            while any(service_state(s, sc) not in ("STOPPED", None) for s in running):
+                if time.monotonic() > end:
+                    raise _not_stopped(st, "The recorder service did not stop in time, so the update was not "
+                                           "applied (no program file was changed).")
+                if on_wait is not None and time.monotonic() >= next_note:
+                    on_wait(time.monotonic() - t0)
+                    next_note += 30.0
+                sleep(1.0)
+        except UpdateRefused:
+            raise
+        except BaseException as exc:  # noqa: BLE001 - review 2026-11-12: sc.exe timed out, Ctrl+C, ...
+            # Whatever went wrong after a stop was asked for, the caller must start the services again.
+            raise _not_stopped(st, f"Stopping the recorder service went wrong ({exc.__class__.__name__}: {exc}), "
+                                   "so the update was not applied (no program file was changed).") from exc
         if st.service_managed:
             return st
     if cfg_path is None or not Path(cfg_path).is_file():
@@ -287,15 +306,65 @@ def stop_recording(cfg_path: Path | None, *, control_factory: Callable[..., Any]
     return st
 
 
+def _confirm_running(name: str, sc: Callable[[list[str]], subprocess.CompletedProcess],
+                     sleep: Callable[[float], None], confirm_s: float, settle_s: float) -> str | None:
+    """Wait until the service reports RUNNING and is still running ``settle_s`` later. None = fine, else why not.
+    Review 2026-11-12: ``sc start`` returns once the process has connected (START_PENDING); a new version whose
+    service host fails while starting (configuration, permission check, a missing module) stops only after."""
+    for _ in range(max(1, int(confirm_s))):
+        state = service_state(name, sc)
+        if state == "RUNNING":
+            break
+        if state in ("STOPPED", None):
+            return f"{name} stopped while starting ({_exit_code(name, sc) or 'no exit code'})"
+        sleep(1.0)
+    else:
+        return f"{name} did not report running within {confirm_s:.0f} s"
+    if settle_s > 0:
+        sleep(settle_s)
+        if service_state(name, sc) != "RUNNING":
+            return f"{name} stopped again right after starting ({_exit_code(name, sc) or 'no exit code'})"
+    return None
+
+
+def stop_services(names: list[str], sc: Callable[[list[str]], subprocess.CompletedProcess] = _sc,
+                  sleep: Callable[[float], None] = time.sleep, timeout_s: float = 120.0) -> bool:
+    """Best effort: stop these services and wait until they are stopped (so the program folder can be swapped
+    back after a failed check). True when all are stopped."""
+    try:
+        for name in reversed(names):            # archive copier first, then the recorder
+            sc(["stop", name])
+        for _ in range(max(1, int(timeout_s))):
+            if all(service_state(n, sc) in ("STOPPED", None) for n in names):
+                return True
+            sleep(1.0)
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.warning("could not stop %s: %s", ", ".join(names), exc)
+    return False
+
+
 def start_recording(st: RecordingState, cfg_path: Path | None, *, control_factory: Callable[..., Any] | None = None,
-                    sc: Callable[[list[str]], subprocess.CompletedProcess] = _sc) -> tuple[bool, str]:
-    """Start again what ``stop_recording`` stopped. (ok, detail)."""
+                    sc: Callable[[list[str]], subprocess.CompletedProcess] = _sc,
+                    sleep: Callable[[float], None] = time.sleep, confirm_s: float = 60.0,
+                    settle_s: float = 5.0) -> tuple[bool, str]:
+    """Start again what ``stop_recording`` stopped and check that it runs. (ok, detail)."""
     if st.service_managed:
         problems = []
         for name in st.services:                # recorder first, then the archive copier
-            r = sc(["start", name])
+            try:
+                r = sc(["start", name])
+            except (OSError, subprocess.SubprocessError) as exc:
+                problems.append(f"{name}: {exc}")
+                continue
             if r.returncode != 0 and "1056" not in (r.stdout or ""):     # 1056 = already running
                 problems.append(f"{name}: {(r.stdout or r.stderr or '').strip()[-200:]}")
+                continue
+            try:
+                why = _confirm_running(name, sc, sleep, confirm_s, settle_s)
+            except (OSError, subprocess.SubprocessError) as exc:
+                why = f"{name}: state could not be read ({exc})"
+            if why:
+                problems.append(why)
         return (not problems, "; ".join(problems) or "services started")
     if not st.recorder_running or cfg_path is None:
         return True, "the recorder was not running before the update"
@@ -341,7 +410,9 @@ class Pending:
 
     @classmethod
     def read(cls, path: Path) -> Pending:
-        return cls(**json.loads(Path(path).read_text("utf-8")))
+        doc = json.loads(Path(path).read_text("utf-8-sig"))
+        known = set(cls.__dataclass_fields__)
+        return cls(**{k: v for k, v in doc.items() if k in known})   # a newer version may add fields
 
 
 def write_result(folders: Folders, outcome: str, pending: Pending | None, message: str, *,
@@ -358,26 +429,111 @@ def write_result(folders: Folders, outcome: str, pending: Pending | None, messag
     return doc
 
 
-def in_progress(folders: Folders, now: float | None = None, stale_s: float = 3600.0) -> str | None:
+FINISHER_PID_NAME = "finisher.pid"     # in Folders.work: the PowerShell window doing the swap
+
+
+def _process_alive(pid: int) -> bool | None:
+    """True / False, or None when it cannot be told (e.g. another account's process)."""
+    if sys.platform != "win32":
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except OSError:
+            return None
+        return True
+    import ctypes
+    from ctypes import wintypes
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.OpenProcess.restype = wintypes.HANDLE
+    k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    h = k32.OpenProcess(0x1000, False, pid)                  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not h:
+        return False if ctypes.get_last_error() == 87 else None   # 87: no such process
+    try:
+        code = wintypes.DWORD()
+        if not k32.GetExitCodeProcess(h, ctypes.byref(code)):
+            return None
+        if code.value != 259:                                      # STILL_ACTIVE
+            return False
+        buf = ctypes.create_unicode_buffer(1024)
+        size = wintypes.DWORD(len(buf))
+        if k32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
+            return "powershell" in buf.value.lower()               # the number was reused by another program
+        return True
+    finally:
+        k32.CloseHandle(h)
+
+
+def finisher_alive(folders: Folders, alive: Callable[[int], bool | None] | None = None) -> bool | None:
+    """Whether the swap window of the current update still runs (None: not known, e.g. no pid file)."""
+    try:
+        pid = int(folders.work.joinpath(FINISHER_PID_NAME).read_text("utf-8").strip())
+    except (OSError, ValueError):
+        return None
+    try:
+        return (alive or _process_alive)(pid)
+    except OSError:
+        return None
+
+
+def in_progress(folders: Folders, now: float | None = None, stale_s: float = 3600.0,
+                alive: Callable[[int], bool | None] | None = None) -> str | None:
     """'Updating to Sentinel 0.3.4' while an update or rollback is under way (its state file is less
     than an hour old), else None. The window shows it instead of "System error" while recording is
-    stopped for the swap (field report 2026-11-11)."""
+    stopped for the swap (field report 2026-11-11).
+
+    Review 2026-11-12: not when the update has ended without removing its state file (a result written
+    after it) or when its swap window is gone (closed, or never started); the real status is shown then."""
     try:
-        age = (time.time() if now is None else now) - folders.state.stat().st_mtime
-        if age > stale_s:
+        mtime = folders.state.stat().st_mtime
+        if (time.time() if now is None else now) - mtime > stale_s:
             return None
         p = Pending.read(folders.state)
     except (OSError, ValueError, TypeError):
+        return None
+    try:
+        if folders.result.stat().st_mtime >= mtime:
+            return None
+    except OSError:
+        pass
+    if finisher_alive(folders, alive) is False:
         return None
     return (f"Updating to Sentinel {p.to_version}" if p.action == "update"
             else f"Going back to Sentinel {p.to_version}")
 
 
+def abandoned(folders: Folders, alive: Callable[[int], bool | None] | None = None) -> Pending | None:
+    """The state of an update or rollback that ended without cleaning up (its swap window is gone, or it is
+    older than an hour), so a new one can start and restart what that one had stopped. None otherwise."""
+    if not folders.state.is_file():
+        return None
+    try:
+        p = Pending.read(folders.state)
+    except (OSError, ValueError, TypeError):
+        return None
+    return p if in_progress(folders, alive=alive) is None else None
+
+
+def end_state(folders: Folders) -> None:
+    """Remove the state and pid files: the update or rollback is over (whatever its outcome)."""
+    for f in (folders.state, folders.work / FINISHER_PID_NAME):
+        try:
+            f.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            log.warning("could not remove %s: %s", f, exc)
+
+
 def read_result(folders: Folders) -> dict[str, Any] | None:
     try:
-        return json.loads(folders.result.read_text("utf-8"))
+        # utf-8-sig: Windows PowerShell 5.1 writes a byte-order mark (review 2026-11-12)
+        doc = json.loads(folders.result.read_text("utf-8-sig"))
     except (OSError, json.JSONDecodeError):
         return None
+    return doc if isinstance(doc, dict) else None
 
 
 def mark_result(folders: Folders, **changes: Any) -> None:
@@ -428,17 +584,35 @@ def finisher_script(p: Pending, folders: Folders, window_pid: int | None) -> str
     exe = app / "Sentinel.exe"
     what = (f"Updating Sentinel {p.from_version} to {p.to_version}" if p.action == "update"
             else f"Going back from Sentinel {p.from_version} to {p.to_version}")
+    rec = p.recording if isinstance(p.recording, dict) else {}
+    services = [s for s in rec.get("services") or [] if s in SERVICES] if rec.get("service_managed") else []
+    svc_list = ", ".join(_ps(s) for s in services)
     return f"""# Written by Sentinel {__version__} ({p.action}); runs once, then is deleted.
 $ErrorActionPreference = 'Stop'
 $Host.UI.RawUI.WindowTitle = 'Sentinel update - do not close'
 $app = {_ps(app)}; $staged = {_ps(staged)}; $prev = {_ps(prev)}; $hold = {_ps(hold)}; $failed = {_ps(failed)}
 $prevOld = {_ps(prev_old)}
 $exe = {_ps(exe)}; $state = {_ps(folders.state)}; $logf = {_ps(folders.log)}; $result = {_ps(folders.result)}
+$pidf = {_ps(folders.work / FINISHER_PID_NAME)}
+$services = @({svc_list})
 function Say($m) {{ $line = (Get-Date).ToString('s') + '  ' + $m; Write-Host $m; Add-Content -LiteralPath $logf -Value $line -Encoding UTF8 }}
+# The result is read by Python: UTF-8 WITHOUT a byte-order mark (Set-Content -Encoding UTF8 in Windows
+# PowerShell 5.1 writes one, and the result could then not be read; review 2026-11-12).
 function Fail-Plain($m) {{
   Say "FAILED: $m"
-  $doc = @{{ outcome = 'failed'; message = $m; finished_utc = (Get-Date).ToUniversalTime().ToString('o'); shown = $false; watch = $false }}
-  $doc | ConvertTo-Json | Set-Content -LiteralPath $result -Encoding UTF8
+  $doc = @{{ outcome = 'failed'; message = $m; finished_utc = (Get-Date).ToUniversalTime().ToString('o')
+            shown = $false; watch = $false
+            action = {_ps(p.action)}; from_version = {_ps(p.from_version)}; to_version = {_ps(p.to_version)} }}
+  [IO.File]::WriteAllText($result, ($doc | ConvertTo-Json), (New-Object Text.UTF8Encoding $false))
+}}
+# Every way out removes the state file, so the window shows the real status again (review 2026-11-12).
+function End-Update {{
+  Remove-Item -LiteralPath $state -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $pidf -Force -ErrorAction SilentlyContinue
+}}
+function Stop-Services {{
+  $rev = @($services); [array]::Reverse($rev)          # the archive copier first, then the recorder
+  foreach ($s in $rev) {{ if ($s) {{ try {{ $null = & sc.exe stop $s }} catch {{}} }} }}
 }}
 # Every use is wrapped in @(): Windows PowerShell 5.1 unrolls a one-item result into a single CIM
 # object, which has no .Count, so one process would count as none (end-to-end test 2026-11-11).
@@ -472,6 +646,7 @@ if (@(Recorders).Count -gt 0) {{
   & $exe update restart --state $state --outcome aborted --reason 'the recorder did not stop'
   {"Remove-Item -LiteralPath $staged -Recurse -Force -ErrorAction SilentlyContinue" if p.action == "update"
    else "# (going back: $staged is the kept previous version; it stays)"}
+  End-Update
   Start-Sleep -Seconds 5; exit 1
 }}
 $others = @(From-App)
@@ -496,6 +671,7 @@ try {{
   if (Test-Path -LiteralPath $hold) {{ Move-Item -LiteralPath $hold -Destination $staged -ErrorAction SilentlyContinue }}
   Fail-Plain ('The program folders could not be swapped: ' + $_.Exception.Message + '. The installed version is unchanged.')
   & $exe update restart --state $state --outcome aborted --reason 'the program folders could not be swapped'
+  End-Update
   Start-Sleep -Seconds 10; exit 1
 }}
 Say {_ps(f"Checking Sentinel {p.to_version}...")}
@@ -503,21 +679,47 @@ Say {_ps(f"Checking Sentinel {p.to_version}...")}
 $rc = $LASTEXITCODE
 if ($rc -ne 0) {{
   Say 'The check failed; going back to the version that was installed before.'
-  try {{
-    if (Test-Path -LiteralPath $failed) {{ Remove-Item -LiteralPath $failed -Recurse -Force }}
-    Move-Item -LiteralPath $app -Destination $failed
-    Move-Item -LiteralPath $prev -Destination $app
-    if (Test-Path -LiteralPath $prevOld) {{ Move-Item -LiteralPath $prevOld -Destination $prev }}
-  }} catch {{
-    Fail-Plain ('Going back failed: ' + $_.Exception.Message + '. Call technical support; the previous version is in ' + $prev)
+  # Review 2026-11-12: a service the new version started (or that Windows restarts after it failed) runs from
+  # the program folder, and a folder in use cannot be moved. Stop them and wait, then move; try again.
+  $outDone = $false; $backDone = $false; $why = ''
+  for ($try = 1; $try -le 4 -and -not $backDone; $try++) {{
+    Stop-Services
+    $gone = (Get-Date).AddSeconds(30)
+    while (@(From-App).Count -gt 0 -and (Get-Date) -lt $gone) {{ Start-Sleep -Seconds 1 }}
+    $keep = @(@(Recorders) | ForEach-Object {{ $_.ProcessId }})   # a recorder is never killed; it is asked to stop
+    @(From-App) | Where-Object {{ $keep -notcontains $_.ProcessId }} |
+      ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}
+    try {{
+      if (-not $outDone) {{
+        if (Test-Path -LiteralPath $failed) {{ Remove-Item -LiteralPath $failed -Recurse -Force }}
+        Move-Item -LiteralPath $app -Destination $failed
+        $outDone = $true
+      }}
+      Move-Item -LiteralPath $prev -Destination $app
+      $backDone = $true
+    }} catch {{
+      $why = $_.Exception.Message
+      Say ('Going back: attempt ' + $try + ' did not work (' + $why + ')')
+      Start-Sleep -Seconds 3
+    }}
+  }}
+  if (-not $backDone) {{
+    Fail-Plain ('Going back failed: ' + $why + '. Call technical support; the previous version is in ' + $prev)
+    if (Test-Path -LiteralPath $exe) {{
+      foreach ($s in $services) {{ try {{ $null = & sc.exe start $s }} catch {{}} }}
+    }}
+    End-Update
     Start-Sleep -Seconds 30; exit 2
+  }}
+  if (Test-Path -LiteralPath $prevOld) {{
+    try {{ Move-Item -LiteralPath $prevOld -Destination $prev }} catch {{ Say ('Note: ' + $_.Exception.Message) }}
   }}
   & $exe update restart --state $state --outcome rolled_back --reason 'the new version did not pass its check'
 }} else {{
   if (Test-Path -LiteralPath $prevOld) {{ Remove-Item -LiteralPath $prevOld -Recurse -Force -ErrorAction SilentlyContinue }}
   Say 'Done.'
 }}
-Remove-Item -LiteralPath $state -Force -ErrorAction SilentlyContinue
+End-Update
 {"Start-Process -FilePath $exe" if p.reopen else "# (the window is not reopened)"}
 Start-Sleep -Seconds 3
 Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
@@ -537,9 +739,16 @@ def launch_finisher(script: str, folders: Folders, popen: Callable[..., Any] = s
     flags |= 0x01000000                                   # CREATE_BREAKAWAY_FROM_JOB
     argv = [str(ps), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(path)]
     try:
-        popen(argv, cwd=str(system), creationflags=flags, close_fds=True)
+        proc = popen(argv, cwd=str(system), creationflags=flags, close_fds=True)
     except OSError:
-        popen(argv, cwd=str(system), creationflags=flags & ~0x01000000, close_fds=True)
+        proc = popen(argv, cwd=str(system), creationflags=flags & ~0x01000000, close_fds=True)
+    pid = getattr(proc, "pid", None)
+    if isinstance(pid, int):
+        # So the window can tell a running update from one whose window was closed (review 2026-11-12).
+        try:
+            (folders.work / FINISHER_PID_NAME).write_text(str(pid), "utf-8")
+        except OSError as exc:
+            log.warning("could not note the update window's process id: %s", exc)
     return path
 
 

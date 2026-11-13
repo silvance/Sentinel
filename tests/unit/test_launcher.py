@@ -409,6 +409,58 @@ def test_view_recording_and_startup_grace(tmp_path: Path) -> None:
     assert "RECORDER NOT RESPONDING" in text and not healthy
 
 
+def test_a_start_problem_gives_way_to_the_status_once_the_recorder_runs_again(tmp_path: Path) -> None:
+    """Review 2026-11-12: 'Error C-003' stayed on screen for good, also after Windows restarted the recorder."""
+    st = tmp_path / "status.json"
+    t0 = time.time()
+    now = [t0 - 10]
+    v = view.ConsoleStatusView(clock=lambda: now[0])
+    _status(st, "RECORDING", t0 - 20)                                     # from before the problem
+    text, healthy = v.render(st, "Front", start_problem="C-003")
+    assert "Error C-003" in text and not healthy and "Checked at" in text
+    now[0] = t0
+    _status(st, "RECORDING", t0 - 1)                                      # the service runs again
+    text, healthy = v.render(st, "Front", start_problem="C-003")
+    assert "RECORDING NORMALLY" in text and healthy and "C-003" not in text
+
+
+def test_service_managed_launch_opens_the_window_when_the_start_is_refused(tmp_path: Path, monkeypatch) -> None:
+    """Review 2026-11-12: a standard user opening Sentinel while the service is stopped (Windows restarts it after a
+    failure) got a frozen console 'Error C-003' instead of the window showing what the service wrote."""
+    from sentinel.launcher.control import StartResult
+
+    cfg_path = tmp_path / "sentinel.toml"
+    cfg_path.write_text('[camera]\nid = "CAM01"\nname = "Cam"\nurl = "rtsp://192.0.2.10:554/live"\n'
+                        f"[storage]\nspool_dir = '{tmp_path / 'spool'}'\ndata_dir = '{tmp_path / 'data'}'\n"
+                        f"log_dir = '{tmp_path / 'logs'}'\nstatus_dir = '{tmp_path / 'status'}'\n", encoding="utf-8")
+    archive: list[bool] = []
+
+    class Svc:
+        name, service_managed = "Windows service", True
+
+        def is_running(self) -> bool:
+            return False
+
+        def start(self) -> StartResult:
+            return StartResult(False, "C-003", "access denied")
+
+        def start_archive(self) -> bool:
+            archive.append(True)
+            return False
+
+    seen: dict = {}
+
+    class View:
+        def run(self, status_path: Path, camera_name: str, **kw) -> int:
+            seen.update(kw)
+            return 0
+
+    monkeypatch.setattr(cli, "select_control", lambda p, c: Svc())
+    monkeypatch.setattr(cli, "select_view", lambda *_a: View())
+    assert cli.cmd_launch(__import__("argparse").Namespace(config=str(cfg_path), once=False, no_start=False)) == 0
+    assert seen["start_problem"] is None and seen["started_after"] is None and archive == [True]
+
+
 def test_view_start_problem_and_once_exit_code(tmp_path: Path) -> None:
     buf = io.StringIO()
     rc = view.ConsoleStatusView(out=buf).run(tmp_path / "status.json", "Front", once=True, start_problem="C-003")
