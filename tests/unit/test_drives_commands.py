@@ -12,7 +12,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from drive_fakes import SYSTEM_VOL, blank_disk, data_part, exfat_disk, system_disk, usb_disk, vol
+from drive_fakes import SYSTEM_VOL, blank_disk, data_part, exfat_disk, raw_disk, system_disk, usb_disk, vol
 
 from sentinel.alerts import CATALOG, Severity, make_alert
 from sentinel.drives.commands import build_linux_script, build_windows_plan, build_windows_script
@@ -71,7 +71,7 @@ def test_hostile_hardware_strings_are_not_code() -> None:
 
 def test_exfat_and_raw_disk() -> None:
     assert _expected(_script(filesystem="exfat", label="SENTINEL_9"))["filesystem"] == "exFAT"
-    s = _script(blank_disk())
+    s = _script(raw_disk())
     e = _expected(s)
     assert e["disk_guid"] == "" and e["partition_guids"] == [] and e["partition_layout"] == []
     assert e["partition_style"] == "RAW"

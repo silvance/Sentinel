@@ -133,8 +133,12 @@ def test_a_new_disk_next_to_the_current_archive_drive_of_the_same_model_can_be_s
     v = vol("c0ffee00-0000-0000-0000-00000000bbbb", "ntfs", label="SENTINEL_1")
     archive = usb_disk(disk_id="4", serial=ZEROS, unique_id=None, partitions=(data_part(1, v),))
     new = blank_disk(disk_id="3", serial=ZEROS, unique_id=None)
-    classes, _ = classify_all([archive, new, SYS], POL, protected_for(), inspector=FakeInspector())
+    marker = {"format": "sentinel-drive", "version": 1, "drive_uuid": "0b0e5f0a-1c2d-4e3f-8a9b-0c1d2e3f4a5b",
+              "label": "SENTINEL_1", "prepared_utc": "x", "prepared_by": "y", "role": "archive"}
+    insp = FakeInspector({v.volume_id: RootContents(readable=True, entries=("SENTINEL_DRIVE.json",), marker=marker)})
+    classes, _ = classify_all([archive, new, SYS], POL, protected_for(), inspector=insp)
     by = {c.disk.disk_id: c for c in classes}
+    assert by["4"].drive_class is DriveClass.READY
     assert by["3"].can_prepare and by["3"].refusal is None
 
 

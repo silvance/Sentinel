@@ -56,6 +56,14 @@ def msr_part() -> PartitionInfo:
 
 
 def blank_disk(**kw: Any) -> DiskInfo:
+    """An empty disk as Windows reports one it can read: a GPT partition table holding only the Microsoft
+    Reserved partition (what Initialize-Disk creates). Review 2026-11-12: a RAW disk (``raw_disk``) is not
+    'blank' on Windows: Windows cannot see what is on it."""
+    return usb_disk(style="GPT", partitions=(msr_part(),), **kw)
+
+
+def raw_disk(**kw: Any) -> DiskInfo:
+    """A disk with no partition table Windows recognises (new, or used whole by another system)."""
     return usb_disk(style="RAW", partitions=(), **kw)
 
 

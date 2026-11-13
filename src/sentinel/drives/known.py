@@ -39,6 +39,7 @@ class KnownDrives:
     hardware: frozenset[tuple[str, str, int]] = frozenset()   # (serial, model, size)
     serials: frozenset[str] = frozenset()                     # from a drives table without model/size
     error: str | None = None                                  # the ledger could not be read
+    needs_admin: bool = False                                 # ...because this account may not read it
 
     def matches(self, disk: DiskInfo, marker_uuids: tuple[str, ...] = ()) -> list[str]:
         why = []
@@ -88,6 +89,32 @@ def _add(acc: dict[str, set[Any]], kind: str, value: Any) -> None:
     acc[kind].add(norm_volume_id(value) if kind == "vol" else str(value).strip().lower())
 
 
+# Tables whose rows show that Sentinel used a drive (wrote to it, or attached it as an archive drive).
+_DRIVE_USE_TABLES = ("export_batches", "archive_copies", "archive_indexes", "archive_drive_sessions",
+                     "archive_problems")
+
+
+def _used_drives_filter(audit: Any, cols: list[str]) -> str:
+    """SQL WHERE clause keeping only the ``drives`` rows of drives Sentinel actually used (review 2026-11-12):
+    the export engine registers a drive before planning, so a run that wrote nothing ("There are no new
+    recordings to export") used to make a new drive "hold Sentinel recordings" for ever. A row is kept when
+    the drive has a Sentinel drive_uuid (it carried Sentinel's marker) or any export batch or archive record
+    refers to it. Fail closed: when a table is missing or the schema is not the expected one, every row
+    is kept."""
+    if "drive_id" not in cols:
+        return ""
+    tables = {r[0] for r in audit.query("SELECT name FROM sqlite_master WHERE type='table'")}
+    if not all(t in tables for t in _DRIVE_USE_TABLES):
+        return ""
+    for t in _DRIVE_USE_TABLES:
+        if "drive_id" not in [r[1] for r in audit.query(f"PRAGMA table_info({t})")]:
+            return ""
+    used = " OR ".join(f"drive_id IN (SELECT drive_id FROM {t} WHERE drive_id IS NOT NULL)"
+                       for t in _DRIVE_USE_TABLES)
+    keep_uuid = "(drive_uuid IS NOT NULL AND drive_uuid != '') OR " if "drive_uuid" in cols else ""
+    return f" WHERE {keep_uuid}{used}"
+
+
 def load_known(audit: Any) -> KnownDrives:
     """Read known drives from the ledger. A read failure is reported in ``error`` (callers fail closed)."""
     acc: dict[str, set[Any]] = {k: set() for k in ("uuid", "vol", "fs", "uid", "serial")}
@@ -114,16 +141,17 @@ def load_known(audit: Any) -> KnownDrives:
                 if serial and ident.get("size_bytes"):
                     hw.add((serial.lower(), str(ident.get("model") or "").lower(), int(ident["size_bytes"])))
         cols = [r[1] for r in audit.query("PRAGMA table_info(drives)")]
+        where = _used_drives_filter(audit, cols)
         use = [c for c in cols if c in _DRIVES_TABLE_COLUMNS]
         if use:
-            for row in audit.query(f"SELECT {', '.join(use)} FROM drives"):
+            for row in audit.query(f"SELECT {', '.join(use)} FROM drives{where}"):
                 for c, v in zip(use, row):
                     _add(acc, _DRIVES_TABLE_COLUMNS[c], norm_serial(v) if c == "serial" else v)
         if "identity" in cols:
             # Integration: the export branch keeps the Windows filesystem serial only inside the
             # identity JSON, as 8 hex digits (GetVolumeInformationW); this package compares the
             # decimal form (Win32_Volume.SerialNumber).
-            for (raw_ident,) in audit.query("SELECT identity FROM drives"):
+            for (raw_ident,) in audit.query(f"SELECT identity FROM drives{where}"):
                 try:
                     vs = (json.loads(raw_ident or "{}") or {}).get("volume_serial")
                     n = int(str(vs), 16) if vs else 0

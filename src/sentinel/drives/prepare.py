@@ -29,9 +29,11 @@ from __future__ import annotations
 
 import getpass
 import json
+import logging
 import os
 import re
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -64,6 +66,7 @@ from .policy import DrivePolicy
 from .protected import ProtectedStorage
 
 AUDIT_CATEGORY = "drives"
+log = logging.getLogger(__name__)
 
 
 class AuditSink(Protocol):
@@ -163,15 +166,16 @@ def check_guards(c: Classification, confirmation: Confirmation | None, auth: Aut
                               "Nothing was erased.", {"confirmed": str(confirmation.drive_class),
                                                        "now": str(c.drive_class)})
     if not c.can_prepare:
-        if c.refusal == "lookalike":
-            raise PrepareRefused("lookalike", f"{c.message} Nothing was erased.")
+        if c.refusal in ("lookalike", "no_confirmation"):
+            raise PrepareRefused(c.refusal, f"{c.message} Nothing was erased.")
         raise PrepareRefused(c.refusal or "not_allowed", "Erasing drives that contain other files is not "
                              "allowed on this system. Nothing was erased.")
     if c.needs_admin and not auth.administrator:
         raise PrepareRefused("admin_required", "An administrator must approve erasing this drive. Nothing was erased.")
     if c.needs_serial:
         # A dock that hides the serial (placeholder such as all zeros) is confirmed with a word instead:
-        # typing "0000" would prove nothing. The lookalike refusal covers the second bay.
+        # typing "0000" would prove nothing. The lookalike refusal (classify._refuse_lookalike) covers the other
+        # bay: erasing is refused while another erasable disk of the same model and size also hides its serial.
         want = confirm_text(c.disk.serial, policy.serial_confirm_chars)
         typed = (confirmation.typed_serial_tail or "").strip().upper()
         if want is None or typed != want:
@@ -204,16 +208,33 @@ _LABEL_NUM = re.compile(r"^(?P<p>[A-Z][A-Z0-9_]*?)(?P<n>\d+)$")
 
 def next_label(policy: DrivePolicy, audit: AuditSink, disks: list[DiskInfo]) -> str:
     """<prefix><n> (SSD_<n> by default): one more than any number used before (set-up and rename records)
-    or currently attached."""
+    or currently attached.
+
+    Review 2026-11-12: a set-up or rename whose final record could not be written (ledger locked) still
+    leaves its name on the drive. So the names of authorised set-ups that never recorded a failure or
+    refusal, and of authorised renames, count as used too (a set-up that failed and said so frees its
+    number again, field report 2026-11-11)."""
     used: list[int] = []
-    for row in audit.query("SELECT detail FROM events WHERE category=? AND code IN ('drive_prepared', "
-                           "'drive_renamed')", (AUDIT_CATEGORY,)):
+    pending: dict[str, str] = {}
+    ended: set[str] = set()
+    for row in audit.query("SELECT code, detail FROM events WHERE category=? AND code IN ('drive_prepared', "
+                           "'drive_renamed', 'drive_rename_authorized', 'drive_prepare_authorized', "
+                           "'drive_prepare_failed', 'drive_prepare_refused')", (AUDIT_CATEGORY,)):
         try:
-            d = json.loads(row[0] or "{}")
+            d = json.loads(row[1] or "{}")
         except ValueError:
+            continue
+        if not isinstance(d, dict):
+            continue
+        if row[0] == "drive_prepare_authorized":
+            pending[str(d.get("drive_uuid") or "")] = str(d.get("label") or "")
+            continue
+        if row[0] in ("drive_prepare_failed", "drive_prepare_refused"):
+            ended.add(str(d.get("drive_uuid") or ""))
             continue
         for key in ("label", "new_label"):
             used.append(_label_number(policy, str(d.get(key) or "")))
+    used.extend(_label_number(policy, name) for uid, name in pending.items() if uid not in ended)
     for d in disks:
         for v in d.volumes:
             used.append(_label_number(policy, v.label or ""))
@@ -228,8 +249,26 @@ def _label_number(policy: DrivePolicy, label: str) -> int:
 
 # ---------------------------------------------------------------------------- orchestration
 
+def record_event(audit: AuditSink, code: str, message: str, detail: dict[str, Any], severity: str = "audit") -> None:
+    """Write a drives audit event, retrying while SQLite reports the ledger locked or busy (the recorder or the
+    archive copier may hold the write lock for longer than the 5 s busy timeout; review 2026-11-12)."""
+    from ..export.ledger import retry_locked
+
+    retry_locked(audit.add_event)(severity, AUDIT_CATEGORY, code, message, detail)
+
+
 def _audit(ctx: PrepareContext, code: str, message: str, detail: dict[str, Any], severity: str = "audit") -> None:
-    ctx.audit.add_event(severity, AUDIT_CATEGORY, code, message, detail)
+    record_event(ctx.audit, code, message, detail, severity)
+
+
+def _audit_failure(ctx: PrepareContext, code: str, message: str, detail: dict[str, Any],
+                   severity: str = "error") -> None:
+    """A refusal or failure record: written if at all possible, but a ledger error here must not replace the
+    message that says what happened to the drive."""
+    try:
+        _audit(ctx, code, message, detail, severity)
+    except sqlite3.Error:
+        log.exception("could not record %s", code)
 
 
 def _protected_ids(ctx: PrepareContext) -> tuple[str, ...]:
@@ -265,7 +304,12 @@ def prepare_drive(ctx: PrepareContext, disk_id: str, confirmation: Confirmation 
             "auth_method": auth.method, "os_user": _os_user(), "host": socket.gethostname(),
             "label": label, "drive_uuid": drive_uuid, "filesystem": ctx.policy.approved_filesystem,
             "foreign_policy": ctx.policy.foreign_data_authorization, "used_bytes": c.used_bytes}
-    _audit(ctx, "drive_prepare_authorized", f"Drive preparation authorised by {auth.who}: {c.disk.describe()}", base)
+    try:   # the record comes first: nothing is erased that Sentinel could not record (review 2026-11-12)
+        _audit(ctx, "drive_prepare_authorized", f"Drive preparation authorised by {auth.who}: {c.disk.describe()}",
+               base)
+    except sqlite3.Error as exc:
+        raise PrepareRefused("record_failed", f"Sentinel's records could not be written ({exc}). Nothing was "
+                             "erased. Try again in a minute.") from None
 
     # TOCTOU: re-check everything immediately before the destructive step.
     try:
@@ -274,14 +318,18 @@ def prepare_drive(ctx: PrepareContext, disk_id: str, confirmation: Confirmation 
         if c2.disk.identity.fingerprint() != plan.identity.fingerprint():
             raise IdentityChanged("identity_changed", "The drive changed after it was confirmed. Nothing was erased.")
     except PrepareRefused as exc:
-        _audit(ctx, "drive_prepare_refused", f"Drive preparation refused before erasing: {exc.reason}",
-               {**base, "reason": exc.reason})
+        _audit_failure(ctx, "drive_prepare_refused", f"Drive preparation refused before erasing: {exc.reason}",
+                       {**base, "reason": exc.reason}, severity="audit")
         raise
 
     started = time.monotonic()
     hr = ctx.runner.run(plan)
     res = hr.result or {}
-    step = str(res.get("step") or "start")
+    # Review 2026-11-12: no result (or no step in it) does not mean the helper never started: it may have
+    # stopped after erasing without reporting (Linux `set -e`, an unreadable result file). Only a declined
+    # administrator prompt is known to have run nothing.
+    reported = bool(res.get("step"))
+    step = str(res.get("step") or ("start" if hr.exit_code == EXIT_ELEVATION_CANCELLED else "unknown"))
     if hr.exit_code != EXIT_OK or not res.get("ok"):
         still_running = bool(res.get("still_running"))
         # A helper that may still be running can go on to erase even if it was last seen verifying.
@@ -290,12 +338,16 @@ def prepare_drive(ctx: PrepareContext, disk_id: str, confirmation: Confirmation 
                   "stderr": hr.stderr[-1000:], "erase_started": erased,
                   "helper_pid": res.get("helper_pid", res.get("pid")), "still_running": still_running,
                   "terminate_error": res.get("terminate_error")}
-        _audit(ctx, "drive_prepare_failed", f"Drive setup failed at step {step}", detail, severity="error")
+        _audit_failure(ctx, "drive_prepare_failed", f"Drive setup failed at step {step}", detail)
         if still_running:
             raise PrepareFailed("helper_still_running", "Drive setup is taking too long and may still be running. "
                                 "Do not unplug the drive. Contact technical support.", detail)
-        if hr.exit_code == EXIT_ELEVATION_CANCELLED:
+        if not erased and hr.exit_code == EXIT_ELEVATION_CANCELLED:
             raise PrepareRefused("elevation_cancelled", "Administrator approval was not given. Nothing was erased.")
+        if not reported:
+            raise PrepareFailed("outcome_unknown", "Drive setup stopped without reporting how far it got, so "
+                                "Sentinel cannot tell whether the drive was erased. It may be partly erased: do not "
+                                "use it until it is set up again.", detail)
         if not erased and hr.exit_code == EXIT_IDENTITY_MISMATCH:
             raise IdentityChanged("identity_changed", "The drive changed after it was confirmed. Nothing was erased.",
                                   detail)
@@ -316,7 +368,7 @@ def _finish(ctx: PrepareContext, plan: PreparePlan, before: Classification, auth
             base: dict[str, Any], res: dict[str, Any], helper_s: float) -> PrepareResult:
     def fail(reason: str, msg: str, extra: dict[str, Any] | None = None) -> PrepareFailed:
         d = {**base, "reason": reason, **(extra or {})}
-        _audit(ctx, "drive_prepare_failed", f"Drive preparation could not be verified: {reason}", d, severity="error")
+        _audit_failure(ctx, "drive_prepare_failed", f"Drive preparation could not be verified: {reason}", d)
         return PrepareFailed(reason, msg, d)
 
     # Find the disk again by its hardware AND by the partition the helper has just created. A two-bay
@@ -372,9 +424,17 @@ def _finish(ctx: PrepareContext, plan: PreparePlan, before: Classification, auth
     if after.drive_class is not DriveClass.READY or (after.marker or {}).get("drive_uuid") != plan.drive_uuid:
         raise fail("not_ready_after_prepare", "The drive was set up but is not recognised. Contact technical support.",
                    {"class": str(after.drive_class), "reasons": list(after.reasons)})
-    _audit(ctx, "drive_prepared", f"Drive prepared as {plan.label} by {auth.who}: {disk.describe()}",
-           {**base, "identity_after": disk.identity.to_dict(), "write_test": test, "helper_seconds": round(helper_s, 1),
-            "volume_id": vol.volume_id})
+    try:
+        _audit(ctx, "drive_prepared", f"Drive prepared as {plan.label} by {auth.who}: {disk.describe()}",
+               {**base, "identity_after": disk.identity.to_dict(), "write_test": test,
+                "helper_seconds": round(helper_s, 1), "volume_id": vol.volume_id})
+    except sqlite3.Error as exc:
+        # Review 2026-11-12: the drive is set up, but without this record Sentinel does not know it by its
+        # volume. Its name stays reserved (next_label counts the authorisation record written before erasing).
+        log.exception("could not record drive_prepared")
+        raise PrepareFailed("not_recorded", f"The drive was erased and set up as {plan.label}, but Sentinel could "
+                            f"not record it ({exc}). Do not use this drive yet. Contact technical support.",
+                            {**base, "error": str(exc)}) from None
     return PrepareResult(disk.disk_id, plan.label, plan.drive_uuid, plan.filesystem, written, test,
                          str(before.drive_class), disk.identity.to_dict())
 
@@ -522,11 +582,17 @@ class LinuxPkexecRunner:
                 killed, kerr = False, str(exc)
             return HelperResult(EXIT_TIMEOUT, {"ok": False, "step": "unknown", "error": "timeout", "helper_pid": p.pid,
                                                "still_running": not killed, "terminate_error": kerr}, "timeout")
-        proc = subprocess.CompletedProcess(p.args, p.returncode, out, err)
-        if proc.returncode in (126, 127):  # pkexec: not authorised / dismissed
-            return HelperResult(EXIT_ELEVATION_CANCELLED, {"ok": False, "step": "start"}, proc.stderr.decode(errors="replace"))
-        return HelperResult(proc.returncode, parse_linux_result(proc.stdout.decode(errors="replace")),
-                            proc.stderr.decode(errors="replace"))
+        return linux_helper_result(p.returncode, out.decode(errors="replace"), err.decode(errors="replace"))
+
+
+def linux_helper_result(returncode: int, stdout: str, stderr: str) -> HelperResult:
+    """pkexec exits 126/127 when approval is refused or dismissed, but a command missing inside the script
+    exits 127 too (review 2026-11-12). The script always prints a RESULT line once it runs (an EXIT trap),
+    so 126/127 means "not approved" only when there is none."""
+    result = parse_linux_result(stdout)
+    if returncode in (126, 127) and result is None:
+        return HelperResult(EXIT_ELEVATION_CANCELLED, {"ok": False, "step": "start"}, stderr)
+    return HelperResult(returncode, result, stderr)
 
 
 def parse_linux_result(stdout: str) -> dict[str, Any] | None:
