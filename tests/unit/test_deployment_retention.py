@@ -279,3 +279,16 @@ def test_service_provider_passes_the_archive_setting(tmp_path: Path) -> None:
     off = wctl.service_control_provider(tmp_path, make_config(tmp_path, archive={"enabled": False}),
                                         api=w.calls_api(), platform="win32")
     assert on.archive_enabled is True and off.archive_enabled is False
+
+
+def test_a_copier_that_was_killed_is_not_taken_for_a_running_one(tmp_path: Path) -> None:
+    """Field report 2026-11-13: the update ended the copier (Stop-Process) seconds after its last heartbeat; the
+    restart took the fresh heartbeat for a running copier and started none, so archive copying stayed off."""
+    import os
+
+    cfg = make_config(tmp_path, archive={"enabled": True})
+    _write_archive_status(cfg, state="REMOVE_MANUALLY", heartbeat_epoch=995.0, pid=4242)
+    assert control.archive_alive(cfg, now=1000.0, alive=lambda pid: False) is False
+    assert control.archive_alive(cfg, now=1000.0, alive=lambda pid: True) is True
+    assert control.archive_alive(cfg, now=1000.0, alive=lambda pid: None) is True      # cannot tell: heartbeat
+    assert control.pid_alive(os.getpid()) is True

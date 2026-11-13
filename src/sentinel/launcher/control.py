@@ -26,6 +26,7 @@ starts the archive-drive copy (``Sentinel.exe archive run``) as a second backgro
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 import sys
 import time
@@ -85,18 +86,56 @@ def archive_command(config_path: Path, frozen: bool | None = None, executable: s
     return [exe, "-m", "sentinel.archive", "run", "--config", str(config_path)]
 
 
-def archive_alive(cfg: AppConfig, now: float | None = None) -> bool:
+def pid_alive(pid: int) -> bool | None:
+    """True / False, or None when it cannot be told."""
+    if sys.platform != "win32":
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except OSError:
+            return None
+        return True
+    import ctypes
+    from ctypes import wintypes
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.OpenProcess.restype = wintypes.HANDLE
+    k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    k32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    h = k32.OpenProcess(0x1000, False, pid)                  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not h:
+        return False if ctypes.get_last_error() == 87 else None   # 87: no such process
+    try:
+        code = wintypes.DWORD()
+        if not k32.GetExitCodeProcess(h, ctypes.byref(code)):
+            return None
+        return code.value == 259                                  # STILL_ACTIVE
+    finally:
+        k32.CloseHandle(h)
+
+
+def archive_alive(cfg: AppConfig, now: float | None = None,
+                  alive: Callable[[int], bool | None] = pid_alive) -> bool:
     """Non-intrusive: the archive process publishes ``archive_status.json`` at least every
     ``poll_interval_s``; a fresh heartbeat (the recorder's own A-007 threshold) and a state other
     than STOPPED means it runs. Never touches ``archive.lock``: a worker that loses the lock race
-    would overwrite the running worker's status with "another archive copy is already running"."""
+    would overwrite the running worker's status with "another archive copy is already running".
+
+    Field report 2026-11-13: an update ends the copier with Stop-Process, which leaves a fresh heartbeat; the
+    restart a few seconds later took it for a running copier and started none. The process the status names must
+    also still exist."""
     from ..archive.status import ST_STOPPED, STATUS_FILE, read_archive_status
 
     doc = read_archive_status(cfg.data_path / STATUS_FILE)
     if not doc or doc.get("state") == ST_STOPPED:
         return False
     age = (time.time() if now is None else now) - float(doc.get("heartbeat_epoch", 0))
-    return age <= max(60.0, 6 * cfg.archive.poll_interval_s)
+    if age > max(60.0, 6 * cfg.archive.poll_interval_s):
+        return False
+    pid = doc.get("pid")
+    return not (isinstance(pid, int) and alive(pid) is False)
 
 
 def detached_popen_kwargs(cwd: Path | None = None, platform: str | None = None,

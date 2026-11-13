@@ -25,7 +25,7 @@ from ...drives.model import HIDDEN_SERIAL_WORD
 from ..ledger_view import load_exports
 from .base import CommandPanel, OutputLog, Page, ReadOnlyBar, capped, fill, icon_button, muted, selected_data, table
 from .icons import glyph
-from .procs import Command, sentinel_argv
+from .procs import Command, Task, sentinel_argv
 
 CLASS_WORDS = {"READY": "set up, ready to use", "SENTINEL_EVIDENCE": "holds Sentinel recordings (never erased)",
                "BLANK": "blank", "WRONG_FORMAT": "not set up", "FOREIGN_DATA": "has other files",
@@ -256,13 +256,17 @@ class DrivesPage(Page):
         # page offers the removal for exactly that drive.
         self.remove_btn = icon_button("Safely remove", "eject", c)
         self.remove_btn.setVisible(False)
+        # Field report 2026-11-13: after an update archive copying stayed off; one click starts it again.
+        self.start_arc_btn = icon_button("Start archive copying", "play", c)
+        self.start_arc_btn.setVisible(False)
         # Rarely needed (technical support): behind "More" instead of always on the page.
         self.more_btn = QPushButton(glyph("info", c, 16), " More")
         menu = QMenu(self.more_btn)
         self.arc_status_act = menu.addAction("Archive details")
         self.problems_act = menu.addAction("Copies that could not be checked (A-006)")
         self.more_btn.setMenu(menu)
-        for b in (self.swap_btn, self.remove_btn, self.resume_btn, self.ack_btn, self.more_btn):
+        for b in (self.start_arc_btn, self.swap_btn, self.remove_btn, self.resume_btn, self.ack_btn,
+                  self.more_btn):
             row.addWidget(b)
         row.addStretch(1)
         al.addLayout(row)
@@ -318,6 +322,9 @@ class DrivesPage(Page):
                                                                   "Archive problems"))
         self.ack_btn.clicked.connect(self._acknowledge)
         self.remove_btn.clicked.connect(self._remove_swapped)
+        self.start_arc_btn.clicked.connect(self._start_archive)
+        self.start_arc_btn.setEnabled(ctx.admin)
+        self._start_task: Task | None = None
         self.remove_btn.setEnabled(ctx.admin)
         self._removal: dict[str, Any] | None = None
         self._auto_remove_until: float | None = None
@@ -384,7 +391,9 @@ class DrivesPage(Page):
             return
         bk = arc.get("backlog") or {}
         backlog = str(bk.get("text") or "")
+        self.start_arc_btn.setVisible(not arc.get("running"))
         if not arc.get("running"):
+            self.swap_btn.setVisible(False)          # nothing answers a swap while copying is not running
             # Field report 2026-11-13: "Drive: unknown (archive copying is not running). Archive copying is not
             # running. Not yet archived: 0 h." said the same thing twice.
             secs = bk.get("seconds")
@@ -465,6 +474,32 @@ class DrivesPage(Page):
             return
         self._auto_remove_until = None
         self._run_eject(d)
+
+    def _start_archive(self) -> None:
+        cfg, path = self.ctx.cfg, self.ctx.cfg_path
+        if cfg is None or path is None or (self._start_task is not None and self._start_task.running()):
+            return
+        from ...launcher.control import select_control
+
+        def start() -> bool:
+            fn = getattr(select_control(path, cfg), "start_archive", None)
+            return bool(fn()) if callable(fn) else False
+
+        self.start_arc_btn.setEnabled(False)
+        self.arc_text.setText("Starting archive copying…")
+        task = Task(start, self)
+
+        def done(started: object, err: object) -> None:
+            self.start_arc_btn.setEnabled(self.ctx.admin)
+            if err is not None:
+                self.problem(f"Archive copying could not be started: {err}")
+            elif not started:
+                self.info("Archive copying was not started: it may be starting already. If this page still says it "
+                          "is not running in a minute, use System › Restart recorder, or contact technical support.")
+
+        task.done.connect(done)
+        self._start_task = task
+        task.start()
 
     def _resume(self) -> None:
         """Cancel a swap / keep using the drive: its own command, even while a swap is waiting."""

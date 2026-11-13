@@ -1233,3 +1233,26 @@ def test_swap_and_safely_remove_ejects_the_drive_the_copier_could_not(
     page.on_status(SimpleNamespace(doc={"archive": waiting}))
     assert len(runs) == 3                                       # the swap command only
     w.close()
+
+
+def test_archive_copying_not_running_offers_to_start_it(app: QApplication, tmp_path: Path,
+                                                         monkeypatch: pytest.MonkeyPatch) -> None:
+    """Field report 2026-11-13: after an update archive copying stayed off (no Windows service to restart it)."""
+    from types import SimpleNamespace
+
+    from sentinel.launcher import control as lc
+
+    w = _window(app, tmp_path, admin=True)
+    page = w.pages["drives"]
+    page.on_status(SimpleNamespace(doc={"archive": {"running": False, "backlog": {"text": "x", "seconds": 0}}}))
+    assert not page.start_arc_btn.isHidden() and page.swap_btn.isHidden()
+    assert page.arc_text.text() == "Archive copying is not running."
+    started: list[int] = []
+    monkeypatch.setattr(lc, "select_control", lambda *_a: SimpleNamespace(start_archive=lambda: started.append(1)
+                                                                            or True))
+    page.start_arc_btn.click()
+    _drain(app, 1.0)
+    assert started == [1]
+    page.on_status(SimpleNamespace(doc={"archive": {"running": True, "drive_label": "SSD_1"}}))
+    assert page.start_arc_btn.isHidden() and not page.swap_btn.isHidden()
+    w.close()
