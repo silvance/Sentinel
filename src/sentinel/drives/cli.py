@@ -360,6 +360,13 @@ def _record_removal(env: _Env, marker: dict[str, Any], record: Callable[..., Non
         return f"{name} was taken out, but Sentinel could not record it ({exc}). {later}"
     finally:
         ledger.close()
+    try:        # the copier's own list too, so it does not write to the drive when it comes back
+        from ..archive.worker import mark_awaiting_return
+
+        mark_awaiting_return(env.cfg, f"drive_uuid:{marker['drive_uuid']}", marker.get("label"))
+    except OSError as exc:
+        return (f"{name} is recorded as taken out, but the archive copier's list could not be updated ({exc}). "
+                f"{later}")
     return f"{name} is recorded as taken out for the office (as with Swap archive drive)."
 
 

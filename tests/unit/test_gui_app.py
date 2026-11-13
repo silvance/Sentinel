@@ -533,7 +533,7 @@ def test_operator_can_request_an_archive_swap(app: QApplication, tmp_path: Path)
     from sentinel.archive.worker import operator_request_dir
 
     assert (operator_request_dir(w.ctx.cfg) / "swap.request").is_file()
-    assert "SAFE TO REMOVE" in page.log.toPlainText()
+    assert "ready to be taken out" in page.log.toPlainText()     # the copier never shows SAFE TO REMOVE
     w.close()
 
 

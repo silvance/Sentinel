@@ -40,6 +40,8 @@ def _who() -> str:
 def _what(d: dict[str, Any]) -> str:
     role = d.get("role")
     words = CLASS_WORDS.get(d.get("class", ""), d.get("class", ""))
+    if d.get("class") == "FOREIGN_DATA" and "unknown_contents" in (d.get("reasons") or []):
+        words = "contents unknown"           # Windows cannot read it (e.g. a new, never-used drive)
     if role:
         return f"{role} drive {d.get('label') or ''}".strip() + f" — {words}"
     return words
@@ -216,7 +218,8 @@ class DrivesPage(Page):
         row = QHBoxLayout()
         c = ctx.palette.text
         self.swap_btn = icon_button("Swap archive drive", "swap", c)
-        self.swap_btn.setToolTip("Finish copying and prepare the drive for removal; wait for SAFE TO REMOVE")
+        self.swap_btn.setToolTip("Finish copying and prepare the drive for removal; take it out when this page "
+                                 "says it is ready to be taken out")
         # Owner request 2026-11-11: "Keep using this drive" was always shown, though it only undoes a swap.
         # Now "Cancel swap", shown only while a swap is being prepared or a drive waits to be taken out.
         self.resume_btn = icon_button("Cancel swap", "play", c)
@@ -338,7 +341,7 @@ class DrivesPage(Page):
             return
         if kind == "swap":
             self.log.appendPlainText("── Swap requested. Copying finishes first: wait until this page says "
-                                     "SAFE TO REMOVE, then unplug the archive drive and insert the next one. "
+                                     "the drive is ready to be taken out, then unplug it and insert the next one. "
                                      "To undo it, press Cancel swap.\n")
         else:
             self.log.appendPlainText("── Cancel swap: requested.\n")
@@ -355,7 +358,7 @@ class DrivesPage(Page):
             return
         self._arc("swap", "--timeout", "600",
                   stop_note="If the archive copier was already preparing the drive, it carries on: wait until "
-                            "this page says SAFE TO REMOVE, or press Cancel swap.")
+                            "this page says the drive is ready to be taken out, or press Cancel swap.")
 
     def _resume(self) -> None:
         """Cancel a swap / keep using the drive: its own command, even while a swap is waiting."""
@@ -510,8 +513,9 @@ class DrivesPage(Page):
         name = (name or "").strip().upper()
         if not ok or not name or name == str(old).upper():
             return
+        expect = ["--expect-uuid", str(d["drive_uuid"])] if d.get("drive_uuid") else []   # review 2026-11-12
         self.log.run(sentinel_argv("drives", "rename", "--config", self._cfg(), "--drive", letters[0],
-                                   "--name", name, "--who", _who()),
+                                   "--name", name, "--who", _who(), *expect),
                      f"Rename {old} to {name}", busy=[self.rename_btn], on_done=lambda _c, _cmd: self.list.refresh())
 
     def _eject(self) -> None:
@@ -521,7 +525,8 @@ class DrivesPage(Page):
         if QMessageBox.question(self, "Sentinel", f"Safely remove disk {d['disk_id']}: {d.get('description', '')} "
                                 f"({_what(d)})?") != QMessageBox.StandardButton.Yes:
             return
-        self.log.run(sentinel_argv("drives", "eject", "--config", self._cfg(), "--disk", str(d["disk_id"])),
+        seen = ["--fingerprint", str(d["fingerprint"])] if d.get("fingerprint") else []    # review 2026-11-12
+        self.log.run(sentinel_argv("drives", "eject", "--config", self._cfg(), "--disk", str(d["disk_id"]), *seen),
                      f"Safely remove disk {d['disk_id']}", busy=[self.eject_btn],
                      on_done=lambda _c, _cmd: self.list.refresh())
 

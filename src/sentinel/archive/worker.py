@@ -1815,6 +1815,27 @@ def _write_request(cfg: AppConfig, name: str, operator: bool) -> Path:
     return p
 
 
+def mark_awaiting_return(cfg: AppConfig, drive_id: str, label: str | None) -> None:
+    """Put a drive taken out WITHOUT the copier (Drives › Safely remove while copying is stopped) on the copier's
+    list of drives waiting to be returned to service, as Swap does, so it is not written when it comes back
+    (review 2026-11-12). Read by the copier when it starts (_load_awaiting)."""
+    p = cfg.data_path / CONTROL_DIR / AWAITING_STATE
+    try:
+        doc = json.loads(p.read_text("utf-8"))
+    except FileNotFoundError:
+        doc = {}
+    except (OSError, ValueError):
+        doc = {}
+    drives = doc.get("drives") if isinstance(doc.get("drives"), dict) else {}
+    since = doc.get("since") if isinstance(doc.get("since"), dict) else {}
+    drives[drive_id] = label
+    since[drive_id] = time.time()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_name(p.name + PARTIAL)
+    tmp.write_text(json.dumps({**doc, "drives": drives, "since": since}), "utf-8")
+    os.replace(tmp, p)
+
+
 def request_swap_file(cfg: AppConfig, operator: bool = False) -> Path:
     """Used by the CLI / GUI in another process: ask the running archive worker to swap.
     ``operator=True``: the window, written to :func:`operator_request_dir`."""

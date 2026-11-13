@@ -229,6 +229,12 @@ def test_safely_removing_an_archive_drive_records_it_like_swap(tmp_path: Path, l
     # ...so Return to service finds the swap it needs (sentinel.archive.worker._return_drive).
     assert ArchiveLedger(ledger, "CAM01").last_swap_since_return(f"drive_uuid:{UID}") == \
         {"ts_utc": ledger.query("SELECT ts_utc FROM events WHERE code='archive_swap_ready'")[0][0], "last_copy_id": 0}
+    # ...and the copier's list of drives waiting to be returned, so it does not write to the drive when it
+    # comes back before its return (as after Swap).
+    from sentinel.archive.worker import AWAITING_STATE, CONTROL_DIR
+
+    doc = json.loads((tmp_path / "data" / CONTROL_DIR / AWAITING_STATE).read_text("utf-8"))
+    assert f"drive_uuid:{UID}" in doc["drives"] and f"drive_uuid:{UID}" in doc["since"]
 
 
 def test_safely_removing_an_archive_drive_while_copying_runs_is_refused(tmp_path: Path, ledger: Ledger, removals,
