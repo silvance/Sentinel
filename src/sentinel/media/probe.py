@@ -151,7 +151,11 @@ def probe_segment(path: Path, ffprobe: str = "ffprobe", ffmpeg: str = "ffmpeg", 
         res.warnings.append("demuxer_errors")
 
     if level == "decode":
-        cp2 = _run([ffmpeg, "-v", "error", "-nostdin", "-i", str(path), "-map", "0:v:0", "-f", "null", "-"], timeout)
+        # A full decode of a 1-hour segment can take longer than the packet scan's limit (review
+        # 2026-11-12): allow up to the footage's own length.
+        decode_timeout = max(timeout, res.duration_s or 0.0)
+        cp2 = _run([ffmpeg, "-v", "error", "-nostdin", "-i", str(path), "-map", "0:v:0", "-f", "null", "-"],
+                   decode_timeout)
         derr = [ln for ln in cp2.stderr.decode("utf-8", "replace").splitlines() if ln.strip()]
         if derr:
             res.errors.extend(derr[:20])

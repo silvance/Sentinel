@@ -34,7 +34,7 @@ import sys
 import textwrap
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
@@ -49,7 +49,7 @@ from .ledgerchain import ANCHOR_LOG_NAME, ChainHead, append_anchor, current_chai
 from .logging_setup import setup_logging
 from .media.probe import ffmpeg_version
 from .media.videohash import parse_version
-from .models import SegmentState, StorageLevel
+from .models import RunEndReason, SegmentState, StorageLevel
 from .platform import InstanceLockError, Platform, get_platform
 from .power import KeepAwake, read_power_settings, sleep_risks
 from .recorder.finalizer import MAX_FINALIZE_ATTEMPTS, Finalizer, GapJob, SegmentJob
@@ -102,6 +102,20 @@ def seal_age(now_mono: float, last_good_seal_mono: float, media_since_mono: floa
     """Seconds the recorder has been owing a sealed file: since the last good seal, or since the
     current run's media started if that is later (a new run's first file is not due earlier)."""
     return now_mono - max(last_good_seal_mono, media_since_mono or last_good_seal_mono)
+
+
+# Run ends that are planned, not a sign that recording keeps restarting (R-004).
+PLANNED_RUN_ENDS = frozenset(str(r) for r in (RunEndReason.GRACEFUL_STOP, RunEndReason.SCHEDULED_PAUSE,
+                                              RunEndReason.MOTION_IDLE))
+
+
+def unstable_restarts(recent_run_ends: Iterable[tuple[float, float, str]], now_mono: float) -> int:
+    """Runs that recorded video and then ended unexpectedly in the last 10 minutes (R-004). Planned
+    ends are not instability (review 2026-11-12: every motion clip ending with motion_idle counted,
+    so ordinary motion activity raised "Recording keeps restarting")."""
+    return sum(1 for t, media, why in recent_run_ends
+               if now_mono - t < 600 and media > 0 and why not in PLANNED_RUN_ENDS)
+
 
 class RecorderService:
     def __init__(self, cfg: AppConfig, platform: Platform | None = None, clock: Clock | None = None,
@@ -592,7 +606,7 @@ class RecorderService:
                 since_adv = (now - lv.last_advance_mono) if lv.last_advance_mono is not None else None
                 last_media = lv.last_media_mono_any
                 attempts, last_end = lv.attempts, lv.last_end_reason
-                unstable = sum(1 for t, media, _ in lv.recent_run_ends if now - t < 600 and media > 0)
+                unstable = unstable_restarts(lv.recent_run_ends, now)
                 if abs(lv.clock_step_s) > rec.clock_step_tolerance_s or lv.clock_slew_run:
                     clock_anomaly = True
                 live_d = {"run_id": lv.run_id, "run_started_utc": lv.run_launched_utc,
@@ -610,16 +624,19 @@ class RecorderService:
         if fin is not None:
             if fin.has_recent_errors():
                 verify_problem = True
-            if fin.last_good_seal_mono is not None:
-                # Counted from this run's first media when that is later: after a long outage,
-                # pause or motion standby the new run's first file is not due yet (review
-                # 2026-11-10: false critical R-005 on every reconnect / resume / motion wake).
-                since_seal = seal_age(now, fin.last_good_seal_mono, media_since)
+            # Counted from this run's first media when that is later: after a long outage,
+            # pause or motion standby the new run's first file is not due yet (review
+            # 2026-11-10: false critical R-005 on every reconnect / resume / motion wake).
+            # Nothing sealed yet in this process: counted from the service start (review
+            # 2026-11-12: video first arriving > 1.5 segments after the start raised R-005).
+            base = fin.last_good_seal_mono if fin.last_good_seal_mono is not None else self._started_mono
+            since_seal = seal_age(now, base, media_since)
             corrupt_recent = fin.last_corrupt_mono is not None and now - fin.last_corrupt_mono < 3600
             integrity_d["verification_queue"] = fin.pending()
         if integ is not None:
             integrity_d["content_hash_backlog"] = integ.backlog()
             integrity_d["content_hashed_since_start"] = integ.hashed
+            integrity_d["content_hash_timeouts"] = getattr(integ, "timeouts", 0)   # slow machine: administrators
             if any(now - t < 600 for t, _ in integ.recent_errors):
                 verify_problem = True
         integrity_d["last_diagnostic_report"] = self.last_report

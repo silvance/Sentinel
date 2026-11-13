@@ -111,7 +111,9 @@ def evaluate(m: Measurements, stall_timeout_s: float, segment_seconds: float, co
         alerts.append(make_alert("T-002", Severity.WARNING))
     if m.unstable_restarts >= 5:
         alerts.append(make_alert("R-004", Severity.WARNING, detail={"restarts_10min": m.unstable_restarts}))
-    if m.motion_broken:
+    if m.motion_broken and flowing:
+        # W-001 says "Recording continues": only true while video is recorded. Otherwise the outage
+        # alert names the real cause (review 2026-11-12: camera off in a motion period).
         alerts.append(make_alert("W-001", Severity.WARNING))
     if m.motion_record_failures:
         alerts.append(make_alert("W-002", Severity.CRITICAL, detail={"failed_attempts": m.motion_record_failures}))

@@ -31,7 +31,7 @@ from ..db import Ledger, LedgerClosed
 from ..hashing import sha256_file
 from ..ledgerchain import VerifyReport, verify_ledger
 from ..media.probe import ProbeError
-from ..media.videohash import compute_content_hash
+from ..media.videohash import ContentHashTimeout, compute_content_hash, content_hash_timeout
 from ..platform.base import Platform
 
 log = logging.getLogger(__name__)
@@ -61,6 +61,7 @@ class IntegrityWorker:
         self.recent_errors: deque[tuple[float, str]] = deque(maxlen=20)
         self.audit_failures: list[dict] = []
         self.hashed = 0
+        self.timeouts = 0                 # content hashes that took too long (slow machine; not an alert)
 
     @property
     def enabled(self) -> bool:
@@ -119,15 +120,24 @@ class IntegrityWorker:
         path = self.cfg.spool_path / seg["rel_path"]
         frames_path = path.with_name(path.stem + FRAMEHASH_SUFFIX) if self.cfg.recording.frame_hashes else None
         tmp = frames_path.with_name(frames_path.name + ".partial") if frames_path else None
+        duration = seg["duration_s"] if "duration_s" in seg.keys() else None
+        timeout = content_hash_timeout(duration, self.cfg.recording.segment_seconds)
         try:
             ch = compute_content_hash(path, self.cfg.tools.ffmpeg, self.ffmpeg_version, seg["pix_fmt"],
-                                      frames_out=tmp, popen_kwargs=self.platform.low_priority_popen_kwargs())
+                                      frames_out=tmp, timeout=timeout,
+                                      popen_kwargs=self.platform.low_priority_popen_kwargs())
         except ProbeError as exc:
             self.ledger.update_segment(segment_id, content_hash_attempts=seg["content_hash_attempts"] + 1)
             self.ledger.add_event("warning", "integrity", "content_hash_failed",
                                   f"Video content fingerprint could not be computed: {exc}",
                                   {"segment_id": segment_id})
-            self.recent_errors.append((time.monotonic(), str(exc)))
+            if isinstance(exc, ContentHashTimeout):
+                # Too slow for this machine: a backlog for administrators (docs/05 row 29), not an
+                # operator V-001 alert (review 2026-11-12). The recording is sealed with its file SHA-256.
+                self.timeouts += 1
+                log.warning("content hash of %s timed out after %.0f s", seg["rel_path"], timeout)
+            else:
+                self.recent_errors.append((time.monotonic(), str(exc)))
             return False
         if self._stop.is_set():
             # Shutting down: the result is discarded (the .partial sidecar is replaced next time)

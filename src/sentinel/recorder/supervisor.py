@@ -158,6 +158,11 @@ class RecordingSupervisor:
         consecutive_internal = 0
         self._reconcile_gap_at_start()
         while not self.stop_event.is_set():
+            if self._mode_now() != "motion":
+                # W-002 is about motion periods: a failure there is not carried into a schedule
+                # pause or record period (review 2026-11-12), where the normal alerts apply.
+                with self.live.lock:
+                    self.live.motion_record_failures = 0
             pause = self._pause_reason()
             if pause is not None:
                 self._pause(pause)
@@ -165,11 +170,15 @@ class RecordingSupervisor:
             sample = self.storage.sample()
             if sample.level.value == "critical":
                 log.error("storage critical (%d bytes free); not starting FFmpeg", sample.free_bytes)
+                # A planned gap still open (pause or motion standby that ended) is no longer planned:
+                # the recorder cannot record (review 2026-11-12). Only planned/resuming gaps switch.
+                self._switch_gap(str(RunEndReason.STORAGE_CRITICAL), "storage_critical",
+                                 frozenset(PLANNED_GAP_REASONS | {RESUMING_REASON}))
                 self._wait(10.0)
                 continue
             # About to record: a planned gap ends now; it stays "resuming" until footage or a failure.
             self._switch_gap(RESUMING_REASON, "recording_resumed")
-            for_motion = self._mode_now() == "motion"
+            for_motion = self._started_for_motion()
             try:
                 outcome = self.run_once()
                 consecutive_internal = 0
@@ -191,7 +200,7 @@ class RecordingSupervisor:
             with self.live.lock:
                 if outcome.media_seconds > 0:
                     self.live.motion_record_failures = 0
-                elif for_motion and outcome.reason is not RunEndReason.GRACEFUL_STOP:
+                elif for_motion and outcome.reason not in (RunEndReason.GRACEFUL_STOP, RunEndReason.SCHEDULED_PAUSE):
                     self.live.motion_record_failures += 1
             if self.stop_event.is_set():
                 break
@@ -283,6 +292,21 @@ class RecordingSupervisor:
             return self.schedule.mode_at(self.clock.wall()) if self.schedule is not None else None
         except Exception:
             return None
+
+    def _started_for_motion(self) -> bool:
+        """This run starts because the detector saw motion (W-002 counts its failure). Not a run
+        started by the fail safe (detector without pictures, e.g. the camera is off) or a schedule
+        change (review 2026-11-12: those raised a false "Motion was detected but could not be
+        recorded" that stayed after the camera came back)."""
+        m = self.motion
+        if m is None or self._mode_now() != "motion":
+            return False
+        try:
+            since = m.seconds_since_motion()
+            return bool(m.healthy()) and since is not None and since <= self.cfg.motion.keep_recording_s
+        except Exception:
+            log.exception("motion state could not be read")
+            return False
 
     def _schedule_says_pause(self) -> bool:
         return self._pause_reason() is not None
