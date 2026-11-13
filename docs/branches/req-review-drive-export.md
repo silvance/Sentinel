@@ -64,7 +64,7 @@ The picture check of each MP4 is configurable. The level each MP4 actually got i
 * `sampled`: the frame count (demux only) must equal the sources' total. Then the first and last `sample_edge_frames` frames, plus `sample_spans` spans of `sample_span_frames` frames, are decoded from the file on the drive. Span positions are pseudo-random, seeded by export id and file. Each span is reached by an accurate seek with `-copyts -enc_time_base demux`, mapped by exact container timestamps, and compared by position. If a source's per-frame list is missing, that MP4 is recorded as `deferred`, with the reason "not yet available", rather than spending hours decoding.
 * `deferred`: no picture check. The manifest says "content not yet verified".
 
-`python -m sentinel.export verify-content --config … --target …` later runs the full check on a reinserted drive. It byte-checks again, can use the drive's own Originals if the local ones are gone, records the result in the ledger, and writes `Manifests/<export>/Content_Verification_<UTC>.json`. Manifests already on the drive are never rewritten, so the HTML still says "not yet checked" and the supplementary file is the record.
+`python -m sentinel.export verify-content --config … --target …` later runs the full check on a reinserted drive. It byte-checks again, can use the drive's own Originals if the local ones are gone, records the result in the ledger, and writes `Manifests/<export>/Content_Verification_<UTC>.json`. Manifests already on the drive are never rewritten, so the HTML still says "not yet checked" and the supplementary file is the record. (Review 2026-11-12) The results are entered in the ledger only after that file has been written and read back, so an interruption leaves the videos to be checked again rather than marked checked without proof. A failed check never changes the video's state: it is recorded as `content_check` `mismatch` (pictures or bytes differ, or the video is missing) or `error` (could not be checked: decoder, tool or source problem), and the video is checked again on the next run, which therefore never says that every video was already checked.
 
 Damaged final frames: a difference is accepted only for the last ≤ 2 frames of a source segment that is INTERRUPTED, or that FFmpeg reports decoding errors for. Accepted frames are listed as `unverifiable_damaged_frames`. Any other difference fails the export (E-003). The earlier unbounded "joined decode" fallback was removed.
 
@@ -116,7 +116,7 @@ The arrays:
   * `gap_ids_after` (gaps between this file and the next).
 * `gaps[]`: every gap row overlapping the interval: `gap_id`, `kind`, UTC and local times, `duration_s`, `reason`, `reason_text`, `open`, `prev/next_segment_id`.
 
-`Content_Verification_*.json` (`format: "sentinel-content-verification"`, `format_version: 1`) contains `export_id`, `drive_id` and `videos[{path, previous_level, result, read_back_sha256, frame_count, content_sha256, unverifiable_damaged_frames, checked_utc}]`.
+`Content_Verification_*.json` (`format: "sentinel-content-verification"`, `format_version: 1`) contains `export_id`, `drive_id` and `videos[{path, previous_level, result, read_back_sha256, frame_count, content_sha256, unverifiable_damaged_frames, checked_utc}]`. `result` is `OK`, `FAILED` (with `outcome: "mismatch"` and `error`) or `NOT_CHECKED` (with `outcome: "error"` and `error`).
 
 SHA256SUMS.txt (`<hash>  <path>`, LF line endings, no comments) covers every file, including the JSON. All stored times are UTC ISO-8601 with `Z`. The per-frame sidecars use FFmpeg's `framehash` text format (SHA-256).
 
@@ -159,7 +159,8 @@ What the integration tests cover:
 Remaining after the review:
 * The MP4 "write-time" hash comes from a normal, possibly cached, read just after FFmpeg closed the file. It proves that what the file system held then is what is on the drive now. It does not check FFmpeg's own write path; the picture check covers that.
 * `sampled` assumes the camera stream can be seeked accurately: decoding restarts at a keyframe, and that keyframe is IDR / closed-GOP. This is true for the simulator; not verified on the real camera (docs/02 A-items).
-* `verify-content` cannot amend the HTML summary already on the drive. A failure marks the MP4 item FAILED inside a COMPLETE batch and reports E-003.
+* `verify-content` cannot amend the HTML summary already on the drive. A failure is recorded in the MP4 item's `content_check` (`mismatch` / `error`; the item stays VERIFIED and is checked again next time) and reports E-003. Items an earlier version moved to FAILED this way are reported on every run ("did not match … on an earlier picture check").
+* (Review 2026-11-12) A retried MP4 keeps its planned start/end times and notes in the manifest: a verification failure is stored under `detail.failure` instead of replacing the detail, and a detail an earlier version replaced is rebuilt from the batch plan. The export documents' inputs that are not in the batch row (drive identity, organisation, recording-log head) are frozen in `export_batches.document_inputs` with `manifest_generated_utc`; a document an earlier attempt wrote completely is kept (and listed with its own hash) instead of failing with E-007 on every attempt.
 * A retried FAILED batch is resumed only while it is the latest export and nothing has completed past its start. Otherwise a new batch is planned, and files already verified on that drive are re-hashed rather than decoded again.
 
 ## 6. NOT executed / not verified

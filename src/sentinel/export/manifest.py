@@ -1,8 +1,11 @@
 """Export documents: README_FIRST.txt, Export_Summary.html, Export_Manifest.json/.csv, SHA256SUMS.txt.
 
-All documents are generated deterministically from the ledger (the generation time is frozen in
-the batch row), so regenerating them after an interruption gives byte-identical files and never
-conflicts with copies already written. Nothing here reads or writes the drive.
+All documents are generated deterministically from the ledger: the generation time and every other
+input that is not in the batch row (drive identity, organisation, recording-log head) are frozen in
+the batch row the first time the documents are made (review 2026-11-12), so regenerating them after
+an interruption gives byte-identical files and never conflicts with copies already written. If an
+earlier attempt's copy is found on the drive anyway, the engine keeps it. Nothing here reads or
+writes the drive.
 """
 
 from __future__ import annotations

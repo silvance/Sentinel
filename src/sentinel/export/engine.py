@@ -63,12 +63,20 @@ LEVELS = ("full", "sampled", "deferred")
 
 
 class ExportFailure(Exception):
-    def __init__(self, code: str, detail: str, interrupted: bool = False, item_id: int | None = None) -> None:
+    def __init__(self, code: str, detail: str, interrupted: bool = False, item_id: int | None = None,
+                 outcome: str | None = None) -> None:
         super().__init__(f"{code}: {detail}")
         self.code = code
         self.detail = detail
         self.interrupted = interrupted
         self.item_id = item_id
+        # MP4 picture check: "mismatch" (the video differs from its originals) or "error" (it could not be
+        # checked: decoder, tool or source problem). None for every other failure.
+        self.outcome = outcome
+
+
+# MP4 verification failures that say the check could not be done, not that the video is wrong.
+COULD_NOT_CHECK = frozenset({"could not be decoded", "frame list unreadable", "sample could not be decoded"})
 
 
 class SourceReadError(OSError):
@@ -116,6 +124,8 @@ class ReviewExporter:
         self.batch_id: str | None = None
         self.drive_id: str | None = None
         self._snap: dict[str, dict[str, Any]] = {}
+        self._groups: dict[str, dict[str, Any]] = {}
+        self._content_only = False          # True while verify-content runs (never changes item states)
         self._sources_ok: set[str] = set()
         self._phase = "CHECKING"
 
@@ -240,6 +250,8 @@ class ReviewExporter:
         self.tz = ZoneInfo(b["display_timezone"])          # the batch's zone, not today's config
         plan = json.loads(b["plan"] or "{}")
         self._snap = plan.get("segments") or {}
+        self._groups = {g["dest_rel_path"]: g for g in plan.get("groups") or []
+                        if isinstance(g, dict) and isinstance(g.get("dest_rel_path"), str)}
         cc = plan.get("content_check") or {}
         self.mode = cc.get("level", self.cfg.export.content_check)
         self._sample = (int(cc.get("sample_edge_frames", self.cfg.export.sample_edge_frames)),
@@ -627,6 +639,8 @@ class ReviewExporter:
     def _verify_mp4(self, it: Any, dest: Path, existing: bool) -> None:
         rel = it["dest_rel_path"]
         known = self.xl.known_verified_on_drive(self.drive_id or "", rel) if existing else None
+        if known is not None and known["content_check"] in ("mismatch", "error"):
+            known = None            # its later picture check failed or could not be done: check it in full
         if known is not None:
             # Verified before on this drive (e.g. retry after a failure): bytes only, carry over
             # the picture-check result recorded then.
@@ -651,7 +665,7 @@ class ReviewExporter:
         if not existing and it["size_bytes"] is not None and size != it["size_bytes"]:
             self._mp4_fail(it, existing, sha, method, "read-back size differs", {"size": size})
         self.io.seal_read_only(dest)
-        detail = json.loads(it["detail"] or "{}")
+        detail = self._planned_detail(it)
         detail["source_content"] = content.pop("source_content", {})
         detail["content"] = content
         if content.get("unverifiable_damaged_frames"):
@@ -664,15 +678,45 @@ class ReviewExporter:
             cols["already_present"] = 1
         self.xl.set_item_state(it["item_id"], I_VERIFIED, **cols)
 
+    def _planned_detail(self, it: Any) -> dict[str, Any]:
+        """The MP4 item's detail with the planner's start/end times and flags. (review 2026-11-12) Earlier versions
+        let a verification failure replace the whole detail with the failure data, so a retried video
+        lost its times and notes in the manifest and summary: they are restored from the batch plan."""
+        try:
+            detail = json.loads(it["detail"] or "{}")
+        except ValueError:
+            detail = {}
+        if not isinstance(detail, dict):
+            detail = {}
+        detail.pop("failure", None)
+        g = self._groups.get(it["dest_rel_path"])
+        if g is not None and "start_utc" not in detail:
+            # detail was replaced by a failure: keep only what the planner wrote, from the plan
+            detail = {"flags": list(g.get("flags") or []), "start_utc": g.get("start_utc"),
+                      "end_utc": g.get("end_utc")}
+        return detail
+
     def _mp4_fail(self, it: Any, existing: bool, sha: str, method: str, why: str, detail: dict[str, Any]) -> None:
+        outcome = "error" if why in COULD_NOT_CHECK else "mismatch"
+        if self._content_only:
+            # verify-content (review 2026-11-12): the video's bytes were verified when it was exported. The
+            # later picture check records its outcome in content_check only (see _verify_content) and never
+            # moves the item out of VERIFIED, so the video is checked again next time instead of dropping out.
+            self._event("error", "export_verify_failed", "An MP4 video did not pass the picture check",
+                        dict(detail, path=it["dest_rel_path"], why=why, outcome=outcome))
+            raise ExportFailure("E-003", f"MP4 picture check failed ({why}): {it['dest_rel_path']} {detail}",
+                                item_id=it["item_id"], outcome=outcome)
         if existing:
             self._conflict(it, sha)
-        self.xl.set_item_state(it["item_id"], I_FAILED, sha256=sha, verify_method=method, detail=detail,
+        # Keep the planner's times and flags (review 2026-11-12): a retry verifies the video again and the
+        # manifest reads them from this detail.
+        kept = dict(self._planned_detail(it), failure=dict(detail, why=why))
+        self.xl.set_item_state(it["item_id"], I_FAILED, sha256=sha, verify_method=method, detail=kept,
                                error=f"MP4 verification failed: {why}")
         self._event("error", "export_verify_failed", "An MP4 video did not verify",
                     dict(detail, path=it["dest_rel_path"], why=why))
         raise ExportFailure("E-003", f"MP4 verification failed ({why}): {it['dest_rel_path']} {detail}",
-                            item_id=it["item_id"])
+                            item_id=it["item_id"], outcome=outcome)
 
     def _content_check(self, it: Any, dest: Path, level: str, ref_sha: str | None, existing: bool
                        ) -> tuple[str, int, str, dict[str, Any]]:
@@ -766,6 +810,14 @@ class ReviewExporter:
 
     # ------------------------------------------------------------------ verify-content command
     def _verify_content(self) -> ExportResult:
+        """Check every MP4 on this drive whose pictures were not yet compared in full.
+
+        (review 2026-11-12) The outcome of each video is entered in the ledger only AFTER the
+        Content_Verification document that records it has been written to the drive and read back, so
+        an interruption never leaves a video marked as checked without proof on the drive (it is simply
+        checked again). A failed check never changes the item's state: it is recorded as content_check
+        'mismatch' (pictures or bytes differ) or 'error' (could not be checked) and the video is checked
+        again next time, so a later run never says that every video was already checked."""
         self._status("VERIFYING", "Checking the videos on the review drive picture by picture. Do not remove the drive.")
         if not self.io.root_present(self.root):
             return self._fail_without_batch(ExportFailure("E-005", "target directory is not present"))
@@ -774,64 +826,92 @@ class ReviewExporter:
         except TargetError as exc:
             return self._fail_without_batch(ExportFailure("E-005", str(exc)))
         todo = self.xl.deferred_mp4s(self.drive_id)
-        if not todo:
+        earlier = self.xl.earlier_content_failures(self.drive_id)
+        if not todo and not earlier:
             msg = "All videos on this drive have already been checked picture by picture."
             self._status("NOTHING_TO_EXPORT", msg, percent=100)
             return ExportResult("NOTHING_TO_EXPORT", None, msg)
-        results: dict[str, list[dict[str, Any]]] = {}
-        failed: ExportFailure | None = None
-        for n, it in enumerate(todo):
-            self._load_batch(it["batch_id"])
-            dest = self.root / it["dest_rel_path"]
-            entry: dict[str, Any] = {"path": it["dest_rel_path"], "previous_level": it["content_check"] or "full",
-                                     "sha256": it["sha256"]}
-            try:
-                if not self.io.exists(dest):
-                    raise ExportFailure("E-003", f"video missing from the drive: {it['dest_rel_path']}")
-                sha, _size, method, content = self._content_check(it, dest, "full", it["sha256"], existing=False)
-            except ExportFailure as f:
-                if f.interrupted:
-                    return self._fail_without_batch(f)
-                failed = failed or f
-                entry.update(result="FAILED", error=f.detail[:500])
-                self.xl.update_item(it["item_id"], content_check="mismatch", content_verified_utc=iso_utc(time.time()))
-            except OSError as exc:
-                return self._fail_without_batch(self._classify(exc))
-            else:
-                entry.update(result="OK", level="full", read_back_sha256=sha, verify_method=method,
-                             frame_count=content["frame_count"], content_sha256=content.get("content_sha256"),
-                             unverifiable_damaged_frames=content["unverifiable_damaged_frames"])
-                detail = json.loads(it["detail"] or "{}")
-                detail["content"] = {k: v for k, v in content.items() if k != "source_content"}
-                self.xl.update_item(it["item_id"], content_check="full", content_sha256=content.get("content_sha256"),
-                                    frame_count=content["frame_count"], content_verified_utc=iso_utc(time.time()),
-                                    detail=detail)
-            entry["checked_utc"] = iso_utc(time.time())
-            results.setdefault(it["batch_id"], []).append(entry)
-            self._status("VERIFYING", f"Checking the videos picture by picture ({n + 1} of {len(todo)}). "
-                         "Do not remove the drive.", percent=int(100 * (n + 1) / len(todo)) - 1)
+        results: dict[str, list[tuple[int, dict[str, Any], dict[str, Any]]]] = {}
+        failures: list[ExportFailure] = []
+        self._content_only = True
         try:
-            for bid, entries in results.items():
+            for n, it in enumerate(todo):
+                self._load_batch(it["batch_id"])
+                dest = self.root / it["dest_rel_path"]
+                entry: dict[str, Any] = {"path": it["dest_rel_path"],
+                                         "previous_level": it["content_check"] or "full", "sha256": it["sha256"]}
+                try:
+                    if not self.io.exists(dest):
+                        raise ExportFailure("E-003", f"video missing from the drive: {it['dest_rel_path']}",
+                                            outcome="mismatch")
+                    sha, _size, method, content = self._content_check(it, dest, "full", it["sha256"], existing=False)
+                except ExportFailure as f:
+                    if f.interrupted:
+                        return self._fail_without_batch(f)
+                    outcome = f.outcome or "error"
+                    failures.append(f)
+                    entry.update(result="FAILED" if outcome == "mismatch" else "NOT_CHECKED", outcome=outcome,
+                                 error=f.detail[:500])
+                    cols: dict[str, Any] = dict(content_check=outcome, content_verified_utc=iso_utc(time.time()))
+                except OSError as exc:
+                    return self._fail_without_batch(self._classify(exc))
+                else:
+                    entry.update(result="OK", level="full", read_back_sha256=sha, verify_method=method,
+                                 frame_count=content["frame_count"], content_sha256=content.get("content_sha256"),
+                                 unverifiable_damaged_frames=content["unverifiable_damaged_frames"])
+                    detail = self._planned_detail(it)
+                    detail["content"] = {k: v for k, v in content.items() if k != "source_content"}
+                    cols = dict(content_check="full", content_sha256=content.get("content_sha256"),
+                                frame_count=content["frame_count"], content_verified_utc=iso_utc(time.time()),
+                                detail=detail)
+                entry["checked_utc"] = iso_utc(time.time())
+                results.setdefault(it["batch_id"], []).append((int(it["item_id"]), entry, cols))
+                self._status("VERIFYING", f"Checking the videos picture by picture ({n + 1} of {len(todo)}). "
+                             "Do not remove the drive.", percent=int(100 * (n + 1) / len(todo)) - 1)
+        finally:
+            self._content_only = False
+        try:
+            for bid, rows in results.items():
                 b = self._load_batch(bid)
+                entries = [e for _, e, _ in rows]
                 doc = {"format": "sentinel-content-verification", "format_version": 1, "export_id": bid,
                        "generated_utc": iso_utc(time.time()), "drive_id": self.drive_id, "videos": entries,
                        "rule": "every frame of each video, decoded from the bytes read back from the drive, compared "
                                "with the per-frame SHA-256 lists of its original recordings"}
                 data = (json.dumps(doc, indent=2) + "\n").encode("utf-8")
-                rel = f"{layout.manifest_dir(b['stamp'], bid)}/Content_Verification_{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}.json"
-                self._document(rel, data)
+                self._document(self._content_doc_rel(b), data)
+                # Only now that the proof is on the drive (written and read back) are the results entered.
+                for item_id, _entry, cols in rows:
+                    self.xl.update_item(item_id, **cols)
                 self._event("audit", "export_content_verified", "Videos on a review drive checked picture by picture",
                             {"videos": len(entries), "failed": sum(e["result"] != "OK" for e in entries)})
         except ExportFailure as f:
             return self._fail_without_batch(f)
         except OSError as exc:
             return self._fail_without_batch(self._classify(exc))
-        if failed is not None:
-            return self._fail_without_batch(ExportFailure("E-003", failed.detail))
+        if failures:
+            mismatched = [f for f in failures if f.outcome == "mismatch"]
+            first = (mismatched or failures)[0]
+            return self._fail_without_batch(ExportFailure(first.code, first.detail))
+        if earlier:
+            paths = ", ".join(r["dest_rel_path"] for r in earlier[:5])
+            return self._fail_without_batch(ExportFailure(
+                "E-003", f"{len(earlier)} video(s) on this drive did not match their original recordings on an "
+                         f"earlier picture check: {paths}"))
         msg = "All videos on this drive were checked picture by picture and match the original recordings."
         self._status("COMPLETE_REMOVE_MANUALLY", msg + " " + ManualRemovalFallback().eject(self.target).operator_message,
                      percent=100)
         return ExportResult("COMPLETE", None, msg)
+
+    def _content_doc_rel(self, b: dict[str, Any]) -> str:
+        """A new Content_Verification document name in the batch's manifest folder (never an existing one)."""
+        base = (f"{layout.manifest_dir(b['stamp'], b['batch_id'])}/Content_Verification_"
+                f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}")
+        rel, n = f"{base}.json", 2
+        while (self.xl.query("SELECT 1 FROM export_items WHERE batch_id=? AND dest_rel_path=?", (b["batch_id"], rel))
+               or self.io.exists(self.root / rel)):
+            rel, n = f"{base}_{n}.json", n + 1
+        return rel
 
     # ------------------------------------------------------------------ manifest stage
     def _write_documents(self) -> str:
@@ -848,16 +928,9 @@ class ReviewExporter:
             if i["kind"] == "mp4":
                 seg_ids.update(json.loads(i["sources"] or "[]"))
         segments = {sid: self._seg(sid) for sid in seg_ids}
-        drive_row = self.xl.query("SELECT identity FROM drives WHERE drive_id=?", (b["drive_id"],))
-        drive = json.loads(drive_row[0]["identity"]) if drive_row else {}
-        from ..ledgerchain import current_chain_head
-
-        try:
-            head = current_chain_head(self.ledger)
-        except Exception:  # noqa: BLE001 - extra tamper evidence; the export does not depend on it
-            head = None
-        mb = ManifestBuilder(dict(b), items, segments, drive, self.tz, self.cfg.site.organization,
-                             {"seq": head.seq, "hash": head.hash, "utc": head.utc} if head else None)
+        inputs = self._document_inputs(dict(b))
+        mb = ManifestBuilder(dict(b), items, segments, inputs["drive"], self.tz, inputs["organization"],
+                             inputs["log_head"])
         mdir = layout.manifest_dir(b["stamp"], bid)
         docs: list[dict[str, Any]] = []
         docs.append(self._document(layout.README, mb.readme(), keep_existing=True))
@@ -870,6 +943,36 @@ class ReviewExporter:
                              sums_sha256=sums["sha256"])
         return manifest["path"]
 
+    def _document_inputs(self, b: dict[str, Any]) -> dict[str, Any]:
+        """Drive identity, organisation and recording-log head for this batch's documents.
+
+        (review 2026-11-12) Frozen in the batch row the first time the documents are generated: the
+        live values change between attempts (every ledger event moves the log head, the drive identity
+        is refreshed with its mount point on each attempt, the organisation comes from the config), and
+        documents regenerated after an interruption must be byte-identical to those already written."""
+        try:
+            frozen = json.loads(b.get("document_inputs") or "null")
+        except ValueError:
+            frozen = None
+        if isinstance(frozen, dict) and {"drive", "organization", "log_head"} <= set(frozen):
+            return frozen
+        drive_row = self.xl.query("SELECT identity FROM drives WHERE drive_id=?", (b["drive_id"],))
+        drive = json.loads(drive_row[0]["identity"]) if drive_row else {}
+        from ..ledgerchain import current_chain_head
+
+        try:
+            head = current_chain_head(self.ledger)
+        except Exception:  # noqa: BLE001 - extra tamper evidence; the export does not depend on it
+            head = None
+        log_head = None
+        if head is not None:
+            log_head = {"seq": head.seq, "hash": head.hash, "utc": head.utc}
+            if head.chain:
+                log_head["chain"] = head.chain       # which recording log this head belongs to
+        frozen = {"drive": drive, "organization": self.cfg.site.organization, "log_head": log_head}
+        self.xl.update_batch(b["batch_id"], document_inputs=json.dumps(frozen, sort_keys=True))
+        return frozen
+
     def _document(self, rel: str, data: bytes, keep_existing: bool = False) -> dict[str, Any]:
         bid = self.batch_id
         assert bid is not None
@@ -879,14 +982,30 @@ class ReviewExporter:
         dest = self.root / rel
         if it["state"] == I_VERIFIED:
             return {"path": rel, "sha256": it["sha256"], "size_bytes": it["size_bytes"]}
-        if it["expected_sha256"] != sha:
-            if it["state"] == I_PLANNED and not self.io.exists(dest):
+        try:
+            exists = self.io.exists(dest)
+        except OSError as exc:
+            raise self._classify(exc) from None
+        # The bytes an earlier attempt generated for this document, if they differ from this attempt's.
+        earlier = it["expected_sha256"] if it["expected_sha256"] not in (None, sha) else None
+        if earlier is not None:
+            if it["state"] == I_PLANNED and not exists:
                 self.xl.update_item(item_id, expected_sha256=sha)
-            else:
+                earlier = None
+            elif it["state"] != I_PLANNED:
                 raise ExportFailure("E-007", f"regenerated document differs from the first attempt: {rel}")
         try:
-            if self.io.exists(dest) and it["state"] == I_PLANNED:
+            if exists and it["state"] == I_PLANNED:
                 fsha, fsize, method = self._read_hash(dest)
+                if earlier is not None and fsha == earlier:
+                    # (review 2026-11-12) An earlier attempt wrote this document completely (the drive was
+                    # pulled or the program stopped before it was recorded): keep those bytes, never loop on
+                    # E-007. The manifest and SHA256SUMS list the file's actual hash.
+                    self.io.seal_read_only(dest)
+                    self.xl.set_item_state(item_id, I_VERIFIED, sha256=fsha, size_bytes=fsize, verify_method=method,
+                                           verified_utc=iso_utc(time.time()), already_present=1,
+                                           detail={"written_by_an_earlier_attempt": True})
+                    return {"path": rel, "sha256": fsha, "size_bytes": fsize}
                 if fsha != sha and not keep_existing:
                     self._conflict(it, fsha)
                 self.xl.set_item_state(item_id, I_VERIFIED, sha256=fsha, size_bytes=fsize, verify_method=method,

@@ -85,6 +85,9 @@ ITEM_TRANSITIONS: dict[str, frozenset[str]] = {
 }
 # Columns added after the first version of EXPORT_DDL (ledgers created by commit 8daf276).
 _ADDED_ITEM_COLUMNS = {"written_sha256": "TEXT", "content_check": "TEXT", "content_verified_utc": "TEXT"}
+# (review 2026-11-12) JSON: the inputs of the export documents that are not in the batch row (drive identity,
+# organisation, recording-log head), frozen with manifest_generated_utc so regenerated documents are identical.
+_ADDED_BATCH_COLUMNS = {"document_inputs": "TEXT"}
 
 EVIDENCE_KINDS = ("original", "framehash", "mp4", "quarantine", "quarantine_framehash")
 
@@ -112,12 +115,13 @@ class ExportLedger:
 
     @retry_locked
     def _add_missing_columns(self) -> None:
-        have = {r["name"] for r in self.ledger.query("PRAGMA table_info(export_items)")}
-        missing = {k: v for k, v in _ADDED_ITEM_COLUMNS.items() if k not in have}
-        if missing:
-            with self.ledger.tx() as c:
-                for k, v in missing.items():
-                    c.execute(f"ALTER TABLE export_items ADD COLUMN {k} {v}")
+        for table, added in (("export_items", _ADDED_ITEM_COLUMNS), ("export_batches", _ADDED_BATCH_COLUMNS)):
+            have = {r["name"] for r in self.ledger.query(f"PRAGMA table_info({table})")}
+            missing = {k: v for k, v in added.items() if k not in have}
+            if missing:
+                with self.ledger.tx() as c:
+                    for k, v in missing.items():
+                        c.execute(f"ALTER TABLE {table} ADD COLUMN {k} {v}")
 
     # ------------------------------------------------------------------ generic (retrying)
     @retry_locked
@@ -231,11 +235,20 @@ class ExportLedger:
         return row["sha256"] if row is not None else None
 
     def deferred_mp4s(self, drive_id: str) -> list[sqlite3.Row]:
-        """MP4s on this drive (COMPLETE batches) whose decoded-picture check is not yet 'full'."""
+        """MP4s on this drive (COMPLETE batches) whose decoded-picture check is not yet 'full': sampled,
+        deferred, and those whose earlier check found a difference ('mismatch') or could not be done
+        ('error'), which are checked again (review 2026-11-12)."""
         return self.query("SELECT i.* FROM export_items i JOIN export_batches b ON b.batch_id=i.batch_id "
                           "WHERE b.drive_id=? AND b.state=? AND i.kind='mp4' AND i.state=? "
                           "AND COALESCE(i.content_check, 'full') != 'full' ORDER BY i.item_id",
                           (drive_id, B_COMPLETE, I_VERIFIED))
+
+    def earlier_content_failures(self, drive_id: str) -> list[sqlite3.Row]:
+        """MP4s of COMPLETE batches on this drive that an earlier version's picture check moved to FAILED
+        (review 2026-11-12: they are no longer offered for checking, so they are reported instead)."""
+        return self.query("SELECT i.* FROM export_items i JOIN export_batches b ON b.batch_id=i.batch_id "
+                          "WHERE b.drive_id=? AND b.state=? AND i.kind='mp4' AND i.state=? "
+                          "AND i.content_check='mismatch' ORDER BY i.item_id", (drive_id, B_COMPLETE, I_FAILED))
 
     # ------------------------------------------------------------------ batch writes
     @retry_locked
