@@ -7,6 +7,7 @@ picture is, so a frozen picture can never be mistaken for a live one.
 
 from __future__ import annotations
 
+import secrets
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -60,6 +61,9 @@ class LiveView(QWidget):
         self._last_request = 0.0
         self._started = 0.0
         self.message = ""
+        self._session: str | None = None     # one viewing session (the service pauses it after 10 minutes)
+        self._hidden = False                 # stopped because the picture is not visible
+        self.picture.mousePressEvent = lambda _e: self._resume_if_paused()
 
     # ---------------------------------------------------------------- control
     def start(self) -> None:
@@ -69,12 +73,33 @@ class LiveView(QWidget):
             return
         self._started = self.clock()
         self._last_request = 0.0
+        self._session = secrets.token_hex(8)
+        self._hidden = False
         self._show_text("Starting the live view…")
         self.timer.start()
         self._tick()
 
     def stop(self) -> None:
-        self.timer.stop()               # the service stops the camera connection ~20 s later
+        self.timer.stop()
+        self._stop_service()
+
+    def _stop_service(self) -> None:
+        """Tell the service the picture is no longer shown: it ends its camera decode within a second."""
+        from ...preview import stop_preview
+
+        if self.ctx.cfg is not None:
+            try:
+                stop_preview(self.ctx.cfg)
+            except OSError:
+                pass                        # best effort; it also stops ~20 s after the last request
+
+    def _resume_if_paused(self) -> None:
+        if self.running() and self.message.startswith("The live view was paused"):
+            self._session = secrets.token_hex(8)     # a new viewing session
+            self._last_request = 0.0
+            self._started = self.clock()
+            self._show_text("Starting the live view…")
+            self._tick()
 
     def running(self) -> bool:
         return self.timer.isActive()
@@ -89,13 +114,21 @@ class LiveView(QWidget):
         now = self.clock()
         win = self.window()
         if not self.isVisible() or (win is not None and win.isMinimized()):
-            # Review 2026-11-12: minimized or locked (Lock computer minimizes the window): stop asking, so the
-            # service ends its camera decode; asking again when the picture is shown again.
+            # Review 2026-11-12: minimized or locked (Lock computer minimizes the window): the service ends its
+            # camera decode now; a new viewing session starts when the picture is shown again.
+            if not self._hidden:
+                self._hidden = True
+                self._stop_service()
             return
+        if self._hidden:
+            self._hidden = False
+            self._session = secrets.token_hex(8)
+            self._last_request = 0.0
+            self._started = now
         if now - self._last_request >= REQUEST_EVERY_S:
             self._last_request = now
             try:
-                request_preview(cfg, self.clock)
+                request_preview(cfg, self.clock, session=self._session)
             except OSError:
                 self._show_text("The live view cannot be requested from this account (no access to the "
                                 "operators' request folder). Contact technical support.")
@@ -107,6 +140,9 @@ class LiveView(QWidget):
             return
         state = doc.get("state")
         frame = doc.get("frame")
+        if state == "paused":
+            self._show_text("The live view was paused after 10 minutes. Click here to show it again.")
+            return
         if state == "no_picture" and not frame:
             self._show_text("No picture from the camera. Check the camera address, power and network cable.")
             return
@@ -125,7 +161,7 @@ class LiveView(QWidget):
             taken = None
         age = now - taken if taken is not None else None
         when = tf.hm(taken, self.ctx.tz, seconds=True) if taken is not None else "unknown"
-        if age is not None and age > STALE_S:
+        if age is not None and (age > STALE_S or doc.get("live") is False):
             self.message = (f"Picture from {when} ({tf.duration(age)} ago) — the live view is not updating; "
                             "recording is not affected.")
             self.caption.setObjectName("warning")

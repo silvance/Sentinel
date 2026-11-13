@@ -102,12 +102,18 @@ def test_live_view_panel_requests_and_shows_frames(tmp_path: Path) -> None:
     lv._tick()
     assert "not updating" in lv.message
     # Review 2026-11-12: minimized (or locked, which minimizes the window): no more requests to the recorder.
-    preview.request_path(cfg).unlink()
     lv.showMinimized()
     app.processEvents()
     t["now"] += 60
     lv._tick()
-    assert not preview.request_path(cfg).exists()
+    assert preview.request_path(cfg).read_text("ascii") == preview.STOP_WORD     # told the service to stop
+    lv._tick()
+    assert preview.request_path(cfg).read_text("ascii") == preview.STOP_WORD     # and asks for nothing more
+    lv.showNormal()
+    app.processEvents()
+    lv._tick()
+    first = preview.request_path(cfg).read_text("ascii")
+    assert first != preview.STOP_WORD and len(first.split()) == 2                 # shown again: a new session
     lv.stop()
     assert not lv.running()
     app.processEvents()
