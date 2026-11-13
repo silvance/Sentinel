@@ -295,8 +295,13 @@ class DrivesPage(Page):
         arc = ((read.doc or {}).get("archive") or {}) if read is not None else {}
         self._arc_running = bool(arc.get("running"))
         self.resume_btn.setVisible(swap_under_way(arc))
+        # Only the actions that apply now (GUI simplification 2026-11-13).
+        codes = {str(a.get("code")) for a in ((read.doc or {}).get("alerts") or []) if isinstance(a, dict)}             if read is not None else set()
+        for b in (self.swap_btn, self.arc_status_btn, self.problems_btn):
+            b.setVisible(bool(arc))
+        self.ack_btn.setVisible(bool(arc) and "A-006" in codes)
         if not arc:
-            self.arc_text.setText("Archive copying is not enabled in the settings.")
+            self.arc_text.setText("Archive copying is off. Turn it on in Storage › Archive drive.")
             return
         bk = arc.get("backlog") or {}
         msg = str(arc.get("message") or "")

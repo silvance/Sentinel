@@ -87,6 +87,11 @@ class LiveView(QWidget):
         if cfg is None:
             return
         now = self.clock()
+        win = self.window()
+        if not self.isVisible() or (win is not None and win.isMinimized()):
+            # Review 2026-11-12: minimized or locked (Lock computer minimizes the window): stop asking, so the
+            # service ends its camera decode; asking again when the picture is shown again.
+            return
         if now - self._last_request >= REQUEST_EVERY_S:
             self._last_request = now
             try:

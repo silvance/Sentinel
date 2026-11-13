@@ -82,6 +82,7 @@ def test_live_view_panel_requests_and_shows_frames(tmp_path: Path) -> None:
     t = {"now": 1_800_000_000.0}
     lv = LiveView(Ctx(cfg=cfg, cfg_path=None, admin=False, palette=pick_palette("light")), clock=lambda: t["now"])
     lv.resize(480, 320)
+    lv.show()
     lv.start()
     assert preview.request_is_fresh(preview.request_path(cfg), time.time())        # asked the recorder
     assert "Starting" in lv.message
@@ -100,6 +101,13 @@ def test_live_view_panel_requests_and_shows_frames(tmp_path: Path) -> None:
     t["now"] += 30                                                                  # no new frame for 30 s
     lv._tick()
     assert "not updating" in lv.message
+    # Review 2026-11-12: minimized (or locked, which minimizes the window): no more requests to the recorder.
+    preview.request_path(cfg).unlink()
+    lv.showMinimized()
+    app.processEvents()
+    t["now"] += 60
+    lv._tick()
+    assert not preview.request_path(cfg).exists()
     lv.stop()
     assert not lv.running()
     app.processEvents()

@@ -106,7 +106,7 @@ class StatusPage(Page):
         self._fact_cells: list[tuple[QLabel, QLabel]] = []
         vf = self.font()
         vf.setPointSizeF(vf.pointSizeF() + 1)
-        for key, label in (("camera", "Camera"), ("duration", "Recording for"), ("storage", "Storage"),
+        for key, label in (("camera", "Camera"), ("duration", "Recording for"), ("storage", "Free space"),
                            ("archive", "Archive"), ("verified", "Last verified file"), ("updated", "Status")):
             lab = muted(label)
             lab.setWordWrap(False)
@@ -212,7 +212,8 @@ class StatusPage(Page):
             total += h if h > 0 else fallback
             rows += 1
             it = t.itemBelow(it)
-        t.setFixedHeight(t.header().sizeHint().height() + max(total, 24) + 2 * t.frameWidth() + 2)
+        head = 0 if t.isHeaderHidden() else t.header().sizeHint().height()
+        t.setFixedHeight(head + max(total, 24) + 2 * t.frameWidth() + 2)
 
     def resizeEvent(self, e) -> None:  # noqa: ANN001, N802
         super().resizeEvent(e)
@@ -279,7 +280,8 @@ class StatusPage(Page):
         if read.kind is not ReadKind.OK:
             rows.append(("X-001", "critical", "The recorder's status is not updating. The recorder may have "
                                               "stopped or this computer may be overloaded.", {}))
-        for a in doc.get("alerts") or []:
+        # Review 2026-11-12: alerts in a document that is no longer updated are not current; X-001 says so.
+        for a in (doc.get("alerts") or []) if read.kind is ReadKind.OK else []:
             if isinstance(a, dict):
                 sev = a.get("severity")
                 tone = "critical" if sev == 3 else "warning" if sev == 2 else "info"
@@ -311,6 +313,7 @@ class StatusPage(Page):
             it.setFlags(Qt.ItemFlag.ItemIsEnabled)
             self.alerts.addTopLevelItem(it)
         self.alerts_title.setText(f"Alerts ({len(rows)})" if rows else "Alerts")
+        self.alerts.setHeaderHidden(not rows)           # "No alerts." needs no Code/Message columns
         self.alerts.resizeColumnToContents(0)
         self._fit_tree(self.alerts, 8)
         self._facts(doc, read)
@@ -322,8 +325,11 @@ class StatusPage(Page):
         tz = self.ctx.tz
         cfg = self.ctx.cfg
         link = str(doc.get("camera_link") or "")
+        stale = read.kind is not ReadKind.OK
         if cfg is not None and cfg.camera.pending:
             self._fact("camera", "not added yet", "warning")
+        elif stale:
+            self._fact("camera", "unknown (status not updating)")
         else:
             self._fact("camera", link.replace("_", " ") or "—", "ok" if link == "connected" else "warning")
         since = getattr(self.window(), "recording_since_epoch", None) or _ep((doc.get("recording") or {})
@@ -331,7 +337,8 @@ class StatusPage(Page):
         if v.live and since:
             self._fact("duration", f"{tf.duration(now - since)} (since {tf.when(since, tz, now)})")
         elif v.live:
-            self._fact("duration", "recording (start time not known yet)")
+            self._fact("duration", "—")
+            self.facts["duration"].setToolTip("Recording; the start time is not known yet")
         else:
             self._fact("duration", "not recording now", "" if doc.get("overall") in ("PAUSED", "WATCHING")
                        else "warning")
@@ -342,7 +349,9 @@ class StatusPage(Page):
             text += f" · {tf.approx_remaining(secs)} left"
         self._fact("storage", text, {"warning": "warning", "critical": "critical"}.get(st.get("level"), ""))
         arc = doc.get("archive") or {}
-        if not arc:
+        if stale:
+            self._fact("archive", "unknown (status not updating)")
+        elif not arc:
             self._fact("archive", "not enabled")
         elif not arc.get("running"):
             self._fact("archive", "copying not running", "warning")
@@ -371,8 +380,10 @@ class StatusPage(Page):
             self._set("camera", f"{cfg.camera.name} — not added yet" if cfg.camera.pending else
                       f"{cfg.camera.name} — {host}:{port}/{path}" if host else f"{cfg.camera.name} — {cfg.camera.id}",
                       "warning" if cfg.camera.pending else "")
-        link = str(doc.get("camera_link") or "—")
-        self._set("link", link.replace("_", " "), "ok" if link == "connected" else "warning" if link != "—" else "")
+        stale = read.kind is not ReadKind.OK
+        link = "unknown (status not updating)" if stale else str(doc.get("camera_link") or "—")
+        self._set("link", link.replace("_", " "), "ok" if link == "connected" else "warning" if link != "—" and
+                  not stale else "")
         last = doc.get("last_segment") or {}
         le = _ep(last.get("end_utc"))
         self._set("last", tf.when(le, tz, now) if le else "none yet")
@@ -387,8 +398,11 @@ class StatusPage(Page):
             txt += f", {tf.approx_remaining(secs)} of recording left"
         self._set("storage", txt, {"ok": "ok", "warning": "warning", "critical": "critical"}.get(st.get("level"), ""))
         arc = doc.get("archive") or {}
-        self._set("archive", arc.get("message") or ("not enabled" if not arc else "—"),
-                  "" if not arc else "ok" if arc.get("running") else "warning")
+        if stale:
+            self._set("archive", "unknown (status not updating)")
+        else:
+            self._set("archive", arc.get("message") or ("not enabled" if not arc else "—"),
+                      "" if not arc else "ok" if arc.get("running") else "warning")
         sch = doc.get("schedule") or {}
         if not sch:
             self._set("schedule", "off — records all the time")
@@ -475,7 +489,10 @@ class RecordingsPage(Page):
         hours = float(self.hours.currentData() or 24)
         db = cfg.ledger_snapshot_path or (cfg.data_path / "sentinel.db")
         live = bool(getattr(self.window(), "view", None) and self.window().view.live)
-        tl = load_timeline(db, cfg.camera.id, now, hours=hours, live=live)
+        # Review 2026-11-12: the hour being recorded is sealed only at its end and the window's copy of the
+        # ledger is refreshed every few minutes, so allow a whole recording file plus that delay as "live".
+        slack = cfg.recording.segment_seconds * 1.5 + 600.0
+        tl = load_timeline(db, cfg.camera.id, now, hours=hours, live=live, live_slack_s=slack)
         self.bar.set_timeline(tl, self.ctx.tz)
         tz = self.ctx.tz
         if not tl.available:
@@ -561,8 +578,11 @@ class SystemPage(Page):
         self.b_ops_add.clicked.connect(lambda: self._operator_change(True))
         self.b_ops_del.clicked.connect(lambda: self._operator_change(False))
         self.b_stop.clicked.connect(self._stop)
+        for g in (rec, inst, ops):          # content height only; the output below takes the rest
+            g.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
         self.log = OutputLog()
         sl.addWidget(CommandPanel(self.log, ctx.palette), 1)
+        sl.addStretch(1)                    # spare height below the boxes, not between them
         tabs.addTab(svc, "Service")
         self.b_status.clicked.connect(lambda: self._run(service_argv("status", "--config", self._cfgp()), "Service status"))
         self.b_check.clicked.connect(lambda: self._run(sentinel_argv("check-config", "--config", self._cfgp()),
@@ -828,6 +848,9 @@ class SystemPage(Page):
         def done(text: str) -> None:
             self.b_restart.setEnabled(True)
             self.log.appendPlainText(text + "\n")
+            watch = getattr(self.window(), "watch_after_change", None)
+            if text.startswith("The recorder was restarted") and callable(watch):
+                watch()        # review 2026-11-12: same check (and way back) as after saving settings
 
         self.ctx.restart(on_done=done)
 

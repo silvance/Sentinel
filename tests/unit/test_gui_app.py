@@ -807,8 +807,7 @@ def test_after_an_update_the_window_reports_once_and_goes_back_if_the_recorder_d
     folders.result.write_text(json.dumps(doc), "utf-8")
     monkeypatch.setattr(w, "_update_folders", lambda: folders)
     shown: list[str] = []
-    monkeypatch.setattr(winmod.QMessageBox, "information", lambda _p, _t, text: shown.append(text))
-    monkeypatch.setattr(winmod.QMessageBox, "warning", lambda _p, _t, text: shown.append("WARN " + text))
+    monkeypatch.setattr(w, "_notice", lambda text, warning=False: shown.append(("WARN " if warning else "") + text))
     w.show_update_result()
     assert shown == ["Sentinel updated from 0.3.0 to 0.3.1."] and w.watching() and w._watch["mode"] == "update"
     assert ap.read_result(folders)["shown"]
@@ -839,7 +838,7 @@ def test_camera_problems_after_an_update_do_not_roll_back_by_themselves(app: QAp
     went_back: list[str] = []
     monkeypatch.setattr(w.pages["system"].updates, "go_back", lambda reason="", ask=True: went_back.append(reason))
     shown: list[str] = []
-    monkeypatch.setattr(winmod.QMessageBox, "warning", lambda _p, _t, text: shown.append(text))
+    monkeypatch.setattr(w, "_notice", lambda text, warning=False: shown.append(text))
     w._update_watch_failed(Report([Check("Recorder running", True, "answering"),
                                    Check("Camera sends video", False, "no signal")]))
     assert not went_back and "usually not caused by the update" in shown[-1]
@@ -936,6 +935,10 @@ def test_while_updating_the_window_says_so_instead_of_system_error(app: QApplica
     monkeypatch.setattr(w, "_update_folders", lambda: folders)
     w.refresh()
     assert w.sb_state.text().startswith("Updating to Sentinel 0.3.4: recording restarts by itself")
+    # Review 2026-11-12: a state file left by a failed or cancelled update never hides a running recorder.
+    write_doc(w.ctx.cfg.status_path, status_doc(base_measurements(), time.time(), last_segment_end=time.time()))
+    w.refresh()
+    assert "Updating" not in w.sb_state.text()
     folders.state.unlink()
     w.refresh()
     assert "Updating" not in w.sb_state.text()
@@ -1007,3 +1010,110 @@ def test_rename_is_for_administrators_and_runs_the_rename_command(app: QApplicat
     w2 = _window(app, tmp_path / "operator", admin=False)
     assert not w2.pages["drives"].rename_btn.isEnabled()
     w2.close()
+
+
+def test_the_hour_being_recorded_counts_as_live_on_the_timeline(app, tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    """Review 2026-11-12: with one-hour files the open hour was shown as 'no information'."""
+    from sentinel.gui.app import status_pages
+
+    seen: dict[str, Any] = {}
+
+    def fake(*_a: Any, **kw: Any) -> Timeline:
+        seen.update(kw)
+        raise OSError("stop here")
+    monkeypatch.setattr(status_pages, "load_timeline", fake)
+    w = _window(app, tmp_path, admin=True)
+    try:
+        w.pages["recordings"].on_show()
+    except OSError:
+        pass
+    assert seen["live_slack_s"] >= w.ctx.cfg.recording.segment_seconds
+    w.close()
+
+
+def test_a_status_that_stopped_updating_shows_nothing_old_as_current(app, tmp_path: Path) -> None:  # noqa: ANN001
+    """Review 2026-11-12: a 10-minute-old document still showed the camera 'connected' and its old alerts."""
+    now = time.time()
+    doc = status_doc(base_measurements(), now, heartbeat_age_s=600.0, last_segment_end=now - 700)
+    doc["camera_link"] = "connected"
+    doc["alerts"] = [make_alert("R-001", Severity.WARNING).to_dict()]
+    w = _window(app, tmp_path, admin=True, doc=doc)
+    w.refresh()
+    page = w.pages["status"]
+    page.on_status(w.ctx.read)
+    codes = [page.alerts.topLevelItem(i).text(0) for i in range(page.alerts.topLevelItemCount())]
+    assert codes == ["X-001"]
+    assert "unknown" in page.facts["camera"].text() and "unknown" in page.items["link"].text(1)
+    w.close()
+
+
+def test_restart_refuses_a_settings_file_that_does_not_load(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    """Review 2026-11-12: Restart recorder stopped a working recorder to start it with a broken file (C-001)."""
+    path = _setup(tmp_path)
+    cfg = load_config(path)
+    path.write_text("[camera\nbroken", encoding="utf-8")
+    import sentinel.launcher.control as control_mod
+
+    monkeypatch.setattr(control_mod, "select_control", lambda *_a: pytest.fail("the recorder was touched"))
+    msg = base.restart_recorder(path, cfg)
+    assert msg.startswith("The recorder was not restarted") and "settings file cannot be used" in msg
+
+
+def test_restart_also_restarts_the_archive_copier(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    path = _setup(tmp_path)
+    cfg = load_config(path)
+    calls: list[str] = []
+
+    class Ctl:
+        def is_running(self) -> bool:
+            return True
+
+        def stop(self, _t: float) -> bool:
+            calls.append("stop")
+            return True
+
+        def start(self):  # noqa: ANN202
+            calls.append("start")
+            return type("R", (), {"ok": True})()
+
+        def restart_archive(self) -> None:
+            calls.append("archive")
+    import sentinel.launcher.control as control_mod
+
+    monkeypatch.setattr(control_mod, "select_control", lambda *_a: Ctl())
+    assert base.restart_recorder(path, cfg).startswith("The recorder was restarted")
+    assert calls == ["stop", "start", "archive"]
+
+
+def test_the_schedule_page_never_rewrites_times_or_dates_it_cannot_show(app, tmp_path: Path) -> None:  # noqa: ANN001
+    """Review 2026-11-12: '2026-12-24T18:00' loaded as 'now', '07:30:00' as 00:00, and a typed '25:00' saved as
+    the time picked before."""
+    from PySide6.QtCore import QDate, QTime
+
+    assert settings_pages.normal_time("07:30:00") == "07:30"
+    for text, end, want in (("2026-12-24T18:00", False, (2026, 12, 24, 18, 0)),
+                            ("2026-12-24 8:00", False, (2026, 12, 24, 8, 0)),
+                            ("2026-12-24 24:00", True, (2026, 12, 25, 0, 0)),
+                            ("2026-12-24", True, (2026, 12, 25, 0, 0))):
+        dt = settings_pages.parse_date_value(text, end)
+        assert dt.date() == QDate(*want[:3]) and dt.time() == QTime(*want[3:]), text
+    with pytest.raises(ValueError):
+        settings_pages.parse_date_value("next tuesday", False)
+    combo = settings_pages.TimeCombo("07:00")
+    combo.setEditText("25:00")
+    with pytest.raises(ValueError, match="not a time of day"):
+        combo.value()
+    combo.set_value("7:3")
+    assert combo.currentText() == "7:3"                     # shown as written, not 00:00
+
+    w = _window(app, tmp_path, admin=True)
+    path = w.ctx.cfg_path
+    text = path.read_text("utf-8")
+    text += ('\n[schedule]\nenabled = true\ndefault = "record"\n\n[[schedule.dates]]\naction = "pause"\n'
+             'start = "2026-12-24 18:00:30"\nend = "2026-12-26"\n')
+    path.write_text(text, "utf-8")
+    page = w.pages["schedule"]
+    page.load()
+    assert "cannot be shown here" in page.result.text()
+    assert page.tables()["schedule"]["dates"][0]["start"] == "2026-12-24 18:00:30"   # kept exactly
+    w.close()

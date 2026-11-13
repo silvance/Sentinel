@@ -12,7 +12,7 @@ from urllib.parse import urlsplit
 from PySide6.QtCore import QDate, QDateTime, Qt, QTime
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDateEdit, QDialog, QDialogButtonBox,
                                QDoubleSpinBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
-                               QPlainTextEdit, QPushButton, QSpinBox, QTableWidget,
+                               QPlainTextEdit, QPushButton, QSizePolicy, QSpinBox, QTableWidget,
                                QToolButton, QVBoxLayout, QWidget)
 
 from ...config import AppConfig
@@ -415,11 +415,11 @@ class DaysPicker(QWidget):
 TIME_STEP_MIN = 15
 MIDNIGHT = "24:00"
 MIDNIGHT_TEXT = "Midnight"
-_TIME_RE = re.compile(r"^\s*([01]?\d|2[0-3])[:.]?([0-5]\d)\s*$")
+_TIME_RE = re.compile(r"^\s*([01]?\d|2[0-3])[:.]?([0-5]\d)(?::00)?\s*$")
 
 
 def normal_time(text: str) -> str | None:
-    """'7:30' / '0730' / '07.30' -> '07:30'; None if it is not a time of day."""
+    """'7:30' / '0730' / '07.30' / '07:30:00' -> '07:30'; None if it is not a time of day (to the minute)."""
     m = _TIME_RE.match(text or "")
     return f"{int(m.group(1)):02d}:{m.group(2)}" if m else None
 
@@ -450,7 +450,11 @@ class TimeCombo(QComboBox):
         if self.end and t in (MIDNIGHT, "00:00", MIDNIGHT_TEXT):
             self.setCurrentIndex(self.findData(MIDNIGHT))
             return
-        norm = normal_time(t) or "00:00"
+        norm = normal_time(t)
+        if norm is None:
+            # Review 2026-11-12: keep what the settings file says (shown as is); it used to become 00:00.
+            self.setEditText(t)
+            return
         i = self.findData(norm)
         if i >= 0:
             self.setCurrentIndex(i)
@@ -464,8 +468,8 @@ class TimeCombo(QComboBox):
         norm = normal_time(text)
         if norm is not None:
             return norm
-        data = self.currentData()
-        return str(data) if data else ("24:00" if self.end else "00:00")
+        # Review 2026-11-12: never put another time in its place without saying so.
+        raise ValueError(f"'{text}' is not a time of day: use the 24-hour clock, for example 07:45")
 
 
 class DateTimePicker(QWidget):
@@ -508,16 +512,18 @@ def _row_remove_button(table: QTableWidget, column: int, tip: str) -> QToolButto
 
 
 def parse_date_value(text: str, is_end: bool) -> QDateTime:
-    """``YYYY-MM-DD`` or ``YYYY-MM-DD HH:MM``; a date alone as an end means the END of that day."""
-    text = (text or "").strip()
-    if len(text) <= 10:
-        d = QDate.fromString(text, "yyyy-MM-dd")
-        if not d.isValid():
-            d = QDate.currentDate()
-        dt = QDateTime(d, QTime(0, 0))
-        return dt.addDays(1) if is_end else dt
-    dt = QDateTime.fromString(text[:16], "yyyy-MM-dd HH:mm")
-    return dt if dt.isValid() else QDateTime.currentDateTime()
+    """A schedule date as the recorder reads it (``YYYY-MM-DD``, ``YYYY-MM-DD HH:MM``, also with ``T``, one-digit
+    hours, seconds, and 24:00 as an end); a date alone as an end means the END of that day. Raises ValueError
+    for anything else or for seconds the page cannot show (review 2026-11-12: such values became "now")."""
+    from ...schedule import ScheduleError, _datetime
+
+    try:
+        d = _datetime((text or "").strip(), "date", is_end)
+    except ScheduleError as exc:
+        raise ValueError(str(exc)) from None
+    if d.second:
+        raise ValueError(f"{text!r} has seconds; this page shows dates to the minute")
+    return QDateTime(QDate(d.year, d.month, d.day), QTime(d.hour, d.minute))
 
 
 def date_value(dt: QDateTime) -> str:
@@ -748,10 +754,22 @@ class SchedulePage(SettingsPage):
             self.weekly.add(str(w.get("action", "record")), days_from_config(w.get("days", [])),
                             str(w.get("start", "00:00")), str(w.get("end", "24:00")))
         self.dates.clear()
-        for d in raw.get("dates", []) or []:
-            self.dates.add(str(d.get("action", "pause")), parse_date_value(str(d.get("start", "")), False),
-                           parse_date_value(str(d.get("end", "")), True))
-        self.result.clear()
+        self._raw_dates = None
+        try:
+            parsed = [(str(d.get("action", "pause")), parse_date_value(str(d.get("start", "")), False),
+                       parse_date_value(str(d.get("end", "")), True)) for d in raw.get("dates", []) or []]
+        except (ValueError, AttributeError) as exc:
+            # Review 2026-11-12: keep the dates exactly as written; never replace them by "now".
+            parsed = []
+            self._raw_dates = list(raw.get("dates", []) or [])
+            self.dates.set_enabled(False)
+            self.result.setText(f"The particular dates in the settings file cannot be shown here ({exc}). They are "
+                                "kept unchanged when you save. To change them, use System › Configuration file.")
+        for action, start, end in parsed:
+            self.dates.add(action, start, end)
+        if self._raw_dates is None:
+            self.result.clear()
+            self.dates.set_enabled(self.ctx.admin)
         self.preview()
 
     def _preset(self) -> None:
@@ -772,7 +790,9 @@ class SchedulePage(SettingsPage):
         self.result.setText("Days off added. Press Save and restart recorder to use them.")
 
     def tables(self) -> dict[str, dict[str, Any]]:
-        weekly, dates = self.weekly.rows(), self.dates.rows()
+        weekly = self.weekly.rows()
+        raw_dates = getattr(self, "_raw_dates", None)
+        dates = raw_dates if raw_dates is not None else self.dates.rows()
         table: dict[str, Any] = {"enabled": self.enabled.isChecked(), "default": str(self.default.currentData()),
                                  "timezone": self.tz.currentText().strip()}
         if weekly:
@@ -789,7 +809,7 @@ class SchedulePage(SettingsPage):
             sc = parse_schedule(self.tables()["schedule"], cfg.recording.display_timezone if cfg else "UTC",
                                 saving=True)
             self.plan.setPlainText(render_plan(RecordingSchedule(sc), time.time(), days=14))
-        except ScheduleError as exc:
+        except (ScheduleError, ValueError) as exc:
             self.plan.setPlainText(f"Not valid yet: {exc}")
 
 
@@ -849,7 +869,9 @@ class MotionPage(SettingsPage):
         tl.addLayout(row)
         self.log = OutputLog()
         tl.addWidget(CommandPanel(self.log, ctx.palette))
-        self.body.addWidget(test, 1)
+        test.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        self.body.addWidget(capped(test))  # same width as the form above; no empty box filling the page
+        self.body.addStretch(1)
         self.finish_layout()
 
     def _spin(self, lo: int, hi: int, suffix: str, tip: str) -> QSpinBox:

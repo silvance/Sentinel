@@ -88,6 +88,10 @@ def read_status_robust(path: Path, max_age_s: float = 15.0, attempts: int = 5,
         return StatusRead(doc, problem, ReadKind.STALE, age)
     if age is None:
         return StatusRead(doc, "heartbeat missing or not a number", ReadKind.STALE, None)
+    if age > max_age_s and doc.get("terminal") and doc.get("alert"):
+        # Review 2026-11-12: a recorder that stopped for good (e.g. C-001, settings error) leaves this last
+        # document on purpose; show its own error, not X-001 "not responding" (docs/05 row 33).
+        return StatusRead(doc, None, ReadKind.OK, age)
     if abs(age) > max_age_s:
         return StatusRead(doc, f"heartbeat is {-age:.0f} s in the future (wall clock changed?)", ReadKind.STALE, age)
     return StatusRead(doc, None, ReadKind.OK, age)

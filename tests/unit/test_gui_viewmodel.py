@@ -486,3 +486,16 @@ def test_camera_not_added_with_a_warning_keeps_its_explanation_under_the_headlin
     assert [a.code for a in v.other_alerts] == ["A-001"]
     assert "Recording continues" not in v.other_alerts[0].message
     assert v.storage.detail == "Recording time left is measured once recording starts."
+
+
+def test_a_recorder_stopped_by_a_settings_error_shows_that_error_not_x001(tmp_path: Path) -> None:
+    """Review 2026-11-12: the terminal C-001 document is kept on purpose; the window showed X-001 instead."""
+    p = tmp_path / "status.json"
+    doc = status_doc(base_measurements(), time.time(), heartbeat_age_s=600.0)
+    c001 = make_alert("C-001", Severity.CRITICAL).to_dict()
+    doc.update(terminal=True, alert=c001, alerts=[c001])
+    write_doc(p, doc)
+    r = read_status_robust(p, max_age_s=15.0)
+    assert r.kind is ReadKind.OK
+    v = build_dashboard(r, tz=TZ)
+    assert v.banner is None or v.banner.code != "X-001"

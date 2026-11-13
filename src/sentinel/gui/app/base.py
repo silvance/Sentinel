@@ -320,6 +320,8 @@ def table(headers: list[str], stretch_last: bool = True) -> QTableWidget:
     t.horizontalHeader().setMinimumSectionSize(70)
     if stretch_last:
         t.horizontalHeader().setStretchLastSection(True)
+        # long values are cut with the full text in the tooltip (fill), never a sideways scroll bar
+        t.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
     t.horizontalHeader().setHighlightSections(False)
     return t
 
@@ -364,8 +366,17 @@ def selected_data(t: QTableWidget) -> Any:
 
 def restart_recorder(cfg_path: Path, cfg: AppConfig) -> str:
     """Stop and start the recorder (worker thread) so new settings take effect."""
+    from ...config import ConfigError, load_config
     from ...launcher.control import select_control
 
+    # Review 2026-11-12: never stop a working recorder to start it with a settings file that does not load
+    # (e.g. edited in Notepad): it would stop with C-001.
+    try:
+        cfg = load_config(cfg_path)
+    except (ConfigError, OSError) as exc:
+        return (f"The recorder was not restarted: the settings file cannot be used ({exc}). Recording continues "
+                "with the settings it started with. Correct the file, or go back to working settings in "
+                "System › Check and history.")
     control = select_control(cfg_path, cfg)
     if control.is_running() and not control.stop(90.0):
         return "The recorder did not stop within 90 seconds. Restart this computer to apply the settings."
@@ -373,6 +384,10 @@ def restart_recorder(cfg_path: Path, cfg: AppConfig) -> str:
     if not getattr(result, "ok", False):
         return (f"The recorder could not be started ({getattr(result, 'code', '?')}). "
                 "See System › Service.")
-    if hasattr(control, "start_archive"):
-        control.start_archive()
+    # The archive copier reads its settings when it starts: restart it too (review 2026-11-12).
+    for name in ("restart_archive", "start_archive"):
+        fn = getattr(control, name, None)
+        if callable(fn):
+            fn()
+            break
     return "The recorder was restarted with the saved settings."

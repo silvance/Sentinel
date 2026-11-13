@@ -229,10 +229,12 @@ class AppWindow(QMainWindow):
             self.access_label.setText(f"Read-only: {self.admin_refused}")
             self.unlock_btn.hide()
         elif self.ctx.admin:
-            self.access_label.setText("Administrator: settings can be changed.")
+            self.access_label.setText("Administrator mode")
+            self.access_label.setToolTip("Settings can be changed.")
             self.unlock_btn.hide()
         else:
-            self.access_label.setText("Read-only: viewing and operator tasks.")
+            self.access_label.setText("Read-only mode")
+            self.access_label.setToolTip("Viewing and operator tasks. Unlock settings to change them.")
             self.unlock_btn.show()
 
     def _build_menu(self) -> None:
@@ -421,7 +423,10 @@ class AppWindow(QMainWindow):
         test = (f"<br><span style='color:{p.critical}'>TEST CAMERA — not evidence</span>"
                 if v.test_camera is not None else "")
         updating = self._update_in_progress()
-        if updating:       # recording is stopped on purpose for the swap; not a "System error"
+        # Review 2026-11-12: only while the recorder is actually down. A failed or cancelled update can leave its
+        # state file behind; a running recorder's real status must not be hidden behind "Updating…".
+        recorder_up = read.kind is ReadKind.OK and (read.doc or {}).get("overall") not in ("STOPPED", None)
+        if updating and not recorder_up:       # recording is stopped on purpose for the swap; not a "System error"
             from dataclasses import replace
 
             v = replace(v, headline=f"{updating}: recording restarts by itself", tone=Tone.INFO)
@@ -803,11 +808,20 @@ class AppWindow(QMainWindow):
         except OSError:
             pass
         good = (res.get("outcome"), res.get("action")) in (("updated", "update"), ("rolled_back", "rollback"))
-        (QMessageBox.information if good else QMessageBox.warning)(self, "Sentinel", str(res.get("message", "")))
+        # Review 2026-11-12: start the 3-minute check first; the message does not wait for a click.
         if res.get("outcome") == "updated" and res.get("watch") and self.ctx.cfg is not None:
             self._update_folders_override = folders
             self.watch_after_change(mode="update")
+        self._notice(str(res.get("message", "")), warning=not good)
         return res
+
+    def _notice(self, text: str, warning: bool = False) -> None:
+        """A message that does not block anything (unattended laptop: nobody may be there to click OK)."""
+        box = QMessageBox(QMessageBox.Icon.Warning if warning else QMessageBox.Icon.Information, "Sentinel", text,
+                          QMessageBox.StandardButton.Ok, self)
+        box.setWindowModality(Qt.WindowModality.NonModal)
+        box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        box.show()
 
     def _update_watch_done(self) -> None:
         from ...update.apply import mark_result
@@ -832,13 +846,13 @@ class AppWindow(QMainWindow):
         system = self.pages.get("system")
         tab = getattr(system, "updates", None)
         if broken and prev and tab is not None:
-            QMessageBox.warning(self, "Sentinel", f"The recorder does not work with Sentinel {__version__}:\n\n"
-                                f"{rep.summary()}\n\nSentinel now goes back to version {prev}.")
+            self._notice(f"The recorder does not work with Sentinel {__version__}:\n\n{rep.summary()}\n\n"
+                         f"Sentinel now goes back to version {prev}.", warning=True)
             tab.go_back(reason=f"the recorder did not work after the update: {rep.summary()}", ask=False)
             return
-        QMessageBox.warning(self, "Sentinel", f"The recorder reports a problem since the update:\n\n{rep.summary()}"
-                            "\n\nThis is usually not caused by the update (camera, drive). To go back to the "
-                            "previous version anyway: System › Updates.")
+        self._notice(f"The recorder reports a problem since the update:\n\n{rep.summary()}\n\nThis is usually not "
+                     "caused by the update (camera, drive). To go back to the previous version anyway: "
+                     "System › Updates.", warning=True)
 
     def _rebuild(self) -> None:
         self.pages.clear()
