@@ -10,8 +10,18 @@ and only after the copy has been checked. A Sentinel SSD reformatted elsewhere c
 ## At the office
 
 1. **The SSD must have been taken out with "Swap archive drive"** on the laptop (so its index lists every
-   file). If it was simply unplugged, plug it back into the laptop, wait a minute, press Swap archive drive,
-   and take it out when the screen says so.
+   file). If it was simply unplugged, first take it back to the laptop:
+   * **Only this SSD in the laptop** (one-bay dock such as the Sabrent, or one SSD at a time): if another SSD
+     is in use, press Swap archive drive and take that one out when the screen says so. Plug this SSD in,
+     wait until the Drives page shows it **In use** (or **Full**), press Swap archive drive, and take it out
+     when the screen says so. Put the other SSD back; if the Drives page says it is back from the office,
+     press **Cancel swap** (it was only taken out to make room).
+   * **Two SSDs connected at the same time** (two separate USB drives): plug this SSD in next to the other
+     one. Swap archive drive prepares the SSD that is *in use*, which is not this one, so: press Swap archive
+     drive once and **take nothing out**; wait until the Drives page shows this SSD **In use** (or **Full**);
+     press **Cancel swap**; then press Swap archive drive again. Take out only the SSD the screen names, and
+     only when it names this SSD (for example "SSD_1 is ready to be taken out"). Never take out an SSD the
+     screen has not named.
 2. Plug the SSD into the office computer. It shows as `SSD_1` (or `SSD_2`, …), the name on its sticker.
 3. On the office drive, make a new folder named after the SSD and today's date, for example
    `D:\Sentinel transfers\SSD_1_2026-11-26`. Use a new folder every time; never copy into an older one.
@@ -45,14 +55,30 @@ and only after the copy has been checked. A Sentinel SSD reformatted elsewhere c
 
 If it says recordings are "missing or changed", nothing was deleted: contact technical support.
 
+If it says some files "could not be deleted now", close any video from the SSD that is open (a player,
+Explorer's preview). The SSD is still returned to service; Sentinel deletes those files by itself when it next
+uses the SSD, and again before it prepares the SSD for its next swap, so the next office check is not refused.
+
+If the laptop lost power or Sentinel was stopped during a return, the return is finished by itself when the
+SSD is plugged in again (pressing Return to service again also finishes it). Only files already recorded as
+moved to the office are deleted.
+
 ## Safeguards (0.3.12, review 2026-11-12)
 
 * A drive taken out with **Swap archive drive** is not copied to again when it is plugged back in. The
   Drives page says it is back from the office and waits to be returned to service; copying goes on to
   another drive, or the recordings wait on the laptop. (To keep using the drive without an office copy,
-  press **Cancel swap**.) So the office copy always holds everything Return to service deletes. With a
-  one-bay dock, the drive taken out only to make room for the returned one (step 1 above) is used again
-  as usual once the returned drive is back in service.
+  press **Cancel swap** while it is plugged in.) So the office copy always holds everything Return to service
+  deletes. With a one-bay dock, the drive taken out only to make room for the returned one (step 1 above) is
+  used again as usual once the returned drive is back in service.
+* **Cancel swap** releases only the drive whose swap it cancels and drives plugged in at that moment. A drive
+  that is at the office stays "waiting to be returned" (review 2026-11-12: Cancel swap used to release every
+  such drive).
+* Return to service can be repeated safely: it finishes a return that was interrupted (power cut, Sentinel
+  stopped) and deletes files a return could not delete. It only ever deletes copies recorded as moved to the
+  office; a recording copied to the drive since then is never deleted.
+* A Swap pressed while the inserted drive cannot be used ("The inserted drive cannot be used as an archive
+  drive") prepares nothing, and is not kept for the next drive plugged in.
 * Return to service refuses, and deletes nothing, when the selected drive is the one Sentinel is copying to
   now, was not taken out with Swap since it was set up or last returned, was prepared for removal but never
   taken out, or had recordings copied to it after its swap. It also refuses when the drive at that letter is not the one selected (press Refresh list).

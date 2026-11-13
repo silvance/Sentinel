@@ -107,8 +107,10 @@ PROBE = ".sentinel_archive_probe" + PARTIAL
 SOURCE_RETRY_S = 3600.0          # retry a local recording that could not be read after this long
 REVIEW_LAYOUT = ("README_FIRST.txt", "Recordings", "Manifests", "Originals")
 
-MSG_FULL = ("Do not unplug the archive drive yet. It is full: press Swap Archive Drive and wait for SAFE TO "
-            "REMOVE, then insert an empty archive drive.")
+# Review 2026-11-12: the deployed copier has no software eject (ManualRemovalFallback), so the screen never says
+# SAFE TO REMOVE; it says which drive to take out and how (Safely Remove Hardware, or "ready to be taken out").
+MSG_FULL = ("Do not unplug the archive drive yet. It is full: press Swap Archive Drive and wait until the screen "
+            "says which drive to take out and how, then take out only that drive and insert an empty archive drive.")
 FULL_RECHECK_S = 600.0           # a full drive left in the dock is looked at again after this long
 MSG_REMOVED = ("The archive drive was removed without preparing it. No recordings were lost; copying will "
                "continue when a drive is inserted.")
@@ -216,6 +218,9 @@ class ArchiveWorker:
         self._awaiting: dict[str, str | None] = {}           # drive_id -> label, swapped and not yet returned
         self._awaiting_since: dict[str, float] = {}          # drive_id -> when it was swapped (epoch)
         self._awaiting_present: dict[str, ExportTarget] = {}
+        self._release_present = False                        # Cancel swap: release awaiting drives inserted now
+        self._return_checked: set[str] = set()               # awaiting drives looked at for an interrupted return
+        self._leftover_drives: set[str] = set()              # drives with transferred files not yet deleted
         self._load_swapped()
         self._load_awaiting()
 
@@ -231,18 +236,31 @@ class ArchiveWorker:
             self._last_publish = float("-inf")
             self._wake.set()
             return
+        if self.att is None and self.state == ST_UNUSABLE:
+            # Review 2026-11-12: pressed while the inserted drive is refused, the swap stayed armed and prepared the
+            # next good drive (put on the awaiting-return list, never written). A refused drive is not written:
+            # there is nothing to prepare, and it can be taken out.
+            self._drop_swap("the inserted drive cannot be used as an archive drive")
+            return
         if not self._swap.is_set():
             self._swap_deadline = self.mono() + self.acfg.swap_max_wait_s
             self._swap.set()
         self._wake.set()
 
     def resume(self) -> None:
-        """Cancel a pending swap, or continue on a drive that was made safe to remove but not removed."""
+        """Cancel a pending swap, or continue on a drive that was made safe to remove but not removed, or on a
+        drive back from the office that is inserted now. Review 2026-11-12: drives that are not inserted (at the
+        office) stay on the awaiting-return list; Cancel swap used to release every one of them."""
         self._swap.clear()
         self._swap_deadline = None
+        release = set(self._awaiting_present)
+        if self._swapped_drive is not None:
+            release.add(self._swapped_drive)
+        for k in sorted(release):
+            self._set_awaiting(k, remove=True)
+        self._release_present = True        # and those the next scan finds inserted (request read before it)
         self._set_swapped(None)
         self._last_swapped = None
-        self._set_awaiting(None)
         self._wake.set()
 
     def stop(self, timeout: float = 60.0) -> None:
@@ -352,6 +370,10 @@ class ArchiveWorker:
                     self._set_swapped(None)
                 else:
                     swapped_present = True
+        if self._release_present:
+            self._release_present = False
+            for k in sorted(k for k in by_key if k in self._awaiting):
+                self._set_awaiting(k, remove=True)
         self._awaiting_present = {k: t for k, t in by_key.items() if k in self._awaiting and k != self._swapped_drive}
         usable = {k: t for k, t in by_key.items() if k != self._swapped_drive and k not in self._awaiting}
         self._present = usable
@@ -425,20 +447,22 @@ class ArchiveWorker:
         self._poll_control()
         scan = self.locator.scan()
         self._poll_return(scan)           # first: a drive returned to service is used from this scan on
+        self._finish_interrupted_returns(scan)
         target, swapped_present = self._select(scan)
         self._last_scan = (scan, swapped_present)
+        if self.att is not None and self.att.drive_id not in self._present:
+            # (review 2026-11-10) one scan that does not see the attached drive (drive not ready,
+            # volume list or marker momentarily unreadable) is not proof that it was removed: no
+            # A-003, presence session kept open. Gone for two scans in a row: removed.
+            # While the volume list itself cannot be read, wait longer before concluding.
+            # Review 2026-11-12: the same when another archive drive is inserted (it used to be attached at once).
+            self._att_missed += 1
+            if self._att_missed < (UNCERTAIN_MISSES if scan.uncertain else 2):
+                log.info("attached archive drive not seen by this scan (%d)%s", self._att_missed,
+                         f"; {scan.uncertain}" if scan.uncertain else "")
+                return "rescan"
+            self._detached(unexpected=True)
         if target is None:
-            if self.att is not None:
-                # (review 2026-11-10) one scan that does not see the attached drive (drive not ready,
-                # volume list or marker momentarily unreadable) is not proof that it was removed: no
-                # A-003, presence session kept open. Gone for two scans in a row: removed.
-                # While the volume list itself cannot be read, wait longer before concluding.
-                self._att_missed += 1
-                if self._att_missed < (UNCERTAIN_MISSES if scan.uncertain else 2):
-                    log.info("attached archive drive not seen by this scan (%d)%s", self._att_missed,
-                             f"; {scan.uncertain}" if scan.uncertain else "")
-                    return "rescan"
-                self._detached(unexpected=True)
             if swapped_present:
                 self._waiting_for_removal()
                 return "waiting_for_removal"
@@ -456,6 +480,9 @@ class ArchiveWorker:
                 else:
                     self._detached(unexpected=True)
             if not self._attach(target):
+                if self._swap.is_set():
+                    # Review 2026-11-12: see request_swap. Nothing the request was about can be prepared.
+                    self._drop_swap("the inserted drive could not be used as an archive drive")
                 return "unusable"
         elif target.label and target.label != self.att.target.label:
             # Renamed while attached (Drives › Rename…, 0.3.11): same drive, new name from now on.
@@ -521,6 +548,10 @@ class ArchiveWorker:
         if att is None:
             return
         if unexpected:
+            if self._swap.is_set():
+                # Review 2026-11-12: the drive the swap was pressed for is gone; a pending swap must not prepare
+                # whichever drive is attached next.
+                self._drop_swap("the archive drive in use was removed without preparing it")
             self.removed_unexpectedly = True
             self._event("warning", "archive_drive_removed", "Archive drive removed without preparing it",
                         {"drive_id": att.drive_id, "copies_this_attach": att.copies_this_attach})
@@ -586,11 +617,17 @@ class ArchiveWorker:
         self._verify_attempts.clear()
         try:
             restored, lost, removed = self._reconcile(root, drive_id)
-        except OSError as exc:
-            if not self._drive_error(exc):
-                raise
-            return False
-        q = self.al.backlog(drive_id)
+            q = self.al.backlog(drive_id)
+        except BaseException as exc:
+            # Review 2026-11-12: the drive stayed attached without its reconcile, which was never run again for
+            # this insertion (missing copies kept counting as archived). Not attached: the next step tries again.
+            handled = isinstance(exc, OSError) and self._drive_error(exc)     # removed (detached) or full
+            if self.att is not None and self.att.drive_id == drive_id:
+                self.att = None
+            if handled:
+                return False
+            raise
+        self._clean_leftovers(root, drive_id)
         self._event("info", "archive_drive_attached", "Archive drive connected",
                     {"drive_id": drive_id, "label": target.label, "restored": restored, "lost": lost,
                      "discarded_partials": removed, "to_copy_segments": q.segments,
@@ -606,7 +643,15 @@ class ArchiveWorker:
                 if not self._drive_error(exc):
                     raise
                 return self.att is not None
-        self._write_index("attach")
+        try:
+            self._write_index("attach")
+        except Exception:
+            # (review 2026-11-12) an unexpected error writing the attach index is retried like a failed write,
+            # not forgotten until the next attach
+            if self.att is not None:
+                self.att.stale_index = True
+                self.att.next_index_retry = self.mono() + 60.0
+            raise
         return self.att is not None
 
     def _reconcile(self, root: Path, drive_id: str) -> tuple[int, int, int]:
@@ -623,6 +668,14 @@ class ArchiveWorker:
                 size = p.stat().st_size
             except FileNotFoundError:
                 size = None
+            except OSError as exc:
+                # Review 2026-11-12: one unreadable entry (damaged folder entry after an unclean unplug) aborted the
+                # whole reconcile. Unless the drive itself has gone, the copy cannot be confirmed: LOST (re-copied).
+                if not self.io.root_present(root):
+                    raise
+                self.al.mark_lost(c["copy_id"], f"cannot be read on the drive: {type(exc).__name__}: {exc}"[:500])
+                lost += 1
+                continue
             if size == c["size_bytes"]:
                 continue
             if size is not None:
@@ -630,16 +683,12 @@ class ArchiveWorker:
                 lost += 1
                 continue
             part = partial_path(p)
-            if part in partials:
-                sha, n, method = self._read_hash(part)
-                if sha == c["sha256"] and n == c["size_bytes"] and method != M_BUFFERED:
-                    self.io.restore_partial(part, p)
-                    self.io.seal_read_only(p)
-                    partials.discard(part)
-                    restored += 1
-                    self._event("warning", "archive_copy_restored", "A verified copy whose file name was lost was "
-                                "restored from its temporary file after checking it again", {"path": c["path"]})
-                    continue
+            if part in partials and self._restore_from_partial(root, part, p, c):
+                partials.discard(part)
+                restored += 1
+                self._event("warning", "archive_copy_restored", "A verified copy whose file name was lost was "
+                            "restored from its temporary file after checking it again", {"path": c["path"]})
+                continue
             self.al.mark_lost(c["copy_id"], "file missing from the drive")
             lost += 1
         removed = 0
@@ -650,6 +699,28 @@ class ArchiveWorker:
             except OSError as exc:
                 log.warning("could not discard %s: %s", p, exc)
         return restored, lost, removed
+
+    def _restore_from_partial(self, root: Path, part: Path, dest: Path, c: Any) -> bool:
+        """Put back a verified copy from its ``.partial`` if that still matches the sealed hash. A ``.partial`` that
+        cannot be read or renamed (bad sector, refused rename) is not restorable: the copy is then marked LOST and
+        copied again, instead of the error stopping the reconcile (review 2026-11-12). A gone drive still raises."""
+        try:
+            sha, n, method = self._read_hash(part)
+            if sha != c["sha256"] or n != c["size_bytes"] or method == M_BUFFERED:
+                return False
+            self.io.restore_partial(part, dest)
+        except OSError as exc:
+            if not self.io.root_present(root):
+                raise
+            log.warning("could not restore %s from its temporary file: %s", dest, exc)
+            return False
+        try:
+            self.io.seal_read_only(dest)
+        except OSError as exc:
+            if not self.io.root_present(root):
+                raise
+            log.warning("could not seal the restored copy %s read-only: %s", dest, exc)
+        return True
 
     def _space_available(self, need: int = 0) -> bool:
         assert self.att is not None and self.al is not None
@@ -832,6 +903,17 @@ class ArchiveWorker:
             return False, (f"{label} was prepared for removal but has not been taken out since, so the office "
                            "cannot have copied it. Nothing was deleted. Take it out, have the office copy it, then "
                            "plug it in and return it to service."), {}
+        if swap is None and drive_id in self._awaiting and not copies:
+            done = self.al.return_since_swap(drive_id)
+            if done is not None:
+                # Review 2026-11-12: an earlier Return recorded the transfer and was interrupted (power cut, process
+                # stopped) before the drive was cleared. Finish it: only files recorded as TRANSFERRED are deleted.
+                deleted, failed = self._finish_return(drive_id, target, done)
+                msg = (f"{label} had already been returned to service ({done.get('copies', 0)} file(s) recorded as "
+                       f"moved to {done.get('destination') or 'the office'}); that return was interrupted and has now "
+                       f"been finished: {deleted} file(s) deleted from the drive.")
+                return True, msg + self._not_deleted_text(failed), {"files": 0, "bytes": 0, "resumed": True,
+                                                                    "not_deleted": len(failed)}
         if swap is None:
             return False, (f"{label} was not taken out with Swap archive drive since it was set up or last returned "
                            "to service, so the office copy cannot be of it. Nothing was deleted. Select the drive "
@@ -865,7 +947,33 @@ class ArchiveWorker:
         detail = {**fields, "checked": True, "label": target.label, "request_id": req.get("request_id"),
                   "files": len(copies), "bytes": total}
         changed = self.al.record_transfer(drive_id, [int(c["copy_id"]) for c in copies], detail) if copies else 0
-        deleted, failed = self._clear_drive(root, [c["path"] for c in copies])
+        deleted, failed = self._finish_return(drive_id, target, None)
+        gb = total / 1e9
+        msg = (f"{label} was returned to service: {changed} file(s) ({gb:.1f} GB) recorded as moved to "
+               f"{fields['destination']} and deleted from the drive.")
+        return True, msg + self._not_deleted_text(failed), {"files": changed, "bytes": total,
+                                                           "not_deleted": len(failed)}
+
+    @staticmethod
+    def _not_deleted_text(failed: list[str]) -> str:
+        if not failed:
+            return ""
+        return (f" {len(failed)} file(s) could not be deleted now (for example a video from the drive is open). "
+                "Close any video from the drive: Sentinel deletes them by itself when it next uses the drive.")
+
+    def _finish_return(self, drive_id: str, target: ExportTarget, resumed: dict[str, Any] | None
+                       ) -> tuple[int, list[str]]:
+        """After the transfer is recorded: delete every copy recorded as TRANSFERRED that is still on the drive
+        (this return's and any left by an earlier one), the index and the playlists; then put the drive back in
+        service. Also finishes a return that was interrupted after its transfer was recorded (``resumed``: that
+        return's event detail). Safe to repeat: a VERIFIED copy is never deleted (review 2026-11-12)."""
+        assert self.al is not None
+        root = Path(target.root)
+        deleted, failed = self._clear_drive(root, self._leftover_paths(drive_id, root))
+        if failed:
+            self._leftover_drives.add(drive_id)
+        else:
+            self._leftover_drives.discard(drive_id)
         self._full_drives.pop(drive_id, None)
         since = self._awaiting_since.get(drive_id)
         self._set_awaiting(drive_id, remove=True)       # in service again: copied to from the next scan
@@ -883,23 +991,91 @@ class ArchiveWorker:
         self._event("audit" if not failed else "warning", "archive_drive_cleared",
                     "Recordings moved to the office were deleted from the archive drive",
                     {"drive_id": drive_id, "deleted": deleted, "not_deleted": failed[:20],
-                     "not_deleted_count": len(failed)})
-        gb = total / 1e9
-        msg = (f"{label} was returned to service: {changed} file(s) ({gb:.1f} GB) recorded as moved to "
-               f"{fields['destination']} and deleted from the drive.")
-        if failed:
-            msg += f" {len(failed)} file(s) could not be deleted; they stay on the drive."
-        return True, msg, {"files": changed, "bytes": total, "not_deleted": len(failed)}
+                     "not_deleted_count": len(failed), **({"resumed": True, "returned_utc": resumed.get(
+                         "returned_utc") or resumed.get("ts_utc")} if resumed is not None else {})})
+        return deleted, failed
 
-    def _clear_drive(self, root: Path, paths: list[str]) -> tuple[int, list[str]]:
+    def _leftover_paths(self, drive_id: str, root: Path) -> list[str]:
+        """Copies recorded as TRANSFERRED (the office has them) that are still on the drive with their recorded
+        size. A path that is also a VERIFIED copy on this drive is never included."""
+        assert self.al is not None
+        verified = {c["path"] for c in self.al.copies_on(drive_id)}
+        out = []
+        for r in self.al.transferred_on(drive_id):
+            if r["path"] in verified:
+                continue
+            try:
+                st = os.lstat(root / r["path"])
+            except OSError:
+                continue
+            if stat.S_ISREG(st.st_mode) and st.st_size == r["size_bytes"]:
+                out.append(r["path"])
+        return out
+
+    def _finish_interrupted_returns(self, scan: DriveScan) -> None:
+        """A drive back from the office whose return to service was recorded but interrupted before the drive was
+        cleared (power cut, process stopped): finish it when the drive is inserted, without a new request."""
+        if not self._awaiting or self.al is None:
+            self._return_checked.clear()
+            return
+        present: dict[str, ExportTarget] = {}
+        for t in scan.candidates:
+            try:
+                present[t.drive_key] = t
+            except TargetError:
+                continue
+        self._return_checked &= set(present)
+        for k, t in sorted(present.items()):
+            if k not in self._awaiting or k in self._return_checked or k == self._swapped_drive:
+                continue
+            try:
+                done = self.al.return_since_swap(k)   # None while the drive's latest swap is newer than any return
+                if done is None or self.al.copies_on(k):   # a VERIFIED copy on it: not a return cut short; leave it
+                    self._return_checked.add(k)
+                    continue
+                deleted, failed = self._finish_return(k, t, done)
+                self._return_checked.add(k)
+            except OSError as exc:            # looked at again at the next scan
+                log.warning("could not finish the interrupted return of %s: %s", k, exc)
+                continue
+            log.info("finished the interrupted return to service of %s: %d deleted, %d not deleted", k, deleted,
+                     len(failed))
+
+    def _clean_leftovers(self, root: Path, drive_id: str) -> None:
+        """On attach (and at each index write while some remain): delete copies recorded as TRANSFERRED that a
+        return could not delete. They are listed in no index, so the office check would flag them NOT LISTED and
+        refuse the drive for ever (review 2026-11-12). Never fatal."""
+        try:
+            paths = self._leftover_paths(drive_id, root)
+            if not paths:
+                self._leftover_drives.discard(drive_id)
+                return
+            deleted, failed = self._clear_drive(root, paths, whole=False)
+        except Exception as exc:  # noqa: BLE001 - leftovers are retried; copying must go on
+            log.warning("could not delete the transferred files left on %s: %s", drive_id, exc)
+            self._leftover_drives.add(drive_id)
+            return
+        if failed:
+            self._leftover_drives.add(drive_id)
+        else:
+            self._leftover_drives.discard(drive_id)
+        self._event("audit" if not failed else "warning", "archive_drive_cleared",
+                    "Recordings moved to the office that were left on the archive drive were deleted",
+                    {"drive_id": drive_id, "deleted": deleted, "not_deleted": failed[:20],
+                     "not_deleted_count": len(failed), "leftovers": True})
+
+    def _clear_drive(self, root: Path, paths: list[str], whole: bool = True) -> tuple[int, list[str]]:
         """Delete the transferred copies, the index and playlists (they describe files no longer there) and
-        files set aside after a failed read-back; then empty folders. Nothing else is touched."""
+        files set aside after a failed read-back; then empty folders. Nothing else is touched.
+        ``whole=False``: only the given transferred copies (the drive is in service; its index stays)."""
         cam = root / layout.ROOT / layout.safe(self.camera_id)
-        targets = [root / x for x in paths] + [root / x for x in self.index_names.values()]
-        targets.append(root / layout.chain_heads_path(self.camera_id))
-        if cam.is_dir():
-            targets += [p for p in cam.rglob("*") if p.is_file() and (
-                p.suffix == layout.PLAYLIST_SUFFIX or layout.SET_ASIDE_MARK in p.name)]
+        targets = [root / x for x in paths]
+        if whole:
+            targets += [root / x for x in self.index_names.values()]
+            targets.append(root / layout.chain_heads_path(self.camera_id))
+            if cam.is_dir():
+                targets += [p for p in cam.rglob("*") if p.is_file() and (
+                    p.suffix == layout.PLAYLIST_SUFFIX or layout.SET_ASIDE_MARK in p.name)]
         deleted, failed = 0, []
         for p in targets:
             try:
@@ -910,7 +1086,7 @@ class ArchiveWorker:
                 continue
             except OSError:
                 failed.append(p.relative_to(root).as_posix())
-        if cam.is_dir():
+        if whole and cam.is_dir():
             for d in sorted((x for x in cam.rglob("*") if x.is_dir()), key=lambda x: len(x.parts), reverse=True):
                 try:
                     d.rmdir()               # only empty folders
@@ -962,9 +1138,19 @@ class ArchiveWorker:
         self._swap.clear()
         self._swap_deadline = None
 
+    def _drop_swap(self, why: str) -> None:
+        """A swap request that cannot be about any drive that will be attached next (review 2026-11-12)."""
+        self._clear_swap()
+        log.info("swap request dropped: %s", why)
+        self._event("info", "archive_swap_dropped", "A swap request was dropped: nothing was prepared for removal",
+                    {"why": why})
+        self._last_publish = float("-inf")
+        self._wake.set()
+
     def _set_awaiting(self, drive_id: str | None, label: str | None = None, *, remove: bool = False) -> None:
-        """Drives taken out with Swap and not yet returned to service (persisted). ``None`` clears all
-        (Cancel swap); ``remove`` clears one drive (returned to service)."""
+        """Drives taken out with Swap and not yet returned to service (persisted). ``None`` clears all (not
+        used by Cancel swap, which releases only drives inserted now); ``remove`` clears one drive (returned to
+        service, or Cancel swap)."""
         if drive_id is None:
             self._awaiting.clear()
             self._awaiting_since.clear()
@@ -1391,6 +1577,8 @@ class ArchiveWorker:
         att = self.att
         assert att is not None and self.al is not None and self.ledger is not None
         root = Path(att.target.root)
+        if reason != "attach" and att.drive_id in self._leftover_drives:
+            self._clean_leftovers(root, att.drive_id)     # before a swap index above all: the office checks it
         try:
             prev = idx.previous_entries(self._read_drive_file(root / self.index_names["json"]),
                                         self._read_drive_file(root / self.index_names["journal"]))

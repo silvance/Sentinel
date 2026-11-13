@@ -238,6 +238,7 @@ def test_enospc_mid_copy_no_partial_claimed_then_next_drive(env: Env) -> None:
     b = make_drive(env.tmp, "B")
     loc.io, loc.target = None, b
     w.io = ArchiveIO(read_chunk=MIB)
+    assert w.step() == "rescan"               # review 2026-11-12: one scan without A is not yet a removal
     drain(w)
     db = [r["drive_id"] for r in env.ledger.query("SELECT drive_id FROM drives") if r["drive_id"] != da][0]
     assert [r["segment_id"] for r in env.ledger.query("SELECT * FROM archive_copies WHERE drive_id=? ORDER BY "
@@ -751,10 +752,13 @@ def test_any_drive_index_names_segments_held_elsewhere(tmp_path: Path) -> None:
         w = env.worker(loc)
         w.step()                           # attach A + first segment to A
         loc.target = b                     # drive changed without a swap (counts as removed from A)
+        assert w.step() == "rescan"        # (review 2026-11-12) one scan without A is not yet a removal
         w.step()                           # attach B + copy segment 2
         loc.target = a
+        assert w.step() == "rescan"
         w.step()                           # back to A: attach + copy segment 3
         loc.target = b
+        assert w.step() == "rescan"
         drain(w)                           # segment 4 to B
         w.request_swap()
         assert w.step() == "swapped"
@@ -887,8 +891,9 @@ def test_alert_rules_and_catalog() -> None:
     assert evaluate_alerts(c) == []
     msg = evaluate_alerts(Condition(state="FULL", backlog_s=0, threshold_s=1, full=True))[0].message
     assert msg == ("Error A-002: The archive drive is full. Recording continues on this system. Do not unplug the "
-                   "archive drive yet: press Swap Archive Drive, wait for SAFE TO REMOVE, then insert an empty "
-                   "archive drive.")
+                   "archive drive yet: press Swap Archive Drive and wait until the screen says which drive to "
+                   "take out and how. Take out only that drive, then insert an empty archive drive.")
+    assert "SAFE TO REMOVE" not in msg       # review 2026-11-12: the deployed copier never shows those words
 
 
 def test_recorder_view_reports_stale_archive_status(tmp_path: Path) -> None:
