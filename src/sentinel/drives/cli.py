@@ -303,6 +303,20 @@ def _copier_running(env: _Env) -> bool:
     return copier_running(read_archive_status(env.cfg.data_path / STATUS_FILE) or {})
 
 
+def _prepared_by_swap(env: _Env, marker: dict[str, Any]) -> bool:
+    """The running copier finished with this drive for a swap and waits for it to be taken out (field report
+    2026-11-13: the swap said to remove it with Windows when its own eject failed, and Safely remove refused it
+    because copying was running). Nothing is written to it any more and the swap is already recorded."""
+    if env.cfg is None:
+        return False
+    from ..archive.status import STATUS_FILE, copier_running, read_archive_status
+
+    doc = read_archive_status(env.cfg.data_path / STATUS_FILE) or {}
+    rem = doc.get("removal")
+    return (copier_running(doc) and isinstance(rem, dict)
+            and rem.get("drive_id") == f"drive_uuid:{marker.get('drive_uuid')}")
+
+
 def cmd_eject(env: _Env, args: argparse.Namespace) -> int:
     from .eject import archive_marker, record_archive_removal, safe_remove
 
@@ -317,7 +331,8 @@ def cmd_eject(env: _Env, args: argparse.Namespace) -> int:
               "remove: it was replaced or has changed. Nothing was removed. Select the drive in the list again and try again.")
         return EXIT_REFUSED
     arc = archive_marker(d, getattr(env, "inspector", None))
-    if arc is not None and _copier_running(env):
+    prepared = arc is not None and _prepared_by_swap(env, arc)
+    if arc is not None and _copier_running(env) and not prepared:
         # Review 2026-11-12: the copier may be writing to it; Swap finishes the copy and records the removal.
         print(f"{_alert_line('M-007')}\n{arc.get('label') or 'This drive'} is an archive drive and archive copying "
               "is running. Press Swap archive drive instead: it finishes the copying and records the drive as "
@@ -329,7 +344,7 @@ def cmd_eject(env: _Env, args: argparse.Namespace) -> int:
         print(f"{_alert_line(exc.code)}\n{exc}")
         return EXIT_REFUSED
     print(res.message if res.ok else f"{_alert_line('M-007')}\n{res.message}")
-    if res.ok and arc is not None:
+    if res.ok and arc is not None and not prepared:      # a swap already recorded the drive as taken out
         print(_record_removal(env, arc, record_archive_removal))
     if args.verbose:
         print(json.dumps(res.steps, indent=2))

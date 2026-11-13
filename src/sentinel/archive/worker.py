@@ -1309,9 +1309,10 @@ class ArchiveWorker:
         elif self._present:
             self._set(ST_REMOVE_MANUALLY, self._removal_text() or "Take out the archive drive.")
         elif os.name == "nt":
-            self._set(ST_REMOVE_MANUALLY, "Do not unplug the archive drive yet. Click the \"Safely Remove "
-                                          "Hardware\" icon near the clock, choose this drive, and unplug it only "
-                                          "after Windows says it is safe to remove.")
+            # Field report 2026-11-13: one place to do it, the button the Drives page shows for this drive.
+            self._set(ST_REMOVE_MANUALLY, "Copying to the archive drive has finished, but it could not be made safe "
+                                          "to remove by itself. Do not unplug it yet: press Safely remove on "
+                                          "Sentinel's Drives page, and unplug it when it says it is safe to remove.")
         else:
             self._set(ST_REMOVE_MANUALLY, "Do not unplug the archive drive yet. Use the \"Eject\" or \"Safely "
                                           "remove\" option for this drive and unplug it only after it has "

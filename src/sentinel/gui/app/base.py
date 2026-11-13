@@ -182,7 +182,7 @@ class OutputLog(QPlainTextEdit):
         self.setObjectName("log")
         self.setReadOnly(True)
         self.setMaximumBlockCount(5000)
-        self.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)   # long messages are read whole
         self.setPlaceholderText("Command output appears here.")
         self.current: Command | None = None
 

@@ -250,6 +250,25 @@ def test_safely_removing_an_archive_drive_while_copying_runs_is_refused(tmp_path
     assert _events(ledger, "archive_swap_ready") == []
 
 
+def test_the_drive_a_swap_prepared_can_be_safely_removed_while_copying_runs(tmp_path: Path, ledger: Ledger,
+                                                                            removals, capsys) -> None:
+    """Field report 2026-11-13: the swap said to remove the drive with Windows (its own eject failed) and Safely
+    remove refused it because copying was running. The swap already recorded it, so nothing is recorded twice."""
+    from sentinel.archive.status import STATUS_FILE
+
+    doc = {"state": "REMOVE_MANUALLY", "heartbeat_epoch": time.time(),
+           "removal": {"drive_id": f"drive_uuid:{UID}", "label": "SENTINEL_4", "safe": False}}
+    (tmp_path / "data" / STATUS_FILE).write_text(json.dumps(doc), encoding="utf-8")
+    arc, insp = _ready_archive()
+    env = EjectEnv(tmp_path, [arc, SYS], insp)
+    assert cli.cmd_eject(env, _eject_args()) == cli.EXIT_OK and removals == ["4"]
+    assert _events(ledger, "archive_swap_ready") == []
+    # Another archive drive than the one prepared is still refused.
+    doc["removal"]["drive_id"] = "drive_uuid:someone-else"
+    (tmp_path / "data" / STATUS_FILE).write_text(json.dumps(doc), encoding="utf-8")
+    assert cli.cmd_eject(env, _eject_args()) == cli.EXIT_REFUSED and removals == ["4"]
+
+
 def test_safely_removing_another_drive_records_nothing(tmp_path: Path, ledger: Ledger, removals) -> None:
     d = foreign_disk(disk_id="4")
     env = EjectEnv(tmp_path, [d, SYS])

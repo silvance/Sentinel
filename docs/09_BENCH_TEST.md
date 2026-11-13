@@ -111,7 +111,7 @@ answers "erase_disabled".
 **Sabrent EC-HD2B: one archive drive at a time.** Taking one disk out of this dual-bay dock
 disconnects both bays until a disk is inserted again (field result 2026-11-11, step 5.5a). Keep only
 the archive drive in use in the dock; keep the next one on the shelf. To swap: **Swap Archive Drive**,
-wait for the page to say what to do, use Windows' **Safely Remove Hardware** (with one disk in the
+wait for the page to say what to do; if it shows **Safely remove SSD_…**, press it (with one disk in the
 dock it does no harm), take the drive out, insert the next one. Erasing and setting up a new drive is
 done the same way: take the archive drive out first, or set new drives up on another day.
 

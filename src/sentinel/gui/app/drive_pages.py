@@ -250,13 +250,17 @@ class DrivesPage(Page):
                                    "made safe to remove but has not been taken out")
         self.resume_btn.setVisible(False)
         self.ack_btn = icon_button("Acknowledge all problems…", "ok", c)
+        # Field report 2026-11-13: when the copier cannot make the swapped drive safe to remove by itself, the
+        # page offers the removal for exactly that drive.
+        self.remove_btn = icon_button("Safely remove", "eject", c)
+        self.remove_btn.setVisible(False)
         # Rarely needed (technical support): behind "More" instead of always on the page.
         self.more_btn = QPushButton(glyph("info", c, 16), " More")
         menu = QMenu(self.more_btn)
         self.arc_status_act = menu.addAction("Archive details")
         self.problems_act = menu.addAction("Copies that could not be checked (A-006)")
         self.more_btn.setMenu(menu)
-        for b in (self.swap_btn, self.resume_btn, self.ack_btn, self.more_btn):
+        for b in (self.swap_btn, self.remove_btn, self.resume_btn, self.ack_btn, self.more_btn):
             row.addWidget(b)
         row.addStretch(1)
         al.addLayout(row)
@@ -311,6 +315,9 @@ class DrivesPage(Page):
         self.problems_act.triggered.connect(lambda: self._arc_cmd(["acknowledge", "--admin-id", _who()],
                                                                   "Archive problems"))
         self.ack_btn.clicked.connect(self._acknowledge)
+        self.remove_btn.clicked.connect(self._remove_swapped)
+        self.remove_btn.setEnabled(ctx.admin)
+        self._removal: dict[str, Any] | None = None
         self.ack_btn.setEnabled(ctx.admin)
         # Swapping is an operator task (every few days): operators ask the archive copier through
         # its request folder; erasing, designating and removing drives stay administrator-only
@@ -360,6 +367,12 @@ class DrivesPage(Page):
         for b in (self.swap_btn, self.more_btn):
             b.setVisible(bool(arc))
         self.ack_btn.setVisible(bool(arc) and "A-006" in codes)
+        rem = arc.get("removal") if arc.get("running") else None
+        # Only when the copier asks for a Windows removal (one drive in the dock). With a second drive in the dock it
+        # says to take the drive out as it is: a removal there could stop the other drive too.
+        self._removal = rem if (isinstance(rem, dict) and not rem.get("safe") and not rem.get("text")
+                                and arc.get("state") == ST_REMOVE_MANUALLY) else None
+        self._update_remove_btn()
         if not arc:
             self.arc_text.setText("Archive copying is off. Turn it on in Settings › Storage.")
             return
@@ -373,6 +386,12 @@ class DrivesPage(Page):
             self.arc_text.setText("Archive copying is not running." + waiting)
             return
         msg = str(arc.get("message") or "")
+        if self._removal is not None:
+            # Only what to do now (field report 2026-11-13: "Drive: none inserted." while it was still plugged in).
+            self.arc_text.setText(str(self._removal.get("text") or msg))
+            return
+        if not isinstance(bk.get("seconds"), (int, float)) or bk.get("seconds", 0) <= 0:
+            backlog = ""                   # "Not yet archived: 0 h" says nothing
         parts = [archive_drives_text(arc), msg] + ([backlog] if backlog and backlog not in msg else [])
         self.arc_text.setText(" ".join(x for x in parts if x))
 
@@ -461,10 +480,33 @@ class DrivesPage(Page):
                     self.table.selectRow(i)
                     break
         self._update_actions()
+        self._update_remove_btn()
         self.problems.setText(("Erasing is blocked: " + "; ".join(self.list.problems)) if self.list.problems else "")
         then, self._after_load = self._after_load, None
         if then is not None:
             then()
+
+    def _swapped_drive(self) -> dict[str, Any] | None:
+        """The drive in the list that the copier prepared for removal and could not make safe by itself."""
+        rem = self._removal
+        if not rem:
+            return None
+        return next((d for d in self.list.drives if d.get("drive_uuid")
+                     and f"drive_uuid:{d['drive_uuid']}" == rem.get("drive_id") and _letters(d)), None)
+
+    def _update_remove_btn(self) -> None:
+        d = self._swapped_drive()
+        self.remove_btn.setVisible(d is not None)
+        if d is not None:
+            self.remove_btn.setText(f" Safely remove {d.get('label') or (self._removal or {}).get('label') or ''}".rstrip())
+            self.swap_btn.setVisible(False)          # the swap is done; this is the next (and only) step
+
+    def _remove_swapped(self) -> None:
+        d = self._swapped_drive()
+        if d is None:
+            self.info("The drive is no longer plugged in.")
+            return
+        self._run_eject(d)
 
     def _update_actions(self) -> None:
         """Only the actions that apply to the selected drive are shown (GUI simplification 2026-11-13)."""
@@ -623,9 +665,13 @@ class DrivesPage(Page):
         if QMessageBox.question(self, "Sentinel", f"Safely remove disk {d['disk_id']}: {d.get('description', '')} "
                                 f"({_what(d)})?") != QMessageBox.StandardButton.Yes:
             return
+        self._run_eject(d)
+
+    def _run_eject(self, d: dict[str, Any]) -> None:
+        name = d.get("label") or f"disk {d['disk_id']}"
         seen = ["--fingerprint", str(d["fingerprint"])] if d.get("fingerprint") else []    # review 2026-11-12
         self.log.run(sentinel_argv("drives", "eject", "--config", self._cfg(), "--disk", str(d["disk_id"]), *seen),
-                     f"Safely remove disk {d['disk_id']}", busy=[self.eject_btn],
+                     f"Safely remove {name}", busy=[self.eject_btn, self.remove_btn],
                      on_done=lambda _c, _cmd: self.list.refresh())
 
 

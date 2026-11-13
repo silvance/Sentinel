@@ -1164,3 +1164,33 @@ def test_drives_list_hides_what_cannot_be_used_and_shows_only_actions_that_apply
     page._poll_drives()
     assert refreshed == [1]
     w.close()
+
+
+def test_the_drive_a_swap_could_not_eject_gets_its_own_safely_remove_button(
+        app: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Field report 2026-11-13: the swap ended with "remove it with Windows"; the page now offers the removal."""
+    from types import SimpleNamespace
+
+    w = _window(app, tmp_path, admin=True)
+    page = w.pages["drives"]
+    monkeypatch.setattr(page.list, "refresh", lambda: None)
+    runs: list[list[str]] = []
+    monkeypatch.setattr(page.log, "run", lambda argv, *a, **k: runs.append(argv))
+    page.list.drives = [{"disk_id": "1", "class": "READY", "role": "archive", "label": "SENTINEL_4",
+                         "drive_uuid": "u4", "fingerprint": "fp4", "size_bytes": 2 * 10**12, "mount_paths": ["E:\\"]}]
+    page._show_drives()
+    arc = {"running": True, "state": "REMOVE_MANUALLY", "heartbeat_epoch": time.time(),
+           "removal": {"drive_id": "drive_uuid:u4", "label": "SENTINEL_4", "safe": False}}
+    page.on_status(SimpleNamespace(doc={"archive": arc}))
+    assert not page.remove_btn.isHidden() and page.remove_btn.text().strip() == "Safely remove SENTINEL_4"
+    assert page.swap_btn.isHidden()
+    page.remove_btn.click()
+    assert runs and runs[0][runs[0].index("--disk") + 1] == "1" and "fp4" in runs[0]
+    page.on_status(SimpleNamespace(doc={"archive": dict(arc, removal={"drive_id": "drive_uuid:u4", "safe": True})}))
+    assert page.remove_btn.isHidden() and not page.swap_btn.isHidden()
+    # Two-bay dock: the copier says to take it out as it is (a removal could stop the other drive): no button.
+    two = dict(arc, state="COPYING", removal={"drive_id": "drive_uuid:u4", "safe": False,
+                                              "text": "SENTINEL_4 is ready to be taken out"})
+    page.on_status(SimpleNamespace(doc={"archive": two}))
+    assert page.remove_btn.isHidden()
+    w.close()

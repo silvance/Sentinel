@@ -36,7 +36,7 @@ ST_ATTENTION, ST_STOPPED = "ATTENTION", "STOPPED"
 STATE_WORDS = {ST_STARTING: "starting", ST_ABSENT: "no drive inserted", ST_UNUSABLE: "drive cannot be used",
                ST_COPYING: "copying", ST_UP_TO_DATE: "up to date", ST_FULL: "drive full, swap it",
                ST_SWAP_PENDING: "preparing for removal", ST_SAFE: "safe to remove",
-               ST_REMOVE_MANUALLY: "remove with Windows", ST_ATTENTION: "needs attention", ST_STOPPED: "stopped"}
+               ST_REMOVE_MANUALLY: "press Safely remove (Drives)", ST_ATTENTION: "needs attention", ST_STOPPED: "stopped"}
 
 
 def state_words(state: str | None) -> str:
