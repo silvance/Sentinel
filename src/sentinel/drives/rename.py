@@ -131,7 +131,7 @@ def rename_drive(root: str | Path, new_name: str, who: str, audit: AuditSink, po
     if expect_uuid is not None and expect_uuid.strip().lower() != uid.lower():
         # Review 2026-11-12: the window's list can be minutes old, and drive letters move between drives.
         raise RenameRefused(f"The drive at {root} is {old}, not the drive that was selected: it was replaced or "
-                            "the drive letters changed. Nothing was changed. Press Refresh list and try again.")
+                            "the drive letters changed. Nothing was changed. Select the drive in the list again and try again.")
     name = check_name(new_name, policy)
     current, pending = _name_records(audit)
     if name == old.upper():

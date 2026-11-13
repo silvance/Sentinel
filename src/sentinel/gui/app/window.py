@@ -8,10 +8,10 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from PySide6.QtCore import QSize, Qt, QTimer
-from PySide6.QtGui import QAction, QActionGroup, QColor, QKeySequence
+from PySide6.QtGui import QAction, QActionGroup, QKeySequence
 from PySide6.QtWidgets import (QApplication, QFileDialog, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
-                               QMainWindow, QMessageBox, QPushButton, QStackedWidget, QToolButton, QVBoxLayout,
-                               QWidget)
+                               QMainWindow, QMessageBox, QPushButton, QStackedWidget, QTabWidget, QToolButton,
+                               QVBoxLayout, QWidget)
 
 from ... import __version__
 from ...config import AppConfig
@@ -57,6 +57,66 @@ def admin_config_problem(cfg_path: Path, cfg: AppConfig) -> str:
 
 TONE_NAME = {Tone.OK: "ok", Tone.INFO: "muted", Tone.WARNING: "warning", Tone.CRITICAL: "critical",
              Tone.NEUTRAL: "muted"}
+
+
+class SettingsHost(Page):
+    """The five settings pages as tabs of one Settings section (GUI simplification 2026-11-13: ten sections in
+    three groups were too many for the person running the laptop). Each tab is still saved on its own."""
+
+    key = "settings"
+    title = "Settings"
+    description = "Each tab is saved on its own; saving restarts the recorder."
+    scrolls = False
+
+    def __init__(self, ctx: Ctx, pages: list[Page], parent: QWidget | None = None) -> None:
+        super().__init__(ctx, parent)
+        self.sub = pages
+        self.tabs = QTabWidget()
+        self.tabs.setDocumentMode(True)
+        for p in pages:
+            p.title_label.hide()
+            p.layout().setContentsMargins(0, 8, 0, 0)
+            self.tabs.addTab(p, p.title)
+        self.body.addWidget(self.tabs, 1)
+        self._active = False
+        self._cur: Page | None = None
+        self.tabs.currentChanged.connect(self._changed)
+
+    def current(self) -> Page:
+        w = self.tabs.currentWidget()
+        assert isinstance(w, Page)
+        return w
+
+    def select(self, key: str) -> None:
+        for i, p in enumerate(self.sub):
+            if p.key == key:
+                self.tabs.setCurrentIndex(i)
+
+    def _changed(self, _i: int) -> None:
+        if not self._active:
+            return
+        new = self.current()
+        if self._cur is not None and self._cur is not new:
+            self._cur.on_hide()
+        self._cur = new
+        new.on_show()
+        new.on_status(self.ctx.read)
+        win = self.window()
+        if hasattr(win, "prefs_path"):
+            save_pref("last_section", new.key, win.prefs_path)
+
+    def on_show(self) -> None:
+        self._active = True
+        self._cur = self.current()
+        self._cur.on_show()
+
+    def on_hide(self) -> None:
+        self._active = False
+        if self._cur is not None:
+            self._cur.on_hide()
+
+    def on_status(self, read) -> None:  # noqa: ANN001
+        self.current().on_status(read)
 
 
 class AppWindow(QMainWindow):
@@ -121,11 +181,9 @@ class AppWindow(QMainWindow):
         return [StatusPage, RecordingsPage, GeneralPage, CameraPage, SchedulePage, MotionPage, StoragePage,
                 DrivesPage, ExportPage, SystemPage]
 
-    # Sections are grouped as in other Windows administration tools.
-    GROUPS = (("Monitor", ("status", "recordings")),
-              ("Settings", ("general", "camera", "schedule", "motion", "storage")),
-              ("Maintenance", ("drives", "export", "system")),
-              ("", ("setup",)))
+    # GUI simplification 2026-11-13: six sections, the daily ones first; the settings pages are tabs of Settings.
+    NAV = ("status", "recordings", "drives", "export", "settings", "system", "setup")
+    SETTINGS_TABS = ("general", "camera", "schedule", "motion", "storage")
 
     def _build(self) -> None:
         from .icons import brand_pixmap, glyph
@@ -192,28 +250,30 @@ class AppWindow(QMainWindow):
 
         classes = {cls.key: cls for cls in self._sections()}
         self._rows: dict[int, str] = {}
-        for group, keys in self.GROUPS:
-            present = [k for k in keys if k in classes]
-            if not present:
+        self.settings_host: SettingsHost | None = None
+        subs = [k for k in self.SETTINGS_TABS if k in classes]
+        for k in self.NAV:
+            if k == "settings":
+                if not subs:
+                    continue
+                pages = []
+                for sk in subs:
+                    self.pages[sk] = classes[sk](self.ctx)
+                    pages.append(self.pages[sk])
+                widget: Page = SettingsHost(self.ctx, pages)
+                self.settings_host = widget
+                title = "Settings"
+            elif k in classes:
+                widget = classes[k](self.ctx)
+                self.pages[k] = widget
+                title = classes[k].title
+            else:
                 continue
-            if group:
-                head = QListWidgetItem(group.upper())
-                head.setFlags(Qt.ItemFlag.NoItemFlags)
-                hf = head.font()
-                hf.setPointSizeF(hf.pointSizeF() - 1)
-                hf.setBold(True)
-                head.setFont(hf)
-                head.setForeground(QColor(p.text2))
-                self.nav.addItem(head)
-            for k in present:
-                cls = classes[k]
-                page = cls(self.ctx)
-                self.pages[k] = page
-                self.stack.addWidget(page)
-                item = QListWidgetItem(glyph(k if k != "setup" else "system", p.text, 18), cls.title)
-                item.setData(Qt.ItemDataRole.UserRole, k)
-                self.nav.addItem(item)
-                self._rows[self.nav.count() - 1] = k
+            self.stack.addWidget(widget)
+            item = QListWidgetItem(glyph(k if k != "setup" else "system", p.text, 18), title)
+            item.setData(Qt.ItemDataRole.UserRole, k)
+            self.nav.addItem(item)
+            self._rows[self.nav.count() - 1] = k
         self.nav.currentRowChanged.connect(self._nav_changed)
         last = load_pref("last_section", None, self.prefs_path)
         self.navigate(last if isinstance(last, str) and last in self.pages else next(iter(self.pages)))
@@ -307,6 +367,9 @@ class AppWindow(QMainWindow):
 
     # ------------------------------------------------------------------ navigation
     def navigate(self, key: str) -> None:
+        if key in self.SETTINGS_TABS and self.settings_host is not None:
+            self.settings_host.select(key)
+            key = "settings"
         for row, k in self._rows.items():
             if k == key:
                 self.nav.setCurrentRow(row)
@@ -316,17 +379,20 @@ class AppWindow(QMainWindow):
         key = self._rows.get(row)
         if key is None:
             return
-        page = self.pages[key]
+        page = self.settings_host if key == "settings" else self.pages[key]
+        assert page is not None
         old = self.stack.currentWidget()
         if isinstance(old, Page) and old is not page:
             old.on_hide()
         self.stack.setCurrentWidget(page)
-        save_pref("last_section", key, self.prefs_path)
+        save_pref("last_section", page.current().key if isinstance(page, SettingsHost) else key, self.prefs_path)
         page.on_show()
         page.on_status(self.ctx.read)
 
     def current_page(self) -> Page | None:
         w = self.stack.currentWidget()
+        if isinstance(w, SettingsHost):
+            return w.current()
         return w if isinstance(w, Page) else None
 
     # ------------------------------------------------------------------ window size

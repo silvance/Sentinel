@@ -96,8 +96,7 @@ def _drain(app: QApplication, seconds: float = 0.2) -> None:
 def test_every_section_opens(app: QApplication, tmp_path: Path) -> None:
     w = _window(app, tmp_path, admin=True)
     names = w.section_names()
-    assert names == ["Status", "Recordings", "General", "Camera", "Schedule", "Motion", "Storage", "Drives", "Export",
-                     "System"]
+    assert names == ["Status", "Recordings", "Drives", "Export", "Settings", "System"]   # simplified 2026-11-13
     for key in ("recordings", "general", "camera", "schedule", "motion", "storage", "export", "system", "status"):
         w.navigate(key)
         app.processEvents()
@@ -419,7 +418,7 @@ def test_setup_in_the_window_without_a_camera(app: QApplication, tmp_path: Path,
     assert configured == [_layout(tmp_path).config_file]
     cfg = load_config(configured[0])
     assert cfg.camera.pending and cfg.camera.name == "Gate"
-    assert len(w.section_names()) == 10 and w.ctx.cfg is not None                    # the full window now
+    assert len(w.section_names()) == 6 and w.ctx.cfg is not None                    # the full window now
     w.close()
 
 
@@ -1116,4 +1115,52 @@ def test_the_schedule_page_never_rewrites_times_or_dates_it_cannot_show(app, tmp
     page.load()
     assert "cannot be shown here" in page.result.text()
     assert page.tables()["schedule"]["dates"][0]["start"] == "2026-12-24 18:00:30"   # kept exactly
+    w.close()
+
+
+def test_settings_pages_are_tabs_of_one_section(app: QApplication, tmp_path: Path) -> None:
+    """GUI simplification 2026-11-13: six sections; links to a settings page open its tab."""
+    w = _window(app, tmp_path, admin=True)
+    w.navigate("motion")
+    app.processEvents()
+    assert w.current_page().key == "motion" and w.nav.currentItem().text() == "Settings"
+    w.settings_host.select("camera")
+    assert w.current_page().key == "camera"
+    w.navigate("status")
+    assert w.current_page().key == "status"
+    w.close()
+
+
+def test_drives_list_hides_what_cannot_be_used_and_shows_only_actions_that_apply(
+        app: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Field report 2026-11-13: the computer's own disk and an empty card reader were listed, and every button
+    was shown whatever drive was selected."""
+    w = _window(app, tmp_path, admin=True)
+    page = w.pages["drives"]
+    monkeypatch.setattr(page.list, "refresh", lambda: None)
+    system = {"disk_id": "0", "class": "UNSUITABLE", "reasons": ["system_disk"], "size_bytes": 5 * 10**11,
+              "mount_paths": ["C:\\"]}
+    reader = {"disk_id": "2", "class": "UNSUITABLE", "reasons": ["not_ready"], "size_bytes": 0}
+    archive = {"disk_id": "1", "class": "READY", "role": "archive", "label": "SSD_1", "size_bytes": 2 * 10**12,
+               "mount_paths": ["E:\\"], "serial": "V469"}
+    blank = {"disk_id": "3", "class": "BLANK", "can_prepare": True, "size_bytes": 10**12, "mount_paths": ["F:\\"]}
+    page.list.drives = [system, archive, reader, blank]
+    page._show_drives()
+    assert page.table.rowCount() == 2 and page.table.item(0, 0).text() == "E:"
+    assert page.table.item(0, 1).text() == "SSD_1" and page.table.item(0, 2).text() == "archive drive"
+    assert all(b.isHidden() for b in page.action_btns)            # nothing selected: no actions
+    page.table.selectRow(0)
+    visible = {b.text().strip() for b in page.action_btns if not b.isHidden()}
+    assert visible == {"Return to service…", "Rename…", "Safely remove…"}
+    page.table.selectRow(1)
+    assert {b.text().strip() for b in page.action_btns if not b.isHidden()} == {"Erase and set up…", "Safely remove…"}
+    page.show_all.setChecked(True)
+    assert page.table.rowCount() == 4
+    # A drive plugged in while the page is open: the list is read again by itself.
+    refreshed: list[int] = []
+    monkeypatch.setattr(page.list, "refresh", lambda: refreshed.append(1))
+    monkeypatch.setattr(drive_pages, "drive_letters_now", lambda: frozenset({"C:\\", "Z:\\"}))
+    page._poll_drives()
+    page._poll_drives()
+    assert refreshed == [1]
     w.close()

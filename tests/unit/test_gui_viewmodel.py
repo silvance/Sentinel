@@ -499,3 +499,25 @@ def test_a_recorder_stopped_by_a_settings_error_shows_that_error_not_x001(tmp_pa
     assert r.kind is ReadKind.OK
     v = build_dashboard(r, tz=TZ)
     assert v.banner is None or v.banner.code != "X-001"
+
+
+def test_open_gap_ends_where_the_new_run_started() -> None:
+    """Field report 2026-11-13: after a restart the gap stays open until the first new file is sealed; the
+    table said "not recorded ... now" for minutes while the recorder was recording again."""
+    w0, now = NOW - 3600, NOW
+    segs = [_seg(w0, now - 240)]
+    gaps = [{"start_utc": iso_utc(now - 240), "end_utc": None, "reason": "graceful_stop"}]
+    tl = build_timeline(segs, gaps, w0, now, live=True, live_slack_s=900, live_since=now - 150)
+    gap, live = tl.spans[-2], tl.spans[-1]
+    assert gap.kind is SpanKind.GAP and not gap.ongoing and gap.seconds == pytest.approx(90)
+    assert live.kind is SpanKind.LIVE and live.ongoing and live.seconds == pytest.approx(150)
+    # Not recording: the gap stays open to now, whatever the run start says.
+    tl = build_timeline(segs, gaps, w0, now, live=False, live_slack_s=900, live_since=now - 150)
+    assert tl.spans[-1].kind is SpanKind.GAP and tl.spans[-1].ongoing
+
+
+def test_recording_since_is_unknown_while_a_gap_is_open() -> None:
+    from sentinel.gui.ledger_view import LedgerSnapshot, recording_since
+
+    assert recording_since(LedgerSnapshot(True, NOW, NOW - 600, NOW - 9000)) == NOW - 600
+    assert recording_since(LedgerSnapshot(True, NOW, NOW - 600, NOW - 9000, open_gap_start_epoch=NOW - 200)) is None

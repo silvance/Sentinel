@@ -199,7 +199,7 @@ def cmd_prepare(env: _Env, args: argparse.Namespace, *, reader: Callable[[str], 
     seen_class = (getattr(args, "expect_class", None) or "").strip().upper()
     if (seen_fp and seen_fp != c.disk.identity.fingerprint()) or (seen_class and seen_class != str(c.drive_class)):
         print(f"\n{_alert_line('M-006')}\nDisk {args.disk} is not the drive that was shown when you confirmed: it "
-              f"was replaced or has changed (now: {c.message}). Nothing was erased. Press Refresh list, check "
+              f"was replaced or has changed (now: {c.message}). Nothing was erased. Select the drive again, check "
               "the drive and try again.")
         return EXIT_REFUSED
 
@@ -314,7 +314,7 @@ def cmd_eject(env: _Env, args: argparse.Namespace) -> int:
     seen_fp = (getattr(args, "fingerprint", None) or "").strip()
     if seen_fp and seen_fp != d.identity.fingerprint():
         print(f"{_alert_line('M-007')}\nDisk {args.disk} is not the drive that was shown when you chose Safely "
-              "remove: it was replaced or has changed. Nothing was removed. Press Refresh list and try again.")
+              "remove: it was replaced or has changed. Nothing was removed. Select the drive in the list again and try again.")
         return EXIT_REFUSED
     arc = archive_marker(d, getattr(env, "inspector", None))
     if arc is not None and _copier_running(env):

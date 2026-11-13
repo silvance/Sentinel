@@ -301,3 +301,19 @@ def test_a_swapped_drive_still_plugged_in_is_not_returned(env) -> None:  # noqa:
     res = _result(cfg)
     assert not res["ok"] and "has not been taken out since" in res["message"]
     assert _states(led) == {"VERIFIED": 2}
+
+
+def test_a_long_return_keeps_the_status_heartbeat_fresh(env, monkeypatch) -> None:  # noqa: ANN001
+    """Field report 2026-11-13: while a full drive was being returned to service the window said "Archive copying
+    is not running" (A-007): checking and deleting every file wrote no status heartbeat."""
+    cfg, led, drive, w = env
+    add_synthetic_run(led, cfg, 3, SEG, sidecars=True)
+    drain(w)
+    _to_office_and_back(w, drive)
+    beats: list[int] = []
+    real = w._heartbeat
+    monkeypatch.setattr(w, "_heartbeat", lambda: beats.append(1) or real())
+    _request(cfg, drive)
+    w.step()
+    assert _result(cfg)["ok"]
+    assert len(beats) >= 6 + 6          # once per file checked and once per file deleted (and more)

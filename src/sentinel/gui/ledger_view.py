@@ -93,6 +93,7 @@ class LedgerSnapshot:
     last_saved_epoch: float | None = None
     last_gap_end_epoch: float | None = None
     first_segment_epoch: float | None = None
+    open_gap_start_epoch: float | None = None   # a gap not closed yet (the recorder restarted, no new file yet)
     error: str | None = None             # administrator only
 
 
@@ -108,14 +109,21 @@ def snapshot(db_path: Path, camera_id: str) -> LedgerSnapshot:
             ends = [e for e in (_ep(g["end_utc"]) for g in gaps) if e is not None]
             first = led.query("SELECT start_utc FROM segments WHERE camera_id=? AND start_utc IS NOT NULL "
                               "ORDER BY rowid LIMIT 1", (camera_id,))
+            op = led.query("SELECT start_utc FROM recording_gaps WHERE camera_id=? AND end_utc IS NULL "
+                           "ORDER BY gap_id DESC LIMIT 1", (camera_id,))
             return LedgerSnapshot(True, last, max(ends) if ends else None,
-                                  _ep(first[0]["start_utc"]) if first else None)
+                                  _ep(first[0]["start_utc"]) if first else None,
+                                  open_gap_start_epoch=_ep(op[0]["start_utc"]) if op else None)
     except sqlite3.Error as exc:
         return LedgerSnapshot(False, error=str(exc))
 
 
 def recording_since(snap: LedgerSnapshot) -> float | None:
-    """Start of the current uninterrupted stretch: the end of the latest gap, else the first footage."""
+    """Start of the current uninterrupted stretch: the end of the latest gap, else the first footage. None while a
+    gap is still open (field report 2026-11-13: "Recording for 5 min (since 15:35)" after a restart at 15:38; the
+    Status page then uses the recorder's own run start)."""
+    if snap.open_gap_start_epoch is not None and (snap.last_gap_end_epoch or 0) <= snap.open_gap_start_epoch:
+        return None
     return snap.last_gap_end_epoch or snap.first_segment_epoch
 
 
@@ -196,7 +204,7 @@ def _overlap(a0: float, a1: float, b0: float, b1: float) -> float:
 
 def build_timeline(segments: list[dict[str, Any]], gaps: list[dict[str, Any]], window_start: float,
                    now: float, live: bool, live_slack_s: float, merge_tol_s: float = 2.0,
-                   min_gap_s: float = 1.0) -> Timeline:
+                   min_gap_s: float = 1.0, live_since: float | None = None) -> Timeline:
     """Recorded spans vs. gaps in [window_start, now].
 
     * recorded = union of segment intervals (corrupt segments are "damaged"), minus closed
@@ -204,7 +212,10 @@ def build_timeline(segments: list[dict[str, Any]], gaps: list[dict[str, Any]], w
     * every uncovered interval becomes a gap; its reason is the ledger gap row overlapping it most;
     * an uncovered tail ending at ``now`` while the recorder reports recording, with no open gap,
       and shorter than ``live_slack_s`` is "being recorded" (the current segment is not saved yet);
-    * uncovered time no gap row explains is "no information" (never presented as recorded).
+    * uncovered time no gap row explains is "no information" (never presented as recorded);
+    * ``live_since`` (the recorder's current run start, while it reports recording): a gap still open in the ledger
+      ends there. Field report 2026-11-13: after a restart the gap stays open until the first new file is sealed,
+      so the table said "not recorded ... now" for minutes while recording was going on.
     """
     def clip(a: float, b: float) -> tuple[float, float] | None:
         a, b = max(a, window_start), min(b, now)
@@ -228,6 +239,8 @@ def build_timeline(segments: list[dict[str, Any]], gaps: list[dict[str, Any]], w
         is_open = g.get("end_utc") is None
         if a is None:
             continue
+        if is_open and live and live_since is not None and a < live_since <= now:
+            b, is_open = live_since, False
         if b is None:
             b = now if is_open else a
         c = clip(a, b)
@@ -249,6 +262,10 @@ def build_timeline(segments: list[dict[str, Any]], gaps: list[dict[str, Any]], w
         cursor = max(cursor, b)
     if cursor < now:
         holes.append((cursor, now))
+    if live and live_since is not None and holes:
+        a, b = holes[-1]
+        if a < live_since < b and b >= now - 1e-6:       # the tail: not recorded until the run started, then live
+            holes[-1:] = [(a, live_since), (live_since, b)]
 
     spans: list[Span] = [Span(a, b, SpanKind.RECORDED) for a, b in recorded]
     spans += [Span(a, b, SpanKind.DAMAGED, reason_words("corrupt_segment")) for a, b in damaged]
@@ -293,7 +310,7 @@ def motion_periods(rows: list[dict[str, Any]], camera_id: str, window_start: flo
 
 
 def load_timeline(db_path: Path, camera_id: str, now: float, *, hours: float = 24.0, live: bool = False,
-                  live_slack_s: float = 600.0) -> Timeline:
+                  live_slack_s: float = 600.0, live_since: float | None = None) -> Timeline:
     start = now - hours * 3600.0
     lo, hi = iso_utc(start), iso_utc(now)
     try:
@@ -311,7 +328,7 @@ def load_timeline(db_path: Path, camera_id: str, now: float, *, hours: float = 2
                 "SELECT detail FROM events WHERE code='motion_period' AND ts_utc >= ?", (iso_utc(start - 600.0),))]
     except sqlite3.Error:
         return Timeline(start, now, (), available=False)
-    tl = build_timeline(segs, gaps, start, now, live, live_slack_s)
+    tl = build_timeline(segs, gaps, start, now, live, live_slack_s, live_since=live_since)
     return replace(tl, motion=motion_periods(motion, camera_id, start, now))
 
 

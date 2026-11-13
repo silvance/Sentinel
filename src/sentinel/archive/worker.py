@@ -931,6 +931,7 @@ class ArchiveWorker:
                            "again (into a new folder)."), {"copied_after_swap": len(newer)}
         bad = []
         for c in copies:
+            self._heartbeat()      # field report 2026-11-13: a long return showed "Archive copying is not running"
             try:
                 size = (root / c["path"]).stat().st_size
             except FileNotFoundError:
@@ -1002,6 +1003,7 @@ class ArchiveWorker:
         verified = {c["path"] for c in self.al.copies_on(drive_id)}
         out = []
         for r in self.al.transferred_on(drive_id):
+            self._heartbeat()
             if r["path"] in verified:
                 continue
             try:
@@ -1078,6 +1080,7 @@ class ArchiveWorker:
                     p.suffix == layout.PLAYLIST_SUFFIX or layout.SET_ASIDE_MARK in p.name)]
         deleted, failed = 0, []
         for p in targets:
+            self._heartbeat()
             try:
                 os.chmod(p, stat.S_IWRITE | stat.S_IREAD)    # copies are sealed read-only
                 p.unlink()

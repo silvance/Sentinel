@@ -255,7 +255,7 @@ def _cmd_return(args: argparse.Namespace) -> int:
         # Review 2026-11-12: the window names the drive the person confirmed; another drive now at that letter
         # (replugged, letters changed) is never cleared.
         print(f"The drive at {args.drive} ({marker.get('label') or 'unnamed'}) is not the drive you selected. "
-              "Nothing was deleted. Press Refresh list and select the drive again.", file=sys.stderr)
+              "Nothing was deleted. Select the drive in the list again.", file=sys.stderr)
         return 2
     status_path = cfg.data_path / STATUS_FILE
     if not copier_running(read_archive_status(status_path) or {}):

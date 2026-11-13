@@ -36,7 +36,7 @@ administrator"** in `C:\Program Files\Sentinel`. `CFG` means `C:\ProgramData\Sen
 | 1.5 | System › Service: enter the time server if one exists, press **Install / repair service…**, read the plan in the output, confirm. | Every step OK; both services (recorder, archive) started. | |
 | 1.6 | `net localgroup "Sentinel Operators" <operator account> /add` for each operator account (Command Prompt as administrator). | Command completed successfully. | |
 | 1.7 | Sign in as an operator and open Sentinel. | Window title ends "[read-only]"; settings fields greyed; **Unlock settings…** shown. | |
-| 1.8 | If the camera was added later: Camera page, fill in the camera, **Test connection**, **Save and restart recorder**. | "The camera answered: …"; "Saved. The recorder was restarted with the new settings." | |
+| 1.8 | If the camera was added later: Settings › Camera, fill in the camera, **Test connection**, **Save and restart recorder**. | "The camera answered: …"; "Saved. The recorder was restarted with the new settings." | |
 | 1.9 | System › Service › **Check service** (or `SentinelService.exe status --config CFG`). | Service RUNNING; folders OK; credentials "DPAPI-protected; permissions: OK"; time synchronisation "yes" (or noted why not). | |
 
 ## 2. The operator screen
@@ -105,7 +105,7 @@ show "hidden by the dock" in the Serial column, ask for `ERASE` instead, and ref
 another connected drive that could be erased also hides its serial and has the same model and size
 (or is an identical empty disk); a set-up archive drive next to it is fine. Also in those builds:
 after ticking "Allow 'Erase and set up'"
-in Settings › Storage, press **Refresh list** on the Drives page before erasing, or the page still
+in Settings › Storage, press **Refresh** on the Drives page before erasing, or the page still
 answers "erase_disabled".
 
 **Sabrent EC-HD2B: one archive drive at a time.** Taking one disk out of this dual-bay dock
@@ -124,7 +124,7 @@ sticks. Next trial: two 2 TB external SSDs. Before relying on them:
 
 | # | Step | Expected | Result |
 |---|---|---|---|
-| U.1 | Plug in one SSD; Drives › **Refresh list**. | Shown as USB with a **real serial** in the Serial column (not zeros, not "hidden by the dock"). If it shows "hidden by the dock", it is used like the dock (one at a time). If the drive already holds files it is "contains other files": erasing needs an administrator and the serial's last characters; first make sure nothing on it is needed. A drive locked with BitLocker To Go or vendor encryption is not usable until that is removed. | |
+| U.1 | Plug in one SSD and open Drives (the list updates by itself). | Shown as USB with a **real serial** in the Serial column (not zeros, not "hidden by the dock"). If it shows "hidden by the dock", it is used like the dock (one at a time). If the drive already holds files it is "contains other files": erasing needs an administrator and the serial's last characters; first make sure nothing on it is needed. A drive locked with BitLocker To Go or vendor encryption is not usable until that is removed. | |
 | U.2 | **Erase and set up…** that SSD; then the second one. | Each becomes SSD_n (from 0.3.11; SENTINEL_n before), set up, ready. Write the name on a sticker on the drive. | |
 | U.3 | With one SSD as archive drive: steps 5.4 to 5.6 (wait for the first full hour, folders, Swap with Safely Remove, playlists). | As in 5.4 to 5.6. | |
 | U.4 | Both SSDs plugged in (two USB ports): step 5.5a, then take out only the full one (Swap first). | The other SSD stays connected and copying carries on; no "removed without preparing". Only then use two drives at once. | |
@@ -140,7 +140,7 @@ sticks. Next trial: two 2 TB external SSDs. Before relying on them:
 
 | # | Step | Expected | Result |
 |---|---|---|---|
-| 5.1 | Drives page › **Refresh list**; identify the archive drive **by serial number** (if the dock hides it: by model and size, with only that drive in the dock). | Only the external drive is offered; internal drives UNSUITABLE. | |
+| 5.1 | Drives page (tick **Show all drives**); identify the archive drive **by serial number** (if the dock hides it: by model and size, with only that drive in the dock). | Only the external drive is offered; internal drives UNSUITABLE. | |
 | 5.2 | Select it › **Erase and set up…**, enter your name and the serial's last characters (or `ERASE` when the list says the dock hides the serial). | With the dock test passed (`erase_enabled = true`): drive prepared; audit entry. Otherwise: refused with M-010 "Nothing was erased" — record it and skip to section 6. | |
 | 5.3 | Select it › **Use as archive drive…** (needs the drive prepared in 5.2). | Designated. | |
 | 5.4 | Wait until the first recording file is finished (files end on the hour; with 15- or 30-minute files at the next quarter or half hour), then Drives › **Archive details**. | Copying, then up to date; copies verified. On the drive: `Sentinel\<camera>\<date>\` holds only `.ts` files, `Fingerprints\` their `.framehash.txt`, `Playlists\` one `.m3u` per day. | |

@@ -23,7 +23,8 @@ GLYPHS = {
     "storage": "\ueda2",     # HardDrive
     "drives": "\ue88e",      # USB
     "export": "\uede1",      # Export
-    "system": "\ue713",      # Setting
+    "system": "\ue7f8",      # DeviceLaptopNoPic (the recorder computer)
+    "settings": "\ue713",    # Setting
     "ok": "\ue73e",          # CheckMark
     "warning": "\ue7ba",     # Warning
     "critical": "\uea39",    # ErrorBadge

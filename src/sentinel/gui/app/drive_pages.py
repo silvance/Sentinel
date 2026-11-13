@@ -12,10 +12,10 @@ import getpass
 import json
 from typing import Any
 
-from PySide6.QtCore import QDate
+from PySide6.QtCore import QDate, QTimer
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDateEdit, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
-                               QGroupBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMessageBox, QPushButton,
-                               QVBoxLayout)
+                               QGroupBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMenu, QMessageBox,
+                               QPushButton, QVBoxLayout)
 
 from .. import textfmt as tf
 from ...archive.status import ST_REMOVE_MANUALLY, ST_SAFE, ST_SWAP_PENDING
@@ -23,6 +23,7 @@ from ...drives.classify import evidence_why
 from ...drives.model import HIDDEN_SERIAL_WORD
 from ..ledger_view import load_exports
 from .base import CommandPanel, OutputLog, Page, ReadOnlyBar, capped, fill, icon_button, muted, selected_data, table
+from .icons import glyph
 from .procs import Command, sentinel_argv
 
 CLASS_WORDS = {"READY": "set up, ready to use", "SENTINEL_EVIDENCE": "holds Sentinel recordings (never erased)",
@@ -43,8 +44,30 @@ def _what(d: dict[str, Any]) -> str:
     if d.get("class") == "FOREIGN_DATA" and "unknown_contents" in (d.get("reasons") or []):
         words = "contents unknown"           # Windows cannot read it (e.g. a new, never-used drive)
     if role:
-        return f"{role} drive {d.get('label') or ''}".strip() + f" — {words}"
+        # GUI simplification 2026-11-13: the name has its own column; "set up, ready to use" goes without saying.
+        return f"{role} drive" + ("" if d.get("class") == "READY" else f" — {words}")
     return words
+
+
+# Drives that can never be used here (the computer's own disk, the recording storage, internal disks, an empty
+# card reader) are not listed unless "Show all drives" is ticked (GUI simplification 2026-11-13).
+NEVER_USABLE = {"system_disk", "recording_storage", "page_file", "not_external"}
+
+
+def is_noise(d: dict[str, Any]) -> bool:
+    if d.get("class") != "UNSUITABLE" or d.get("role"):
+        return False
+    return bool(NEVER_USABLE & set(d.get("reasons") or [])) or not d.get("size_bytes")
+
+
+def drive_letters_now() -> frozenset[str]:
+    """The drive letters Windows shows now (cheap): a change means a drive was plugged in or taken out."""
+    import os
+
+    try:
+        return frozenset(os.listdrives())        # Windows, Python 3.12+
+    except (AttributeError, OSError):
+        return frozenset()
 
 
 def _letters(d: dict[str, Any]) -> list[str]:
@@ -226,24 +249,35 @@ class DrivesPage(Page):
         self.resume_btn.setToolTip("Stop the swap and keep copying to this drive; or keep using a drive that was "
                                    "made safe to remove but has not been taken out")
         self.resume_btn.setVisible(False)
-        self.arc_status_btn = icon_button("Archive details", "info", c)
-        self.problems_btn = icon_button("Archive problems", "warning", c)
-        self.problems_btn.setToolTip("List copies on archive drives that could not be verified (A-006)")
         self.ack_btn = icon_button("Acknowledge all problems…", "ok", c)
-        for b in (self.swap_btn, self.resume_btn, self.arc_status_btn, self.problems_btn, self.ack_btn):
+        # Rarely needed (technical support): behind "More" instead of always on the page.
+        self.more_btn = QPushButton(glyph("info", c, 16), " More")
+        menu = QMenu(self.more_btn)
+        self.arc_status_act = menu.addAction("Archive details")
+        self.problems_act = menu.addAction("Copies that could not be checked (A-006)")
+        self.more_btn.setMenu(menu)
+        for b in (self.swap_btn, self.resume_btn, self.ack_btn, self.more_btn):
             row.addWidget(b)
         row.addStretch(1)
         al.addLayout(row)
         self.body.addWidget(arc)
 
-        box = QGroupBox("Drives connected to this computer")
+        box = QGroupBox("Drives plugged in")
         bl = QVBoxLayout(box)
-        self.table = table(["Disk", "What it is", "Size", "Connection", "Model", "Serial", "Letters", "Notes"])
+        self.table = table(["Drive", "Name", "What it is", "Size", "Model", "Serial number"])
+        self.table.itemSelectionChanged.connect(self._update_actions)
         bl.addWidget(self.table)
+        self.hint = muted()
+        bl.addWidget(self.hint)
         self.problems = muted()
         bl.addWidget(self.problems)
         row = QHBoxLayout()
-        self.refresh_btn = icon_button("Refresh list", "refresh", c)
+        # The list follows drives being plugged in and taken out by itself; this stays for technical support.
+        self.refresh_btn = icon_button("Refresh", "refresh", c)
+        self.refresh_btn.setToolTip("Look for drives again (the list also updates by itself)")
+        self.show_all = QCheckBox("Show all drives")
+        self.show_all.setToolTip("Also list the computer's own disks and card readers with no card in them")
+        self.show_all.toggled.connect(lambda _on: self._show_drives())
         self.erase_btn = icon_button("Erase and set up…", "erase", c)
         self.designate_btn = icon_button("Use as archive drive…", "drives", c)
         self.eject_btn = icon_button("Safely remove…", "eject", c)
@@ -253,10 +287,12 @@ class DrivesPage(Page):
         self.rename_btn = icon_button("Rename…", "edit", c)
         self.rename_btn.setToolTip("Give a Sentinel drive the permanent name on its sticker, e.g. SSD_1. "
                                    "Its recordings stay; the rename is recorded.")
-        for b in (self.refresh_btn, self.erase_btn, self.designate_btn, self.return_btn, self.rename_btn,
-                  self.eject_btn):
+        self.action_btns = (self.erase_btn, self.designate_btn, self.return_btn, self.rename_btn, self.eject_btn)
+        for b in self.action_btns:
             row.addWidget(b)
         row.addStretch(1)
+        row.addWidget(self.show_all)
+        row.addWidget(self.refresh_btn)
         bl.addLayout(row)
         self.body.addWidget(box, 2)
         self.log = OutputLog()
@@ -271,9 +307,9 @@ class DrivesPage(Page):
         self.rename_btn.clicked.connect(self._rename)
         self.swap_btn.clicked.connect(self._swap)
         self.resume_btn.clicked.connect(self._resume)
-        self.arc_status_btn.clicked.connect(lambda: self._arc("status"))
-        self.problems_btn.clicked.connect(lambda: self._arc_cmd(["acknowledge", "--admin-id", _who()],
-                                                                "Archive problems"))
+        self.arc_status_act.triggered.connect(lambda: self._arc("status"))
+        self.problems_act.triggered.connect(lambda: self._arc_cmd(["acknowledge", "--admin-id", _who()],
+                                                                  "Archive problems"))
         self.ack_btn.clicked.connect(self._acknowledge)
         self.ack_btn.setEnabled(ctx.admin)
         # Swapping is an operator task (every few days): operators ask the archive copier through
@@ -288,11 +324,32 @@ class DrivesPage(Page):
                 b.setToolTip("Needs an administrator on this computer (no operator request folder is set up)")
         self._after_load: Any = None
         self._arc_running = True      # until the first status arrives; the command itself checks too
+        self._loaded_once = False
+        self._letters = drive_letters_now()
+        # Field report 2026-11-13: the list stayed empty until Refresh list was pressed. It now follows drives being
+        # plugged in or taken out by itself while the page is open.
+        self.watch = QTimer(self)
+        self.watch.setInterval(2000)
+        self.watch.timeout.connect(self._poll_drives)
+        self._update_actions()
 
     def on_show(self) -> None:
         # Always re-read: a drive may have been plugged in, or a setting (such as allowing erasing)
         # changed since the page was last open. Field report 2026-11-10: the list kept 'erase_disabled'.
+        if not self._loaded_once:
+            fill(self.table, [], empty="Looking for drives…")
+        self._letters = drive_letters_now()
         self.list.refresh()
+        self.watch.start()
+
+    def on_hide(self) -> None:
+        self.watch.stop()
+
+    def _poll_drives(self) -> None:
+        now = drive_letters_now()
+        if now != self._letters:
+            self._letters = now
+            self.list.refresh()
 
     def on_status(self, read) -> None:  # noqa: ANN001
         arc = ((read.doc or {}).get("archive") or {}) if read is not None else {}
@@ -300,20 +357,23 @@ class DrivesPage(Page):
         self.resume_btn.setVisible(swap_under_way(arc))
         # Only the actions that apply now (GUI simplification 2026-11-13).
         codes = {str(a.get("code")) for a in ((read.doc or {}).get("alerts") or []) if isinstance(a, dict)}             if read is not None else set()
-        for b in (self.swap_btn, self.arc_status_btn, self.problems_btn):
+        for b in (self.swap_btn, self.more_btn):
             b.setVisible(bool(arc))
         self.ack_btn.setVisible(bool(arc) and "A-006" in codes)
         if not arc:
-            self.arc_text.setText("Archive copying is off. Turn it on in Storage › Archive drive.")
+            self.arc_text.setText("Archive copying is off. Turn it on in Settings › Storage.")
             return
         bk = arc.get("backlog") or {}
-        msg = str(arc.get("message") or "")
         backlog = str(bk.get("text") or "")
         if not arc.get("running"):
-            drive = "Drive: unknown (archive copying is not running)."
-        else:
-            drive = archive_drives_text(arc)
-        parts = [drive, msg] + ([backlog] if backlog and backlog not in msg else [])
+            # Field report 2026-11-13: "Drive: unknown (archive copying is not running). Archive copying is not
+            # running. Not yet archived: 0 h." said the same thing twice.
+            secs = bk.get("seconds")
+            waiting = f" {backlog}." if backlog and isinstance(secs, (int, float)) and secs > 0 else ""
+            self.arc_text.setText("Archive copying is not running." + waiting)
+            return
+        msg = str(arc.get("message") or "")
+        parts = [archive_drives_text(arc), msg] + ([backlog] if backlog and backlog not in msg else [])
         self.arc_text.setText(" ".join(x for x in parts if x))
 
     def _cfg(self) -> str:
@@ -380,16 +440,54 @@ class DrivesPage(Page):
         self._arc_cmd(["acknowledge", "--admin-id", _who(), "--all"], "Acknowledge archive problems")
 
     def _show_drives(self) -> None:
-        rows = [[d.get("disk_id"), _what(d),
+        self._loaded_once = True
+        cur = selected_data(self.table)
+        want = (cur.get("fingerprint") or cur.get("disk_id")) if isinstance(cur, dict) else None
+        shown = [d for d in self.list.drives if self.show_all.isChecked() or not is_noise(d)]
+        rows = [[", ".join(x.rstrip("\\") for x in _letters(d)) or "—", d.get("label") or "", _what(d),
                  tf.size(d["size_bytes"]) if isinstance(d.get("size_bytes"), (int, float)) else "",
-                 d.get("bus_type") or "", d.get("model") or "",
-                 "hidden by the dock" if d.get("serial_hidden") else (d.get("serial") or ""), ", ".join(_letters(d)),
-                 d.get("message") or d.get("refusal") or ""] for d in self.list.drives]
-        fill(self.table, rows, self.list.drives, empty="No drives found. Connect a drive and press Refresh list.")
+                 d.get("model") or "",
+                 "hidden by the dock" if d.get("serial_hidden") else (d.get("serial") or "")] for d in shown]
+        fill(self.table, rows, shown, empty="No drives plugged in. Plug in a drive: it appears here by itself.")
+        for i, d in enumerate(shown):
+            note = str(d.get("message") or "")
+            for j in range(self.table.columnCount()):
+                it = self.table.item(i, j)
+                if it is not None and note:
+                    it.setToolTip(note)
+        if want is not None:                  # keep the selection on the same drive after a refresh
+            for i, d in enumerate(shown):
+                if want in (d.get("fingerprint"), d.get("disk_id")):
+                    self.table.selectRow(i)
+                    break
+        self._update_actions()
         self.problems.setText(("Erasing is blocked: " + "; ".join(self.list.problems)) if self.list.problems else "")
         then, self._after_load = self._after_load, None
         if then is not None:
             then()
+
+    def _update_actions(self) -> None:
+        """Only the actions that apply to the selected drive are shown (GUI simplification 2026-11-13)."""
+        d = selected_data(self.table)
+        d = d if isinstance(d, dict) else None
+        role, cls = (d or {}).get("role"), (d or {}).get("class")
+        show = {
+            self.erase_btn: d is not None and role is None and (bool(d.get("can_prepare"))
+                                                               or d.get("refusal") == "erase_disabled"),
+            self.designate_btn: d is not None and cls == "READY" and role != "archive",
+            self.return_btn: d is not None and cls == "READY" and role == "archive",
+            self.rename_btn: d is not None and cls == "READY",
+            self.eject_btn: d is not None and bool(_letters(d)) and not is_noise(d),
+        }
+        for b, on in show.items():
+            b.setVisible(on)
+        if d is None:
+            self.hint.setText("Select a drive to see what can be done with it."
+                              if self._loaded_once and any(not is_noise(x) for x in self.list.drives) else "")
+        elif not any(show.values()):
+            self.hint.setText(str(d.get("message") or "Nothing can be done with this drive here."))
+        else:
+            self.hint.setText(str(d.get("message") or ""))
 
     def _selected(self) -> dict[str, Any] | None:
         d = selected_data(self.table)
@@ -476,12 +574,12 @@ class DrivesPage(Page):
         if d is None:
             return
         if d.get("class") != "READY" or d.get("role") != "archive":
-            self.problem("Select the archive drive that came back from the office (it shows as \"archive drive "
-                         "SSD_…\" in the list).")
+            self.problem("Select the archive drive that came back from the office (it shows as \"archive drive\" "
+                         "in the list).")
             return
         letters = _letters(d)
         if not letters:
-            self.problem("This drive has no drive letter. Reconnect it and press Refresh list.")
+            self.problem("This drive has no drive letter. Unplug it and plug it in again.")
             return
         dlg = ReturnDialog(d, self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
@@ -503,7 +601,7 @@ class DrivesPage(Page):
             return
         letters = _letters(d)
         if not letters:
-            self.problem("This drive has no drive letter. Reconnect it and press Refresh list.")
+            self.problem("This drive has no drive letter. Unplug it and plug it in again.")
             return
         old = d.get("label") or letters[0]
         name, ok = QInputDialog.getText(

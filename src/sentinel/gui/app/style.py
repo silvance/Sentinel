@@ -61,12 +61,12 @@ def stylesheet(p: Palette) -> str:
     QTableView::item:hover:!selected, QTreeView::item:hover:!selected {{ background: {p.surface_alt}; }}
     QWidget#navPanel {{ background: {p.surface}; border-right: 1px solid {p.border}; }}
     QListWidget#nav {{ background: transparent; border: none; outline: 0; }}
-    QListWidget#nav::item {{ padding: 1px 6px; min-height: 24px; border-radius: 4px; }}
+    QListWidget#nav::item {{ padding: 4px 6px; min-height: 30px; border-radius: 4px; }}
     QListWidget#nav::item:selected {{ background: {p.surface_alt}; color: {p.text};
                                       border-left: 3px solid {p.accent}; }}
     QListWidget#nav::item:hover:!selected {{ background: {p.surface_alt}; }}
     QLabel#pageTitle {{ font-weight: 600; }}
-    QLabel#sectionTitle {{ font-weight: 600; color: {p.text2}; }}
+    QLabel#sectionTitle, QToolButton#sectionTitle {{ font-weight: 600; color: {p.text2}; }}
     QFrame#sep {{ color: {p.border}; }}
     QLabel#muted {{ color: {p.text2}; }}
     QLabel#ok {{ color: {p.ok}; }}

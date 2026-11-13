@@ -45,7 +45,7 @@ and only after the copy has been checked. A Sentinel SSD reformatted elsewhere c
 
 1. Plug the returned SSD in. (With the Sabrent dock: Swap archive drive first and take the drive in use
    out; only one drive at a time in that dock.)
-2. Drives page › **Refresh list**. Select the SSD (it shows as "archive drive SSD_1").
+2. Open the Drives page; the SSD appears by itself. Select it (it shows as "archive drive", named SSD_1).
 3. Press **Return to service…** and fill in from the transfer sheet: where it was copied, who copied it, the
    date. Tick the box that the office checked every file and all matched. Press **Delete and return to service**.
    Windows asks for the administrator password.
@@ -81,7 +81,7 @@ moved to the office are deleted.
   drive") prepares nothing, and is not kept for the next drive plugged in.
 * Return to service refuses, and deletes nothing, when the selected drive is the one Sentinel is copying to
   now, was not taken out with Swap since it was set up or last returned, was prepared for removal but never
-  taken out, or had recordings copied to it after its swap. It also refuses when the drive at that letter is not the one selected (press Refresh list).
+  taken out, or had recordings copied to it after its swap. It also refuses when the drive at that letter is not the one selected (select it again).
 * With two drives, pressing Swap again while one drive is waiting to be taken out prepares nothing else:
   take that drive out first.
 

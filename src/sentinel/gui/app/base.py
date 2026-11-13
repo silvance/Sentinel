@@ -56,6 +56,7 @@ class Page(QWidget):
         titles = QVBoxLayout()
         titles.setSpacing(0)
         t = QLabel(self.title)
+        self.title_label = t                  # hidden when the page is a tab (SettingsHost)
         t.setObjectName("pageTitle")
         f = t.font()
         f.setPointSizeF(f.pointSizeF() + 4)

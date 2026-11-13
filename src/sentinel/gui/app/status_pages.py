@@ -141,10 +141,20 @@ class StatusPage(Page):
         self.alerts.itemCollapsed.connect(lambda _i: self._fit_tree(self.alerts, 8))
         left.addWidget(self.alerts)
         left.addSpacing(8)
-        dt = QLabel("Details")
-        dt.setObjectName("sectionTitle")
-        left.addWidget(dt)
+        # GUI simplification 2026-11-13: the header already says what matters; the full list is one click away.
+        from PySide6.QtWidgets import QToolButton
+
+        self.details_btn = QToolButton()
+        self.details_btn.setText("Details")
+        self.details_btn.setObjectName("sectionTitle")
+        self.details_btn.setCheckable(True)
+        self.details_btn.setAutoRaise(True)
+        self.details_btn.setArrowType(Qt.ArrowType.RightArrow)
+        self.details_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.details_btn.toggled.connect(self._show_details)
+        left.addWidget(self.details_btn)
         self.details = _tree(["Item", "Now"])
+        self.details.setVisible(False)
         self.details.setRootIsDecorated(False)
         self.details.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.details.itemActivated.connect(self._detail_activated)
@@ -222,6 +232,12 @@ class StatusPage(Page):
         self.columns.setDirection(QBoxLayout.Direction.TopToBottom if narrow else QBoxLayout.Direction.LeftToRight)
         w = self.live.width()
         self.live.picture.setFixedHeight(max(180, min(int(w * 9 / 16), 560)))   # 16:9 for the column width
+
+    def _show_details(self, on: bool) -> None:
+        self.details.setVisible(on)
+        self.details_btn.setArrowType(Qt.ArrowType.DownArrow if on else Qt.ArrowType.RightArrow)
+        if on:
+            self._fit_tree(self.details, 30)
 
     def on_show(self) -> None:
         self.live.start()
@@ -492,7 +508,11 @@ class RecordingsPage(Page):
         # Review 2026-11-12: the hour being recorded is sealed only at its end and the window's copy of the
         # ledger is refreshed every few minutes, so allow a whole recording file plus that delay as "live".
         slack = cfg.recording.segment_seconds * 1.5 + 600.0
-        tl = load_timeline(db, cfg.camera.id, now, hours=hours, live=live, live_slack_s=slack)
+        read = self.ctx.read
+        run = _ep(((read.doc or {}).get("recording") or {}).get("run_started_utc")) \
+            if read is not None and read.kind is ReadKind.OK else None
+        tl = load_timeline(db, cfg.camera.id, now, hours=hours, live=live, live_slack_s=slack,
+                           live_since=run if live else None)
         self.bar.set_timeline(tl, self.ctx.tz)
         tz = self.ctx.tz
         if not tl.available:
