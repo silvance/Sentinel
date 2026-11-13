@@ -81,7 +81,11 @@ def run_checks(cfg_path: Path, read_status: Callable[[], tuple[dict[str, Any] | 
         rep.checks.append(Check("Settings file", False, str(exc)))
         return rep
     doc, problem = read_status()
-    if doc is None:
+    if doc is None or problem is not None:
+        # An outdated status is the recorder NOT answering (review 2026-11-12: an old RECORDING or
+        # STOPPED document passed as "answering", so a dead recorder passed the check and the update
+        # watch never went back to the previous version). read_status already accepts a stale
+        # terminal document that names its own fault; that one is judged below.
         rep.checks.append(Check("Recorder running", False, problem or "no status from the recorder"))
         return rep
     rep.checks.append(Check("Recorder running", True, "answering"))
@@ -235,7 +239,11 @@ def restore(cfg_path: Path, source: Path, clock: Callable[[], float] = time.time
 
     import tomllib
 
-    text = source.read_text(encoding="utf-8")
+    # Bytes, not text: the restored file must equal ``source`` byte for byte (review 2026-11-12:
+    # write_text turned LF into CRLF on Windows, so same_settings() never matched and every failed
+    # watch restored and restarted again).
+    data = source.read_bytes()
+    text = data.decode("utf-8")
     try:
         load_config_dict(tomllib.loads(text), base_dir=cfg_path.parent, source=str(cfg_path))
     except (ConfigError, tomllib.TOMLDecodeError) as exc:
@@ -248,6 +256,6 @@ def restore(cfg_path: Path, source: Path, clock: Callable[[], float] = time.time
         n += 1
     shutil.copy2(cfg_path, backup)
     tmp = cfg_path.with_name(cfg_path.name + ".partial")
-    tmp.write_text(text, encoding="utf-8")
+    tmp.write_bytes(data)
     os.replace(tmp, cfg_path)
     return backup

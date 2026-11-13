@@ -10,7 +10,16 @@ times a second and up to 1920 pixels wide, as a JPEG into ``<status_dir>/preview
 operators):
 
 * ``frame-0.jpg`` / ``frame-1.jpg`` alternately, so the window never reads a file being written;
-* ``latest.json``: which file is newest, when it was taken, its size, and the worker's state.
+* ``latest.json``: which file is newest, when that picture was taken (``taken_utc``; it is NOT renewed
+  when only the state changes), when the state was last written (``state_utc``) and the worker's state.
+  Only ``state == "live"`` means pictures are arriving now; in any other state the named frame is an
+  old picture (review 2026-11-12: it was captioned "Live" with the current time).
+
+Stopping (review 2026-11-12: the live view ran for days behind a minimized or locked window): the
+window calls :func:`stop_preview` when it stops showing the picture (page change, minimize, lock); the
+worker then stops within about a second. A viewing session is also capped at ``MAX_SESSION_S``: the
+worker then stops FFmpeg and reports state ``paused`` until the window starts a new session (a new
+``session`` token in :func:`request_preview`, e.g. when the user presses "Show live view").
 
 The request is untrusted input from a standard user: only a small regular file is accepted, and all it
 can do is turn the preview on for ``REQUEST_TTL_S``. Nothing here is recorded or hashed: the live
@@ -42,6 +51,9 @@ log = logging.getLogger("sentinel.preview")
 REQUEST_NAME = "preview.request"
 REQUEST_TTL_S = 20.0            # the window refreshes the request every few seconds
 REQUEST_MAX_BYTES = 1024
+STOP_WORD = "stop"
+MAX_SESSION_S = 600.0           # one viewing session at most; a new session token renews it
+_TOKEN_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_")
 PREVIEW_DIR = "preview"
 LATEST = "latest.json"
 FPS = 5
@@ -59,12 +71,29 @@ def request_path(cfg: Any) -> Path:
     return operator_request_dir(cfg) / REQUEST_NAME
 
 
-def request_preview(cfg: Any, clock: Callable[[], float] = time.time) -> Path:
-    """Used by the window: ask for (or keep) the live view. Best effort."""
+def request_preview(cfg: Any, clock: Callable[[], float] = time.time, session: str | None = None) -> Path:
+    """Used by the window: ask for (or keep) the live view. Best effort. ``session``: a short token
+    (letters, digits, - and _) the window keeps for one viewing session and renews when the user asks
+    for the picture again; a session that runs longer than ``MAX_SESSION_S`` is paused."""
+    if session is not None and not _valid_token(session):
+        raise ValueError("session token: 1-64 letters, digits, - or _")
     p = request_path(cfg)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(iso_utc(clock()), encoding="ascii")
+    p.write_text(iso_utc(clock()) + (f" {session}" if session else ""), encoding="ascii")
     return p
+
+
+def stop_preview(cfg: Any) -> Path:
+    """Used by the window: the picture is no longer shown (page changed, window minimized or locked).
+    The worker stops the camera connection within about a second. Best effort."""
+    p = request_path(cfg)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(STOP_WORD, encoding="ascii")
+    return p
+
+
+def _valid_token(token: str) -> bool:
+    return 0 < len(token) <= 64 and all(ch in _TOKEN_CHARS for ch in token)
 
 
 def read_latest(cfg: Any) -> dict[str, Any] | None:
@@ -113,17 +142,42 @@ def split_jpegs(buf: bytearray) -> list[bytes]:
 
 
 def request_is_fresh(path: Path, now: float, ttl: float | None = None) -> bool:
-    """A small regular file (not a link or folder) changed within ``ttl`` seconds."""
+    """A small regular file (not a link or folder) changed within ``ttl`` seconds, and not a stop."""
+    return read_request(path, now, ttl)[0]
+
+
+def read_request(path: Path, now: float, ttl: float | None = None) -> tuple[bool, str | None]:
+    """(fresh, session token) of the window's request. Untrusted: only a small regular file counts,
+    and only a well-formed token is taken from it."""
+    fresh, token, _known = _read_request(path, now, ttl)
+    return fresh, token
+
+
+def _read_request(path: Path, now: float, ttl: float | None = None) -> tuple[bool, str | None, bool]:
+    """As :func:`read_request`, plus whether the content could be read (False: locked, or caught empty
+    while the window rewrites it; the worker then keeps the current session)."""
     ttl = REQUEST_TTL_S if ttl is None else ttl
     try:
         st = os.lstat(path)
     except OSError:
-        return False
+        return False, None, True
     if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode) or st.st_size > REQUEST_MAX_BYTES:
-        return False
+        return False, None, True
     if getattr(st, "st_file_attributes", 0) & 0x400:      # reparse point (junction / symlink)
-        return False
-    return -5.0 <= now - st.st_mtime <= ttl
+        return False, None, True
+    if not -5.0 <= now - st.st_mtime <= ttl:
+        return False, None, True
+    try:
+        with open(path, "rb") as fh:
+            words = fh.read(REQUEST_MAX_BYTES).decode("ascii", "replace").split()
+    except OSError:
+        return True, None, False
+    if not words:
+        return True, None, False
+    if words[0].lower() == STOP_WORD:
+        return False, None, True
+    token = words[1] if len(words) > 1 and _valid_token(words[1]) else None
+    return True, token, True
 
 
 class PreviewWorker:
@@ -131,11 +185,11 @@ class PreviewWorker:
     here can affect recording."""
 
     def __init__(self, cfg: Any, url: str, popen_kwargs: dict[str, Any] | None = None,
-                 clock: Callable[[], float] = time.time) -> None:
+                 clock: Callable[[], float] = time.time, mono: Callable[[], float] = time.monotonic) -> None:
         self.cfg = cfg
         self.url = url                         # may contain the camera account: never logged
         self.popen_kwargs = dict(popen_kwargs or {})
-        self.clock = clock
+        self.clock, self.mono = clock, mono
         self.out = preview_dir(cfg)
         self.req = request_path(cfg)
         self._stop = threading.Event()
@@ -143,7 +197,10 @@ class PreviewWorker:
         self._proc: subprocess.Popen[bytes] | None = None
         self.seq = 0
         self.frame: str | None = None
-        self.state = "off"                     # off | starting | live | no_picture
+        self.frame_utc: str | None = None      # when the named frame was taken (not when the state changed)
+        self.state = "off"                     # off | starting | live | no_picture | paused
+        self._session: str | None = None       # current viewing session ("-": a window without tokens)
+        self._session_mono = 0.0
 
     def start(self) -> PreviewWorker:
         self._thread = threading.Thread(target=self._loop, name="live-preview", daemon=True)
@@ -158,14 +215,33 @@ class PreviewWorker:
         self._clear()
 
     # ---------------------------------------------------------------- loop
+    def _viewer(self) -> bool:
+        """Is a viewer asking, within its session's time? Tracks the session (call about once a second)."""
+        fresh, token, known = _read_request(self.req, self.clock())
+        if not fresh:
+            self._session = None
+            return False
+        if not known:                   # caught mid-rewrite: the session is unchanged (none yet: ask again)
+            return self._session is not None and self.mono() - self._session_mono < MAX_SESSION_S
+        key = token or "-"
+        if key != self._session:
+            self._session, self._session_mono = key, self.mono()
+        return self.mono() - self._session_mono < MAX_SESSION_S
+
     def _loop(self) -> None:
         delay = 1.0
         while not self._stop.is_set():
-            if not request_is_fresh(self.req, self.clock()):
-                if self.state != "off":
-                    log.info("live view: no viewer; stopped")
-                    self._clear()
-                self.state = "off"
+            if not self._viewer():
+                if self._session is None:
+                    if self.state != "off":
+                        log.info("live view: no viewer; stopped")
+                        self._clear()
+                    self.state = "off"
+                elif self.state != "paused":
+                    log.info("live view: session longer than %.0f s; paused until the viewer asks again",
+                             MAX_SESSION_S)
+                    self.state = "paused"
+                    self._write_state()
                 self._stop.wait(1.0)
                 continue
             self.state = "starting"
@@ -210,9 +286,9 @@ class PreviewWorker:
                     self.state = "live"
                     self._publish(jpeg)
                 now = time.monotonic()
-                if now - last_check > 1.0:     # viewer gone: stop the camera connection
+                if now - last_check > 1.0:     # viewer gone, stopped or session over: stop the camera
                     last_check = now
-                    if not request_is_fresh(self.req, self.clock()):
+                    if not self._viewer():
                         break
         finally:
             self._kill()
@@ -236,13 +312,15 @@ class PreviewWorker:
             tmp = self.out / (name + ".partial")
             tmp.write_bytes(jpeg)
             os.replace(tmp, self.out / name)
-            self.frame = name
+            self.frame, self.frame_utc = name, iso_utc(self.clock())
             self._write_state()
         except OSError as exc:                # e.g. the window was reading that file: next frame
             log.debug("live view frame not written: %s", exc)
 
     def _write_state(self) -> None:
-        doc = {"state": self.state, "seq": self.seq, "frame": self.frame, "taken_utc": iso_utc(self.clock()),
+        doc = {"state": self.state, "seq": self.seq, "frame": self.frame,
+               "taken_utc": self.frame_utc if self.frame else None,     # the picture's own time
+               "state_utc": iso_utc(self.clock()), "live": self.state == "live",
                "fps": FPS, "source": "main stream"}
         try:
             self.out.mkdir(parents=True, exist_ok=True)
@@ -253,7 +331,7 @@ class PreviewWorker:
             pass
 
     def _clear(self) -> None:
-        self.frame = None
+        self.frame = self.frame_utc = None
         for p in (self.out.glob("*") if self.out.is_dir() else []):
             try:
                 p.unlink()

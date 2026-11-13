@@ -38,6 +38,19 @@ from typing import Any
 from .probe import ProbeError
 
 METHOD_PREFIX = "sha256(per-frame-sha256-list);decoded=rawvideo;fps_mode=passthrough"
+MIN_TIMEOUT_S = 3600.0
+TIMEOUT_PER_MEDIA_S = 4.0     # hashing 5MP@30 runs at ~0.55x real time on a fast desktop core
+
+
+class ContentHashTimeout(ProbeError):
+    """Hashing took longer than allowed: the machine is too slow for this footage, not a fault in it."""
+
+
+def content_hash_timeout(duration_s: float | None, segment_seconds: float | None = None) -> float:
+    """Time allowed for one segment: scaled to its length (review 2026-11-12: a fixed 3600 s equalled
+    the 1-hour segment length, so a slower CPU timed out on every segment after an hour of work)."""
+    media = duration_s if duration_s and duration_s > 0 else (segment_seconds or 0.0)
+    return max(MIN_TIMEOUT_S, TIMEOUT_PER_MEDIA_S * media)
 
 
 @dataclass(frozen=True)
@@ -71,7 +84,7 @@ def compute_content_hash(path: Path, ffmpeg: str = "ffmpeg", ffmpeg_version: str
     except FileNotFoundError:
         raise ProbeError(f"tool not found: {ffmpeg}") from None
     except subprocess.TimeoutExpired:
-        raise ProbeError(f"content hashing timed out after {timeout}s") from None
+        raise ContentHashTimeout(f"content hashing timed out after {timeout:.0f}s") from None
     if cp.returncode != 0:
         lines = cp.stderr.decode("utf-8", "replace").strip().splitlines()
         raise ProbeError(f"FFmpeg content hashing failed: {lines[-1] if lines else cp.returncode}")

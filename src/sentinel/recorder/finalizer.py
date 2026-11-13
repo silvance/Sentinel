@@ -27,7 +27,7 @@ from ..config import AppConfig
 from ..db import EventSpec, InternalGap, Ledger
 from ..hashing import sha256_file
 from ..media.probe import ProbeResult, first_video_pts, probe_segment
-from ..models import TERMINAL_STATES, RunEndReason, SegmentState
+from ..models import TERMINAL_STATES, GapKind, RunEndReason, SegmentState
 from ..platform.base import Platform
 from ..storage.monitor import StorageMonitor
 from .timebase import interpolate_correction
@@ -398,6 +398,8 @@ class Finalizer:
             gap_end = self.ledger.latest_gap_end(cam)
             if gap_end is not None and start is not None and parse_iso_utc(gap_end) > parse_iso_utc(start):
                 start, basis = gap_end, "previous_gap_end"
+        if self._record_gap_before_later_run(cam, job, start, basis, prev):
+            return
         gap_id = self.ledger.begin_gap(cam, start, job.reason, prev, job.run_id, basis, job.detail)
         log.warning("recording gap open (gap %d) from %s, reason %s", gap_id, start, job.reason)
         # Recorded late (a retry after a failed attempt, or startup recovery): footage from a later
@@ -407,3 +409,43 @@ class Finalizer:
             closed = self.ledger.close_gap(cam, later["start_utc"], later["segment_id"], later["run_id"])
             if closed is not None:
                 log.warning("recording gap %d closed at existing later footage %s", gap_id, later["start_utc"])
+
+    def _record_gap_before_later_run(self, cam: str, job: GapJob, start: str | None, basis: str,
+                                     prev: str | None) -> bool:
+        """A gap recorded late (janitor retry or startup recovery) while a LATER run's gap is open.
+
+        begin_gap would take over that open gap (review 2026-11-12: it was then closed at the later
+        run's first footage, before its own start: a negative duration, a false clock anomaly, and the
+        ongoing outage and this one both missing). Instead this run's gap is written as a closed gap
+        that ends where the later run's footage starts (or where the open gap starts, if earlier); the
+        open gap is left alone. Returns False when no later run's gap is open (the normal path)."""
+        with self.ledger.tx() as c:
+            row = c.execute("SELECT * FROM recording_gaps WHERE camera_id=? AND kind=? AND end_utc IS NULL "
+                            "ORDER BY gap_id DESC LIMIT 1", (cam, str(GapKind.BETWEEN_RUNS))).fetchone()
+            if row is None or not row["ended_run_id"] or row["ended_run_id"] == job.run_id:
+                return False
+            order = {r["run_id"]: r["rowid"] for r in c.execute(
+                "SELECT run_id, rowid FROM recording_runs WHERE run_id IN (?, ?)", (row["ended_run_id"], job.run_id))}
+            if job.run_id not in order or order.get(row["ended_run_id"], -1) <= order[job.run_id]:
+                return False
+            later = self.ledger.first_footage_after_run(cam, job.run_id, start) if start else None
+            end, next_seg = (later["start_utc"], later["segment_id"]) if later is not None else (None, None)
+            if row["start_utc"] and (end is None or parse_iso_utc(row["start_utc"]) < parse_iso_utc(end)):
+                end, next_seg = row["start_utc"], None      # the open gap already covers the time after it
+            if start and end and parse_iso_utc(end) > parse_iso_utc(start):
+                now = iso_utc(time.time())
+                detail = dict(job.detail or {})
+                detail["recorded_late"] = True
+                cur = c.execute(
+                    "INSERT INTO recording_gaps(camera_id, kind, start_utc, end_utc, duration_s, reason, "
+                    "prev_segment_id, next_segment_id, ended_run_id, start_basis, detail, opened_utc, closed_utc) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (cam, str(GapKind.BETWEEN_RUNS), start, end, parse_iso_utc(end) - parse_iso_utc(start),
+                     job.reason, prev, next_seg, job.run_id, basis, json.dumps(detail, sort_keys=True), now, now))
+                self.ledger.chain_insert(c, "recording_gaps", cur.lastrowid)
+                log.warning("recording gap after run %s recorded late: %s -> %s (a later run's gap is open)",
+                            job.run_id, start, end)
+            else:
+                log.warning("recording gap after run %s: already covered by the open gap of a later run", job.run_id)
+            c.execute("UPDATE recording_runs SET gap_recorded=1 WHERE run_id=?", (job.run_id,))
+        return True

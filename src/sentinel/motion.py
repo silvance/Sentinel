@@ -137,6 +137,12 @@ class MotionAnalyzer:
         self._prev: bytes | None = None
         self._run = 0
         self.last_score = 0.0           # percent of the picture changed in the last frame
+        self.duplicate = False          # the last frame was an exact repeat of the one before
+        self._repeats = 0
+        # Repeats the fps filter can make (second stream only, down to ~0.5 pictures a second); a longer
+        # run of identical frames is a picture that really did not change (a frozen stream), scored as
+        # such. Main-stream key frames are passed through, never repeated: no allowance there.
+        self._max_repeats = max(2, int(2 * float(m.analysis_fps))) if m.stream_path else 0
 
     @property
     def run_length(self) -> int:
@@ -149,6 +155,18 @@ class MotionAnalyzer:
         return 100.0 * changed / max(1, len(a))
 
     def feed(self, frame: bytes) -> bool:
+        # An exact repeat carries no new picture: FFmpeg's fps filter repeats frames when the second
+        # stream is slower than analysis_fps. Scoring it as "no change" reset the count every other
+        # frame, so motion was never confirmed (review 2026-11-12). It is skipped instead.
+        self.duplicate = False
+        if self._prev is not None and frame == self._prev:
+            self._repeats += 1
+            if self._repeats <= self._max_repeats:
+                self.duplicate = True
+                return False
+            self.last_score, self._run = 0.0, 0
+            return False
+        self._repeats = 0
         prev, self._prev = self._prev, frame
         if prev is None or len(prev) != len(frame):
             return False
@@ -160,7 +178,7 @@ class MotionAnalyzer:
         return self._run >= self.m.min_frames
 
     def reset(self) -> None:
-        self._prev, self._run = None, 0
+        self._prev, self._run, self.duplicate, self._repeats = None, 0, False, 0
 
 
 # ---------------------------------------------------------------------- detector (thread + FFmpeg)
@@ -247,7 +265,9 @@ class MotionDetector:
     # -------------------------------------------------------------- motion periods (reviewer markers)
     def _track(self, now: float, confirmed: bool) -> None:
         score = self.analyzer.last_score
-        if self.analyzer.run_length == 1:
+        if self.analyzer.duplicate:
+            pass                                     # a repeated frame: the count did not change
+        elif self.analyzer.run_length == 1:
             self._candidate_start = now              # first moving frame of a possible period
         elif self.analyzer.run_length == 0:
             self._candidate_start = None
