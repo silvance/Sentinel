@@ -46,7 +46,7 @@ class SimulatedCamera:
     def __init__(self, port: int = 0, host: str = "127.0.0.1", size: str = "640x480", fps: int = 15,
                  bitrate: str = "800k", gop: int | None = None, ffmpeg: str = "ffmpeg",
                  clock_rate: float = 1.0, motion: list[tuple[float, float]] | None = None,
-                 codec: str = "h264") -> None:
+                 codec: str = "h264", audio: str | None = None) -> None:
         """``clock_rate``: camera clock speed relative to real time (1.01 = camera clock 1 % fast:
         each real second carries 1.01 s of stream time). Frames are still produced and sent in
         real time (``-re``); only their timestamps are scaled (``setpts``). Measured with FFmpeg
@@ -56,7 +56,12 @@ class SimulatedCamera:
             raise ValueError("clock_rate must be between 0.5 and 2.0")
         if codec not in ("h264", "hevc"):
             raise ValueError('codec must be "h264" or "hevc"')
+        if audio not in (None, "aac", "mp2"):
+            raise ValueError('audio must be None, "aac" or "mp2"')
         self.codec = codec              # "hevc": H.265, as cameras that default to it (needs libx265)
+        # A 440 Hz tone, mono, 16 kHz. Only formats MPEG-TS carries can be sent this way: "mp2" stands in for a
+        # camera whose sound is not AAC. G.711, which most cameras send, cannot be simulated here (it needs RTSP).
+        self.audio = audio
         self.host, self.port = host, port
         self.size, self.fps, self.bitrate = size, fps, bitrate
         self.clock_rate = clock_rate
@@ -151,6 +156,9 @@ class SimulatedCamera:
             argv.append(f"color=c=0x606060:size={self.size}:rate={self.fps}[bg];"
                         f"color=c=white:size=120x160:rate={self.fps}[box];"
                         f"[bg][box]overlay=x='mod(t*240,W-w)':y=H/3:enable='{windows}',noise=alls=6:allf=t[out0]")
+        if self.audio:
+            argv += ["-re", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=16000",
+                     "-map", "0:v:0", "-map", "1:a:0", "-c:a", self.audio, "-ac", "1", "-b:a", "64k"]
         if self.clock_rate != 1.0:
             # Camera clock drift: fine timebase so scaled timestamps are not rounded to frame
             # ticks; passthrough so FFmpeg does not drop/duplicate frames to restore the rate.

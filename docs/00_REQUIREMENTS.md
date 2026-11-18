@@ -25,7 +25,7 @@ project owner during development; **Open** = decision still needed.
 | R2 | Do not reduce resolution/frame rate by default: 2592×1944 (4:3) up to 30 fps if the camera delivers it. | Doc |
 | R3 | Record to internal storage; removable drives are a delivery medium, not the recording destination. | Brief, Doc |
 | R4 | FFmpeg stream copy, segmenting, interruption-tolerant intermediate format, MP4 for review. | Brief, Doc |
-| R5 | Audio excluded unless the authorization explicitly permits it (5MP model does not advertise audio anyway). | Brief, Doc |
+| R5 | Audio excluded unless the authorization explicitly permits it (5MP model does not advertise audio anyway). **Changed 2026-11-18:** the customer now requires sound; it can be switched on per deployment (Settings › Camera, `include_audio`), stays off by default, and switching it on is asked for and logged (docs/branches/audio-recording.md). | Brief, Doc; customer 2026-11-18 |
 | R6 | Camera facts not to be assumed: RTSP path, ONVIF support on the 5MP variant, lens FOV, stream combinations, GOP, firmware/security features, NDAA compliance. | Doc |
 | R7 | Camera hardening: change default admin credentials, least-privilege account for the recorder, static/DHCP-reserved address, NTP, disable cloud/P2P/UPnP. | Doc |
 

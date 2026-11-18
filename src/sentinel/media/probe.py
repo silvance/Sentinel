@@ -38,8 +38,16 @@ class ProbeResult:
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     reason: str | None = None
+    audio: dict[str, Any] | None = None     # the sound stream, looked for only while sound recording is on
 
     def detail(self) -> dict[str, Any]:
+        d = self._detail()
+        if self.audio and (self.audio.get("codec") or self.audio.get("other")):
+            # Only when there is something to say: records made without sound keep their exact form.
+            d["audio"] = {k: v for k, v in self.audio.items() if k != "video"}
+        return d
+
+    def _detail(self) -> dict[str, Any]:
         return {
             "playable": self.playable, "codec": self.codec, "width": self.width, "height": self.height,
             "duration_s": self.duration_s, "first_pts_s": self.first_pts_s, "last_pts_s": self.last_pts_s,
@@ -82,7 +90,22 @@ def first_video_pts(path: Path, ffprobe: str = "ffprobe", timeout: float = 30.0)
 
 
 def probe_segment(path: Path, ffprobe: str = "ffprobe", ffmpeg: str = "ffmpeg", level: str = "packets",
-                  max_internal_gap_s: float = 2.0, timeout: float = 300.0) -> ProbeResult:
+                  max_internal_gap_s: float = 2.0, timeout: float = 300.0, audio: bool = False) -> ProbeResult:
+    """``audio``: also note the file's sound stream (sound recording is switched on). It never decides whether
+    the file is playable: that is about the video."""
+    res = _probe_video(path, ffprobe, ffmpeg, level, max_internal_gap_s, timeout)
+    if audio and res.reason != "empty_or_missing_file":
+        from ..recorder.audio import stored_audio
+
+        try:
+            res.audio = stored_audio(path, ffprobe, min(timeout, 60.0))
+        except Exception:  # noqa: BLE001 - a note about the sound must not fail the video check
+            res.audio = None
+    return res
+
+
+def _probe_video(path: Path, ffprobe: str, ffmpeg: str, level: str, max_internal_gap_s: float,
+                 timeout: float) -> ProbeResult:
     if not path.exists() or path.stat().st_size == 0:
         return ProbeResult(playable=False, reason="empty_or_missing_file")
     argv = [ffprobe, "-v", "error", "-select_streams", "v:0",

@@ -50,7 +50,7 @@ from .ledger import (B_COMPLETE, B_COPYING, B_EJECTING, B_FAILED, B_INTERRUPTED,
                      I_COPIED, I_FAILED, I_PLANNED, I_VERIFIED, ExportLedger, NewItem)
 from .manifest import ManifestBuilder, sha256_bytes
 from .media import (MediaError, frame_hashes_from_path, frame_hashes_from_stream, frame_hashes_span,
-                    has_decode_errors, packet_pts, remux_concat)
+                    audio_codec_of, has_decode_errors, packet_pts, remux_concat, review_audio)
 from .planner import PlanError, Planner
 from .status import STATUS_FILE, ExportStatusWriter
 from .target import (ExportTarget, ManualRemovalFallback, SafeRemover, TargetError, archive_drive_reason,
@@ -507,7 +507,8 @@ class ReviewExporter:
             remux_concat(self.cfg.tools.ffmpeg, paths, partial_path(dest),
                          self.tmp_dir / f"{self.batch_id}-{it['item_id']}.ffconcat", timeout=600 + duration,
                          popen_kwargs=self.platform.low_priority_popen_kwargs(),
-                         codec=next((s["video_codec"] for s in segs if s["video_codec"]), None))
+                         codec=next((s["video_codec"] for s in segs if s["video_codec"]), None),
+                         audio=review_audio([audio_codec_of(s) for s in segs]))
             # Write-time hash: FFmpeg wrote the file; hash it now (normal read, straight after it was
             # written) so the later uncached read-back has an independent value to match.
             written, _ = sha256_file(partial_path(dest))

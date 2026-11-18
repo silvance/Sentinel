@@ -153,15 +153,27 @@ class CameraPage(SettingsPage):
         self.path = self.editor(QLineEdit())
         self.path.setPlaceholderText("from the camera documentation, e.g. Streaming/Channels/101")
         f.addRow("Stream path", self.path)
+        # Requirement change 2026-11-18: sound may be recorded. Off unless switched on here; whether it MAY be
+        # recorded is the deployment's decision (docs/00 R5), which is why saving asks once.
+        self.audio = self.editor(QCheckBox("Record the camera's sound with the video"))
+        f.addRow(self.audio)
+        self.audio_note = Note("Only where recording sound is authorised. The video is stored exactly as the camera "
+                               "sends it; the sound is stored as AAC. Test connection says whether the camera sends "
+                               "sound, and Status says whether it is being recorded.")
+        f.addRow("", self.audio_note)
+        self.audio_format = self.editor(QComboBox())
+        self.audio_format.addItem("Convert to AAC (works with every camera)", "aac")
+        self.audio_format.addItem("Keep the camera's own format (only cameras that send AAC)", "copy")
         self.transport = self.editor(QComboBox())
         self.transport.addItem("TCP (recommended)", "tcp")
         self.transport.addItem("UDP", "udp")
         self.secure = self.editor(QCheckBox("Encrypted stream (rtsps://; only if the camera supports it)"))
         # GUI review 2026-11-17: how the stream is carried is set once, if ever; opened by load() when it is not
         # the default, so a setting that matters is never out of sight.
-        self.advanced = AdvancedRows(f, "How the video is carried; the defaults suit most cameras.")
+        self.advanced = AdvancedRows(f, "How the video is carried and the sound stored; the defaults suit most cameras.")
         self.advanced.add("Transport", self.transport)
         self.advanced.add("", self.secure)
+        self.advanced.add("Sound format", self.audio_format)
         self.body.addWidget(capped(box))
 
         acc = QGroupBox("Camera account (use a view-only account)")
@@ -204,7 +216,8 @@ class CameraPage(SettingsPage):
         self.live.stop()
 
     def _pending_changed(self, on: bool) -> None:
-        for w in (self.host, self.port, self.path, self.transport, self.user, self.password, self.test_btn):
+        for w in (self.host, self.port, self.path, self.transport, self.user, self.password, self.test_btn,
+                  self.audio, self.audio_format):
             w.setEnabled(self.ctx.admin and not on)
 
     def load(self) -> None:
@@ -218,7 +231,10 @@ class CameraPage(SettingsPage):
         if scheme == "rtsps" and urlsplit(cfg.camera.url).port is None:
             port = 322                           # RTSPS default port (review 2026-11-10)
         self.secure.setChecked(scheme == "rtsps")
-        self.advanced.set_open(self.advanced.is_open() or scheme == "rtsps" or cfg.camera.transport != "tcp")
+        self.audio.setChecked(cfg.camera.include_audio)
+        self.audio_format.setCurrentIndex(max(0, self.audio_format.findData(cfg.camera.audio_format)))
+        self.advanced.set_open(self.advanced.is_open() or scheme == "rtsps" or cfg.camera.transport != "tcp"
+                               or cfg.camera.audio_format != "aac")
         self.name.setText(cfg.camera.name)
         self.cam_id.setText(cfg.camera.id)
         self.host.setText(host)
@@ -322,6 +338,12 @@ class CameraPage(SettingsPage):
                 Path(path).parent / SECRET_NAME
         table = new_camera_table(old, url, cred_path, name)
         table["transport"] = str(self.transport.currentData())
+        table["include_audio"] = self.audio.isChecked()
+        # The default is not written: a settings file without the key is read by every version (0.3.19 and
+        # earlier refuse a key they do not know, which would stop "go back to the previous version").
+        table.pop("audio_format", None)
+        if str(self.audio_format.currentData()) != "aac":
+            table["audio_format"] = str(self.audio_format.currentData())
         return {"camera": table}
 
     def before_save(self, new_cfg: AppConfig) -> bool:
@@ -341,6 +363,12 @@ class CameraPage(SettingsPage):
         if self.tested_ok_for != url and QMessageBox.question(
                 self, "Sentinel", "The camera has not answered a connection test with these settings.\n\n"
                 "Save anyway?") != QMessageBox.StandardButton.Yes:
+            return False
+        cfg = self.cfg
+        if self.audio.isChecked() and not (cfg is not None and cfg.camera.include_audio) and QMessageBox.question(
+                self, "Sentinel", "Switch sound recording ON?\n\nFrom now on the camera's sound is recorded with the "
+                "video. Do this only where recording sound is authorised for this deployment. The change is "
+                "written to the recording log.") != QMessageBox.StandardButton.Yes:
             return False
         if creds is not None and self.password.text():
             from ...launcher.control import select_control

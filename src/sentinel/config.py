@@ -48,6 +48,9 @@ class CameraConfig:
     transport: str = "tcp"                    # rtsp transport: tcp | udp
     credentials_file: str | None = None
     include_audio: bool = False               # collection-scope decision; default excluded
+    # How the camera's sound is stored when include_audio is on (sentinel.recorder.audio): "aac" converts it
+    # (works with what cameras send, G.711 included); "copy" keeps the camera's own stream (AAC cameras).
+    audio_format: str = "aac"
     input_format: str | None = None           # "mpegts" for the simulator only; None = auto
     development_source: bool = False          # allow tcp:// / file:// test sources (never in production)
     # Set up in advance without the camera ("setup --camera-later"): url is empty and nothing is
@@ -309,6 +312,8 @@ def _validate_rest(cfg: AppConfig) -> None:
     cam, rec, sto = cfg.camera, cfg.recording, cfg.storage
     if cam.transport not in ("tcp", "udp"):
         raise ConfigError("[camera] transport must be 'tcp' or 'udp'")
+    if cam.audio_format not in ("aac", "copy"):
+        raise ConfigError("[camera] audio_format must be 'aac' or 'copy'")
     if not 2.0 <= rec.segment_seconds <= 3600.0:
         raise ConfigError("[recording] segment_seconds must be between 2 and 3600")
     for name in ("connect_timeout_s", "stall_timeout_s", "io_timeout_s", "stop_grace_s", "backoff_initial_s",

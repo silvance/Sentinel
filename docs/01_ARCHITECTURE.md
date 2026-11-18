@@ -50,7 +50,8 @@ Nothing in this document claims forensic validation.
 ### 2.1 Recording engine (`sentinel.recorder`) — implemented in Phase 2
 * **FFmpeg does the recording.** Python never touches media bytes on the write path.
 * `ffmpeg_cmd.py` builds argv: `-rtsp_transport tcp`, I/O timeout, `-map 0:v:0 -an`
-  (audio excluded unless explicitly enabled), `-c copy`, segment muxer into MPEG-TS,
+  (audio excluded unless explicitly enabled; when enabled it is converted to AAC beside the copied video,
+  docs/branches/audio-recording.md), `-c copy`, segment muxer into MPEG-TS,
   CSV segment list, `-progress pipe:1`.
 * `supervisor.py` owns one FFmpeg child at a time. It:
   * refuses to launch when storage is below the critical threshold;

@@ -84,7 +84,8 @@ class StatusPage(Page):
 
     # Details grouped as an operator reads them: (group, [(key, label, page it opens)])
     GROUPS = [("Camera", [("camera", "Camera", "camera"), ("link", "Connection", "camera")]),
-              ("Recording", [("last", "Last file saved", "recordings"), ("since", "Current run started", "recordings")]),
+              ("Recording", [("last", "Last file saved", "recordings"), ("since", "Current run started", "recordings"),
+                             ("sound", "Sound", "camera")]),
               ("Storage and archive", [("storage", "Recording storage", "storage"), ("archive", "Archive drive", "drives")]),
               ("Schedule and motion", [("schedule", "Schedule", "schedule"), ("motion", "Motion", "motion")]),
               ("System", [("clock", "Clock synchronised", "system"), ("service", "Recorder", "system")])]
@@ -445,6 +446,17 @@ class StatusPage(Page):
         rec = doc.get("recording") or {}
         since = _ep(rec.get("run_started_utc"))
         self._set("since", tf.when(since, tz, now) if since else "—")
+        # Sound (2026-11-18): what the recorder says the current recording really holds.
+        snd = rec.get("audio") if isinstance(rec.get("audio"), dict) else None
+        if cfg is None or not cfg.camera.include_audio:
+            self._set("sound", "not recorded (switched off)")
+        elif stale or snd is None:
+            self._set("sound", "switched on; no report from the recorder yet")
+        else:
+            stored = snd.get("stored") if isinstance(snd.get("stored"), dict) else None
+            good = bool(stored and stored.get("codec")) and not snd.get("suspended")
+            waiting = stored is None and not snd.get("suspended") and snd.get("action") != "off"
+            self._set("sound", str(snd.get("text") or "—"), "ok" if good else "" if waiting else "warning")
         st = doc.get("storage") or {}
         free = st.get("free_bytes")
         secs = st.get("seconds_until_attention")

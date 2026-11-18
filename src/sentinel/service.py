@@ -52,6 +52,7 @@ from .media.videohash import parse_version
 from .models import RunEndReason, SegmentState, StorageLevel
 from .platform import InstanceLockError, Platform, get_platform
 from .power import KeepAwake, read_power_settings, sleep_risks
+from .recorder.audio import status_text as audio_status_text
 from .recorder.finalizer import MAX_FINALIZE_ATTEMPTS, Finalizer, GapJob, SegmentJob
 from .recorder.integrity import IntegrityWorker
 from .recorder.recovery import Recovery
@@ -364,6 +365,11 @@ class RecorderService:
         if prev and prev_hash != cfg_hash:
             self.ledger.add_event("audit", "config", "config_changed", "Configuration changed since last start",
                                   {"previous_sha256": prev_hash, "current_sha256": cfg_hash})
+        if self.cfg.camera.include_audio:
+            # Sound is a collection-scope decision (docs/00 R5): every start with it switched on says so.
+            self.ledger.add_event("audit", "config", "audio_enabled",
+                                  "Sound recording is switched on in the settings",
+                                  {"audio_format": self.cfg.camera.audio_format})
 
     # ------------------------------------------------------------------ periodic work (supervisor thread)
     def _tick(self) -> None:
@@ -594,6 +600,7 @@ class RecorderService:
         motion_idle = False
         media_since = None
         motion_failures = 0
+        audio_missing = audio_suspended = False
         if sup is not None:
             with sup.live.lock:
                 lv = sup.live
@@ -617,6 +624,16 @@ class RecorderService:
                           "time_correction_s": (round(lv.time_correction_s, 3)
                                                 if lv.time_correction_s is not None else None),
                           "retry_in_s": (round(lv.next_attempt_mono - now, 1) if lv.next_attempt_mono else None)}
+                if cfg.camera.include_audio:
+                    # Sound: what was asked for, what this run was started with, and what its file really
+                    # holds (read back a few seconds into the run; None until then).
+                    stored = dict(lv.audio_stored) if lv.audio_stored is not None else None
+                    live_d["audio"] = {"wanted": cfg.camera.audio_format, "action": lv.audio_action,
+                                       "stored": stored, "suspended": lv.audio_suspended,
+                                       "text": audio_status_text(lv.audio_action, stored, lv.audio_suspended)}
+                    audio_suspended = lv.audio_suspended
+                    audio_missing = (lv.audio_action != "off" and lv.ffmpeg_running and stored is not None
+                                     and not stored.get("codec"))
 
         since_seal = None
         verify_problem = verify_critical = corrupt_recent = False
@@ -724,7 +741,8 @@ class RecorderService:
             ledger_altered=ledger_altered, ledger_unprotected=ledger_unprotected, simulated=cfg.camera.development_source,
             scheduled_pause=paused, resumed_s=(now - resumed_mono) if resumed_mono is not None else None,
             camera_pending=cfg.camera.pending, motion_idle=motion_idle,
-            motion_broken=self._motion_broken(), motion_record_failures=motion_failures)
+            motion_broken=self._motion_broken(), motion_record_failures=motion_failures,
+            audio_missing=audio_missing, audio_suspended=audio_suspended)
         d = evaluate(m, rec.stall_timeout_s, rec.segment_seconds, rec.connect_timeout_s, rec.escalate_after_s)
         if self.schedule is not None:
             for a in d.alerts:
@@ -946,8 +964,10 @@ def _cmd_check(args: argparse.Namespace) -> int:
             load_credentials(cfg.camera.credentials_file)
         except CredentialError as exc:
             problems.append(str(exc))
-    print(f"camera {cfg.camera.id}: segments {cfg.recording.segment_seconds:g}s, audio "
-          f"{'INCLUDED' if cfg.camera.include_audio else 'excluded'}, spool {cfg.storage.spool_dir}")
+    sound = ("excluded" if not cfg.camera.include_audio else
+             "INCLUDED (converted to AAC)" if cfg.camera.audio_format == "aac" else "INCLUDED (as sent by the camera)")
+    print(f"camera {cfg.camera.id}: segments {cfg.recording.segment_seconds:g}s, audio {sound}, "
+          f"spool {cfg.storage.spool_dir}")
     if cfg.camera.development_source:
         print("WARNING: development_source = true (simulated/test camera; recordings are not evidence)")
     if cfg.camera.pending:

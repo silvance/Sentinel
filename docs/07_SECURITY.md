@@ -306,7 +306,8 @@ re-implements this with only `sqlite3`, `hashlib` and `json` and agrees with the
 - [ ] Camera on an isolated switch/VLAN with no default gateway; recorder has no Internet route.
 - [ ] Camera: cloud/P2P/UPnP disabled; firmware version recorded; view-only RTSP account created.
 - [ ] Camera RTSP URL verified (vendor docs or ONVIF GetStreamUri); codec H.264, GOP ≤ 2 s, smart codec off.
-- [ ] Audio inclusion decided and documented by the responsible authority (default: excluded).
+- [ ] Audio inclusion decided and documented by the responsible authority (default: excluded). If included:
+      Status › Recording › Sound reads "Recorded (…)" on site, and no N-001 / N-002 alert is shown.
 - [ ] Ubuntu LTS, full-disk encryption per policy, automatic updates disabled; updates applied from an approved offline mirror.
 - [ ] Dedicated `sentinel` service account (no login shell); operators and administrators in separate groups.
 - [ ] `/etc/sentinel/camera.secret` 0600 owned by `sentinel`; `/etc/sentinel/sentinel.toml` root:sentinel 0640.

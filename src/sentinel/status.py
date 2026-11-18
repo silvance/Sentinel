@@ -55,6 +55,8 @@ class Measurements:
     motion_idle: bool = False                   # motion period, waiting for motion (planned; P-003)
     motion_broken: bool = False                 # motion period but the detector gets no pictures (W-001)
     motion_record_failures: int = 0             # recordings after motion that got no video, in a row (W-002)
+    audio_missing: bool = False                 # sound is switched on but the recording holds none (N-001)
+    audio_suspended: bool = False               # sound switched off after recording with it failed (N-002)
 
 
 @dataclass
@@ -117,6 +119,11 @@ def evaluate(m: Measurements, stall_timeout_s: float, segment_seconds: float, co
         alerts.append(make_alert("W-001", Severity.WARNING))
     if m.motion_record_failures:
         alerts.append(make_alert("W-002", Severity.CRITICAL, detail={"failed_attempts": m.motion_record_failures}))
+    # Sound was asked for and is not in the recording. Both say "video recording continues": only while it does.
+    if m.audio_suspended and flowing:
+        alerts.append(make_alert("N-002", Severity.WARNING))
+    elif m.audio_missing and flowing:
+        alerts.append(make_alert("N-001", Severity.WARNING))
     if m.simulated:
         # First among equal-severity alerts, so the single-alert banner shows "not evidence"
         # rather than another warning (e.g. T-002 on a host whose time service is stopped).

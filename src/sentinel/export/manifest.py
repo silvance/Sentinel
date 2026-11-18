@@ -21,9 +21,12 @@ from zoneinfo import ZoneInfo
 
 from ..clock import parse_iso_utc
 from . import layout
+from .media import audio_codec_of, review_audio
 
 # The camera records H.265 (HEVC): Windows plays it only with Microsoft's "HEVC Video Extensions"
 # (Microsoft Store) installed; VLC plays it without them.
+SOUND_NOTE = ("<p><b>Sound.</b> {n} of {m} videos have the sound that was recorded with them (see Notes). The check "
+              "of the pictures against the original recordings does not cover the sound.</p>")
 HEVC_NOTE = ("<p><b>These videos are H.265 (HEVC).</b> If Windows' Media Player or Films &amp; TV shows no picture, "
              "install Microsoft's <i>HEVC Video Extensions</i> from the Microsoft Store, or open the files with VLC "
              "media player. The files themselves are complete.</p>")
@@ -256,7 +259,14 @@ class ManifestBuilder:
                 continue
             d = _jl(i["detail"]) or {}
             srcs = _jl(i["sources"]) or []
+            codecs = [audio_codec_of(self.segments[sid]) for sid in srcs]
+            how = review_audio(codecs)
             out.append({
+                # Sound recorded with the video ([camera] include_audio). Not part of the picture check.
+                "audio": {"included": how is not None, "in_originals": sorted({c for c in codecs if c}),
+                          "in_every_source": bool(codecs) and all(codecs),
+                          "made_by": {None: None, "copy": "copied unchanged (-c:a copy)",
+                                      "aac": "converted to AAC (-c:a aac)"}[how]},
                 "path": i["dest_rel_path"], "sha256": i["sha256"], "size_bytes": i["size_bytes"],
                 "content_sha256": i["content_sha256"], "frame_count": i["frame_count"],
                 "start_utc": d.get("start_utc"), "end_utc": d.get("end_utc"),
@@ -395,8 +405,14 @@ class ManifestBuilder:
         hevc = any((s or {}).get("video_codec") == "hevc" for s in self.segments.values())
         cov = self.plan.get("coverage", {})
         rows = []
+        with_sound = [d for d in derivs if d["audio"]["included"]]
         for d in derivs:
-            notes = "; ".join(FLAG_TEXT.get(f, f) for f in d["flags"])
+            flags = [FLAG_TEXT.get(f, f) for f in d["flags"]]
+            if d["audio"]["included"]:
+                flags.append("with sound" if d["audio"]["in_every_source"] else "sound for part of it")
+            elif d["audio"]["in_originals"]:
+                flags.append("sound only in the original recordings")
+            notes = "; ".join(flags)
             marks = [f"{_clock(m['from_s'])}&ndash;{_clock(m['to_s'])}" for m in d["motion"]]
             motion_cell = (", ".join(marks[:MAX_MOTION_LISTED])
                            + (f" and {len(marks) - MAX_MOTION_LISTED} more (see manifest)" if len(marks) > MAX_MOTION_LISTED
@@ -437,6 +453,7 @@ small{{color:#555}}
 <p>Open the <b>Recordings</b> folder, then the folder for the day, and double-click a video. File names are the local
 start and end time followed by the time zone. A new file starts after every gap.</p>
 {HEVC_NOTE if hevc else ''}
+{SOUND_NOTE.format(n=len(with_sound), m=len(derivs)) if with_sound else ''}
 <h2>Videos ({len(derivs)})</h2>
 <table><tr><th>Starts</th><th>Ends</th><th>Length</th><th>File</th><th>Motion (time into the video)</th><th>Pictures compared with originals</th><th>Notes</th></tr>
 {''.join(rows) or '<tr><td colspan=7>No videos in this export.</td></tr>'}

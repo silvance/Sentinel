@@ -42,6 +42,7 @@ from ..db import NOT_RUNNING_REASON, PLANNED_GAP_REASONS, RESUMING_REASON, Ledge
 from ..models import RunEndReason, SegmentState
 from ..platform.base import Platform
 from ..storage.monitor import StorageMonitor
+from . import audio as audio_mod
 from .ffmpeg_cmd import SEGMENT_LIST_NAME, build_record_argv, redacted_command
 from .finalizer import Finalizer, GapJob, SegmentJob
 from .progress import ProgressParser
@@ -114,6 +115,10 @@ class LiveState:
     # motion-triggered recording ([schedule] action "motion", sentinel.motion)
     motion_idle: bool = False                  # waiting for motion (not recording)
     motion_record_failures: int = 0            # runs started for motion that got no video, in a row
+    # sound ([camera] include_audio; sentinel.recorder.audio)
+    audio_action: str = "off"                  # what the current (or last) run was started with: off | aac | copy
+    audio_stored: dict | None = None           # the run's first file read back (None: not read yet)
+    audio_suspended: bool = False              # sound given up for this service lifetime (N-002)
 
 
 @dataclass
@@ -148,6 +153,78 @@ class RecordingSupervisor:
         self._open_run_dir: Path = self.cam_dir
         self.backoff = Backoff(cfg.recording.backoff_initial_s, cfg.recording.backoff_max_s,
                                cfg.recording.backoff_reset_after_s)
+        self.audio_guard = audio_mod.AudioGuard(audio_mod.wanted_action(cfg))
+        self._run_audio = "off"                  # what the run in progress was started with
+        self._audio_reported: tuple | None = None   # last (action, stored codec) written to the recording log
+
+    # ------------------------------------------------------------------ sound (never at the video's cost)
+    def _camera_answers(self) -> bool | None:
+        """One short question to the camera after an attempt with sound recorded nothing: is it there?"""
+        cam = self.cfg.camera
+        try:
+            info = audio_mod.camera_streams(self.cfg.tools.ffprobe, self._input_url, cam.transport, cam.input_format,
+                                            timeout=min(12.0, self.cfg.recording.connect_timeout_s),
+                                            popen_kwargs=self.platform.low_priority_popen_kwargs())
+        except Exception:
+            log.exception("could not ask the camera whether it answers")
+            return None
+        return info is not None
+
+    def _after_run_audio(self, outcome: RunOutcome) -> None:
+        guard, used = self.audio_guard, self._run_audio
+        planned = outcome.reason in (RunEndReason.GRACEFUL_STOP, RunEndReason.SCHEDULED_PAUSE, RunEndReason.MOTION_IDLE,
+                                     RunEndReason.STORAGE_CRITICAL, RunEndReason.LAUNCH_FAILED,
+                                     RunEndReason.INTERNAL_ERROR)
+        answers = None
+        if guard.needs_camera_check(used, outcome.media_seconds, planned) and not guard.trial:
+            answers = self._camera_answers()
+        if guard.after_run(used, outcome.media_seconds, planned, answers) == "suspended":
+            with self.live.lock:
+                self.live.audio_suspended = True
+            log.error("recording with sound got no video while recording without it works: sound is switched off "
+                      "until the recorder is restarted")
+            try:
+                self.ledger.add_event("warning", "recorder", "audio_suspended",
+                                      "Recording with sound failed; recording continues without sound until the "
+                                      "recorder is restarted", {"audio_format": guard.wanted})
+            except Exception:
+                log.exception("could not record audio_suspended event")
+        elif guard.trial and used != "off":
+            log.warning("%d recording attempts with sound got nothing although the camera answers; trying once "
+                        "without sound", guard.suspects)
+
+    def _check_audio(self, run_id: str, run_dir: Path, action: str) -> None:
+        """Read the run's first file back (it is still being written) and note what sound it really holds."""
+        try:
+            files = sorted(p for p in run_dir.iterdir() if _SEG_RE.match(p.name))
+            info = audio_mod.stored_audio(files[0], self.cfg.tools.ffprobe) if files else None
+        except Exception:
+            log.exception("run %s: could not read the recording back to check its sound", run_id)
+            return
+        if info is None:
+            return
+        with self.live.lock:
+            if self.live.run_id != run_id:
+                return
+            self.live.audio_stored = info
+        key = (action, info.get("codec"), tuple(info.get("other") or ()))
+        if key == self._audio_reported:
+            return                                   # the same as the run before: one entry, not one per run
+        self._audio_reported = key
+        detail = {"run_id": run_id, "audio_format": action, "stored": info}
+        try:
+            if info.get("codec"):
+                how = "converted to AAC by the recorder" if action == "aac" else "as sent by the camera"
+                log.info("run %s: sound is recorded (%s; %s)", run_id, audio_mod.words(info), how)
+                self.ledger.add_event("info", "recorder", "audio_recorded",
+                                      f"Sound is recorded with the video ({audio_mod.words(info)}; {how})", detail)
+            else:
+                log.warning("run %s: sound is switched on but the recording holds none (%s)", run_id,
+                            ", ".join(info.get("other") or []) or "the camera sends no sound")
+                self.ledger.add_event("warning", "recorder", "audio_missing",
+                                      "Sound is switched on but the recording holds no sound", detail)
+        except Exception:
+            log.exception("could not record the sound check")
 
     # ------------------------------------------------------------------ main loop
     def run_forever(self) -> None:
@@ -204,6 +281,8 @@ class RecordingSupervisor:
                     self.live.motion_record_failures += 1
             if self.stop_event.is_set():
                 break
+            if self.audio_guard.wanted != "off":
+                self._after_run_audio(outcome)
             if outcome.reason in (RunEndReason.SCHEDULED_PAUSE, RunEndReason.MOTION_IDLE):
                 continue                       # planned: no retry delay; the loop top pauses
             delay = self.backoff.next_delay(outcome.media_seconds)
@@ -423,7 +502,8 @@ class RecordingSupervisor:
         wall0, mono0, _ = read_clock_pair(self.clock)       # tight pair: reference for host drift
         run_id =f"{compact_utc(wall0)}-{secrets.token_hex(4)}"
         run_dir = self.cam_dir / run_id
-        argv = build_record_argv(self.cfg, self._input_url, run_dir)
+        audio = self._run_audio = self.audio_guard.next_action()
+        argv = build_record_argv(self.cfg, self._input_url, run_dir, audio)
         run_dir.mkdir(parents=True, exist_ok=False)
         rel_dir = str(run_dir.relative_to(self.cfg.spool_path)).replace("\\", "/")
         try:
@@ -450,6 +530,7 @@ class RecordingSupervisor:
             lv.camera_drift_ppm, lv.host_clock_drift_ppm, lv.time_correction_s = None, None, None
             lv.clock_slew_run = False
             lv.attempts += 1
+            lv.audio_action, lv.audio_stored = audio, None
         log.info("run %s: launching FFmpeg: %s", run_id, redacted_command(argv))
 
         try:
@@ -478,11 +559,19 @@ class RecordingSupervisor:
         reason: RunEndReason | None = None
         clock_flagged = False
         last_persist = mono0
+        audio_checked = audio == "off"
         try:
             while True:
                 if proc.poll() is not None:
                     break
                 now = self.clock.mono()
+                if not audio_checked:
+                    with self.live.lock:
+                        since = self.live.media_since_mono
+                    if since is not None and now - since >= audio_mod.CHECK_AFTER_S:
+                        audio_checked = True
+                        threading.Thread(target=self._check_audio, args=(run_id, run_dir, audio), daemon=True,
+                                         name=f"audio-{run_id}").start()
                 self._register_new_files(run_id, run_dir, known)
                 # Closed segments wait until the run's time anchor has been measured: after a
                 # (re)connect FFmpeg may flush buffered media and close a segment before its

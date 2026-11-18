@@ -10,12 +10,14 @@ from urllib.parse import urlsplit
 
 from ..config import AppConfig
 from ..credentials import redact
+from .audio import record_args, wanted_action
 
 SEGMENT_PATTERN = "seg_%06d.ts"
 SEGMENT_LIST_NAME = "segments.csv"
 
 
-def build_record_argv(cfg: AppConfig, input_url: str, run_dir: Path) -> list[str]:
+def build_record_argv(cfg: AppConfig, input_url: str, run_dir: Path, audio: str | None = None) -> list[str]:
+    """``audio``: "off", "aac" or "copy" for this run (recorder.audio); None = what the settings say."""
     cam, rec = cfg.camera, cfg.recording
     scheme = urlsplit(input_url).scheme
     io_us = str(int(rec.io_timeout_s * 1_000_000))
@@ -29,13 +31,9 @@ def build_record_argv(cfg: AppConfig, input_url: str, run_dir: Path) -> list[str
         argv += ["-f", cam.input_format]
     argv += ["-i", input_url]
 
-    # Stream selection: first video stream only; audio only by explicit collection-scope decision.
-    argv += ["-map", "0:v:0"]
-    if cam.include_audio:
-        argv += ["-map", "0:a:0?"]
-    else:
-        argv += ["-an"]
-    argv += ["-dn", "-sn", "-c", "copy"]
+    # Stream selection: first video stream, always copied unchanged; sound only by explicit
+    # collection-scope decision, then converted to AAC or kept as sent (recorder.audio).
+    argv += ["-map", "0:v:0", *record_args(wanted_action(cfg) if audio is None else audio)]
 
     argv += [
         "-f", "segment",

@@ -20,6 +20,7 @@ from sentinel.clock import iso_utc, parse_iso_utc
 from sentinel.db import Ledger
 from sentinel.models import OverallStatus, RunEndReason
 from sentinel.motion import FRAME_BYTES, MotionAnalyzer, MotionConfig
+from sentinel.recorder.audio import AudioGuard
 from sentinel.recorder.supervisor import Backoff, LiveState, RecordingSupervisor, RunOutcome
 from sentinel.status import evaluate
 
@@ -238,6 +239,7 @@ def _loop_supervisor(tmp_path: Path, mode: str, motion: object, runs: int,
     sup.ledger = SimpleNamespace(switch_open_gap=lambda *a, **k: None, add_event=lambda *a, **k: None)
     sup.storage = SimpleNamespace(sample=lambda: SimpleNamespace(level=SimpleNamespace(value="ok"), free_bytes=1))
     sup.backoff = Backoff(0.0, 0.0, 0.0)
+    sup.audio_guard = AudioGuard("off")              # sound is not what these tests are about
     count = {"n": 0}
 
     def run_once() -> RunOutcome:

@@ -177,7 +177,7 @@ class Finalizer:
             return SegmentState.CORRUPT
 
         res = probe_segment(path, self.cfg.tools.ffprobe, self.cfg.tools.ffmpeg, rec.validation,
-                            rec.max_internal_gap_s)
+                            rec.max_internal_gap_s, audio=self.cfg.camera.include_audio)
         warnings: list[str] = list(res.warnings)
 
         # The writer has finished with this file (listed by FFmpeg, or FFmpeg has exited).

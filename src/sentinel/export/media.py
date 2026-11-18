@@ -10,8 +10,10 @@ Remux (checked against FFmpeg 9.0.1 ``ffmpeg -h demuxer=concat`` / ``-h muxer=mp
 * ``-c copy``: no re-encoding — the pictures are the camera's. ``+faststart`` moves the index to
   the front so players start immediately and so the file can be decoded from a pipe (used to
   verify the bytes read back from the drive in a single pass).
-* ``-n``: never overwrite. Video only: audio is excluded by default (R5); if a deployment ever
-  records audio it is present only in the originals (documented limitation).
+* ``-n``: never overwrite. Sound is excluded by default (R5). Where the recordings hold sound
+  (``[camera] include_audio``, 2026-11-18) it goes into the review video too: the stored AAC unchanged
+  (``-map 0:a:0? -c:v copy -c:a copy``), any other stored format converted to AAC. The picture check
+  (per-frame hashes against the originals) is about the video stream only.
 
 Measured on this host (FFmpeg 9.0.1): concatenating recorder segments (including a truncated,
 interrupted one) gives an MP4 whose per-frame decoded SHA-256 list equals the concatenation of
@@ -58,20 +60,58 @@ def write_concat_list(path: Path, sources: list[Path]) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def remux_argv(ffmpeg: str, list_path: Path, out_partial: Path, codec: str | None = None) -> list[str]:
+def segment_audio(row: Any) -> dict[str, Any] | None:
+    """The sound stream noted when a recording was sealed (``validation_detail["audio"]``, written only while
+    sound recording is switched on), or None."""
+    try:
+        detail = json.loads(row["validation_detail"] or "{}")
+    except (KeyError, IndexError, TypeError, ValueError):
+        return None
+    audio = detail.get("audio") if isinstance(detail, dict) else None
+    return audio if isinstance(audio, dict) and audio.get("codec") else None
+
+
+def audio_codec_of(seg: Any) -> str | None:
+    """Sound format of a recording, from the export plan's snapshot of it (``audio_codec``) or from its row in
+    the recording log. None: the recording has no sound."""
+    try:
+        if "audio_codec" in seg.keys():
+            return seg["audio_codec"] or None
+    except (AttributeError, TypeError):
+        pass
+    return (segment_audio(seg) or {}).get("codec")
+
+
+def review_audio(codecs: list[str | None]) -> str | None:
+    """How the sound of the recordings joined into one review video gets into it: None = the video has no
+    sound; "copy" = the stored AAC, unchanged; "aac" = converted (a stored format MP4 players do not all play,
+    or recordings that differ). The joined video takes its streams from the first recording, so sound is
+    included when the first one has it."""
+    if not codecs or not codecs[0]:
+        return None
+    return "copy" if all(c in ("aac", None) for c in codecs) else "aac"
+
+
+def remux_argv(ffmpeg: str, list_path: Path, out_partial: Path, codec: str | None = None,
+               audio: str | None = None) -> list[str]:
     """``codec`` is the recorded video codec (ffprobe name). H.265 is labelled ``hvc1``, the MP4 tag
-    Windows' and Apple's players expect (FFmpeg's default ``hev1`` is not opened by QuickTime)."""
+    Windows' and Apple's players expect (FFmpeg's default ``hev1`` is not opened by QuickTime).
+    ``audio``: see :func:`review_audio`. The video is copied in every case."""
     tag = ["-tag:v", "hvc1"] if codec == "hevc" else []
-    return [ffmpeg, "-hide_banner", "-nostdin", "-v", "error", "-f", "concat", "-safe", "0", "-i", str(list_path),
-            "-map", "0:v:0", "-c", "copy", *tag, "-an", "-sn", "-dn", "-movflags", "+faststart",
-            "-f", "mp4", "-n", str(out_partial)]
+    head = [ffmpeg, "-hide_banner", "-nostdin", "-v", "error", "-f", "concat", "-safe", "0", "-i", str(list_path)]
+    tail = ["-sn", "-dn", "-movflags", "+faststart", "-f", "mp4", "-n", str(out_partial)]
+    if audio is None:
+        return [*head, "-map", "0:v:0", "-c", "copy", *tag, "-an", *tail]
+    sound = ["-c:a", "copy"] if audio == "copy" else ["-c:a", "aac", "-b:a", "96k"]
+    return [*head, "-map", "0:v:0", "-map", "0:a:0?", "-c:v", "copy", *tag, *sound, *tail]
 
 
 def remux_concat(ffmpeg: str, sources: list[Path], out_partial: Path, list_path: Path, timeout: float,
-                 popen_kwargs: dict[str, Any] | None = None, codec: str | None = None) -> None:
+                 popen_kwargs: dict[str, Any] | None = None, codec: str | None = None,
+                 audio: str | None = None) -> None:
     write_concat_list(list_path, sources)
     try:
-        cp = subprocess.run(remux_argv(ffmpeg, list_path, out_partial, codec), stdin=subprocess.DEVNULL,
+        cp = subprocess.run(remux_argv(ffmpeg, list_path, out_partial, codec, audio), stdin=subprocess.DEVNULL,
                             capture_output=True, timeout=timeout, check=False, **(popen_kwargs or {}))
     except FileNotFoundError:
         raise MediaError(f"tool not found: {ffmpeg}") from None
@@ -137,8 +177,13 @@ def frame_hashes_span(ffmpeg: str, path: Path, seek_s: float | None, frames: int
     """Decode ``frames`` frames starting at the first frame with pts >= ``seek_s`` (accurate
     seek: FFmpeg decodes from the preceding keyframe and drops the frames before the target).
     Returns (pts in the stream time base, frame SHA-256) pairs. ``-copyts`` and
-    ``-enc_time_base demux`` keep the container timestamps (verified on FFmpeg 9.0.1)."""
-    seek = ["-copyts", "-ss", f"{seek_s:.6f}"] if seek_s is not None else []
+    ``-enc_time_base demux`` keep the container timestamps (verified on FFmpeg 9.0.1).
+
+    ``-copyts`` also without a seek (2026-11-18): a video joined from recordings that hold sound starts its
+    pictures a little after time zero (the sound starts first; measured 0.73 s), and FFmpeg would otherwise
+    shift them to zero, away from the timestamps :func:`packet_pts` lists. For a video whose first picture is
+    at zero it changes nothing."""
+    seek = ["-copyts", "-ss", f"{seek_s:.6f}"] if seek_s is not None else ["-copyts"]
     argv = [ffmpeg, "-hide_banner", "-nostdin", "-v", "error", *seek, "-i", str(path), "-frames:v", str(frames),
             "-map", "0:v:0", "-an", "-sn", "-dn", "-fps_mode", "passthrough", "-enc_time_base:v", "demux",
             "-f", "framehash", "-hash", "sha256", "-"]

@@ -34,7 +34,7 @@ WATCH_PASSES = 3               # ... until it passes 3 times in a row (not a pas
 CODE_PAGES = {"P-001": "schedule", "P-003": "motion", "W-001": "motion", "W-002": "camera", "P-002": "camera",
               "S-001": "export", "R": "camera",
               "C": "system", "S": "system", "T": "system", "H": "system", "X": "system", "V": "system",
-              "A": "drives", "M": "drives", "L": "drives", "E": "export", "Z": "camera"}
+              "A": "drives", "M": "drives", "L": "drives", "E": "export", "Z": "camera", "N": "camera"}
 
 
 def page_for_code(code: str) -> str:

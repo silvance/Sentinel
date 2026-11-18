@@ -33,6 +33,7 @@ from ..clock import parse_iso_utc
 from ..db import Ledger
 from . import layout
 from .ledger import B_COMPLETE, I_VERIFIED, NewItem
+from .media import audio_codec_of
 
 CONTIGUITY_TOL_S = 0.5
 DOC_RESERVE_BYTES = 8 * 1024 * 1024
@@ -92,12 +93,16 @@ SNAPSHOT_FIELDS = ("segment_id", "camera_id", "run_id", "seq", "rel_path", "stat
 
 
 def snapshot(s: dict[str, Any]) -> dict[str, Any]:
-    return {k: s.get(k) for k in SNAPSHOT_FIELDS}
+    d = {k: s.get(k) for k in SNAPSHOT_FIELDS}
+    d["audio_codec"] = audio_codec_of(s)        # sound recorded with the video (2026-11-18), or None
+    return d
 
 
 # ------------------------------------------------------------------------------ pure helpers
 def _params(s: dict[str, Any]) -> tuple[Any, ...]:
-    return (s.get("video_codec"), s.get("width"), s.get("height"), s.get("pix_fmt"))
+    # Sound is part of it: a review video is joined only from recordings that all have the same sound (or none),
+    # so each video either has sound throughout or not at all.
+    return (s.get("video_codec"), s.get("width"), s.get("height"), s.get("pix_fmt"), audio_codec_of(s))
 
 
 def _overlaps(a0: float, a1: float, b0: float | None, b1: float | None) -> bool:

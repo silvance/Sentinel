@@ -136,6 +136,11 @@ CATALOG: dict[str, AlertDef] = {d.code: d for d in [
     # Motion was seen but the recording that should follow failed (review 2026-11-10: this was
     # shown as "Waiting for motion ... No action is needed").
     AlertDef("W-002", "Motion was detected but could not be recorded", SUPPORT, True),
+    # N-: souNd ([camera] include_audio). Neither stops the video; both mean the recordings have no sound.
+    AlertDef("N-001", "Sound is switched on, but the recordings have no sound",
+             "Video recording continues. Check the camera's microphone and its sound setting. " + SUPPORT, False),
+    AlertDef("N-002", "Recording with sound failed, so sound is switched off for now",
+             "Video recording continues without sound. " + SUPPORT, False),
     # Set up in advance ("setup --camera-later"); the technician adds the camera on site (set-camera).
     AlertDef("P-002", "Not recording: the camera has not been added yet",
              "Recording starts once the installing technician adds the camera. If the camera should "

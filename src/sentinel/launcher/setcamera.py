@@ -85,9 +85,10 @@ def redact(text: str, *secrets: str) -> str:
 
 def test_camera(ffprobe: str, url: str, creds: Credentials | None, transport: str = "tcp",
                 timeout_s: float = 30.0, run: Callable[..., Any] = subprocess.run) -> tuple[bool, str]:
-    """Ask the camera for its video stream with FFprobe. (ok, what to tell the technician)."""
+    """Ask the camera for its streams with FFprobe. (ok, what to tell the technician): the video, and whether
+    it sends sound and in which format (2026-11-18: sound may be switched on, [camera] include_audio)."""
     argv = [ffprobe, "-v", "error", "-rtsp_transport", transport, "-timeout", str(int(15e6)),
-            "-select_streams", "v:0", "-show_entries", "stream=codec_name,width,height", "-of",
+            "-show_entries", "stream=index,codec_name,codec_type,width,height,sample_rate,channels", "-of",
             "default=noprint_wrappers=1", url_with_credentials(url, creds)]
     secrets = (creds.username, creds.password) if creds else ()
     kw: dict[str, Any] = {"capture_output": True, "text": True, "timeout": timeout_s}
@@ -99,9 +100,26 @@ def test_camera(ffprobe: str, url: str, creds: Credentials | None, transport: st
         return False, "The camera did not answer within 30 seconds."
     except OSError as exc:
         return False, f"FFprobe could not be run: {exc}"
-    out = dict(ln.split("=", 1) for ln in (cp.stdout or "").splitlines() if "=" in ln)
+    streams: list[dict[str, str]] = []
+    for ln in (cp.stdout or "").splitlines():
+        key, eq, value = ln.strip().partition("=")
+        if not eq:
+            continue
+        if not streams or key == "index" or key in streams[-1]:      # a new stream begins
+            streams.append({})
+        streams[-1][key] = value
+    out = next((s for s in streams if s.get("codec_type", "video") == "video" and s.get("codec_name")), {})
     if cp.returncode == 0 and out.get("codec_name"):
-        return True, f"The camera answered: {out.get('codec_name')} video, {out.get('width')}x{out.get('height')}."
+        from ..recorder.audio import camera_sound_sentence
+
+        sound = next((s for s in streams if s.get("codec_type") == "audio"), None)
+        info = {"codec": sound.get("codec_name"), "sample_rate": sound.get("sample_rate"),
+                "channels": sound.get("channels")} if sound else {"codec": None}
+        for k in ("sample_rate", "channels"):
+            if not str(info.get(k) or "").isdigit():
+                info.pop(k, None)
+        return True, (f"The camera answered: {out.get('codec_name')} video, {out.get('width')}x{out.get('height')}. "
+                      + camera_sound_sentence(info))
     err = redact((cp.stderr or "").strip().splitlines()[-1] if (cp.stderr or "").strip() else "", *secrets)
     hint = ""
     if "401" in err or "Unauthorized" in err:

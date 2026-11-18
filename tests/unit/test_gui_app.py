@@ -1528,3 +1528,81 @@ def test_status_bar_items_are_not_drawn_over_a_message(app: QApplication, tmp_pa
     assert all(b.isHidden() for b in (first.sb_alerts, first.sb_storage, first.sb_archive))
     first._closing_for_update = True
     first.close()
+
+
+# ---------------------------------------------------------------------------- sound (requirement change 2026-11-18)
+def test_camera_page_switches_sound_on_only_after_asking(app: QApplication, tmp_path: Path,
+                                                         monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(base, "restart_recorder", lambda p, c: "Restarted.")
+    asked: list[str] = []
+    answers: list[Any] = []
+
+    def question(_parent: Any, _title: str, text: str, *a: Any, **k: Any) -> Any:
+        asked.append(text)
+        return answers.pop(0)
+
+    monkeypatch.setattr(settings_pages.QMessageBox, "question", question)
+    yes, no = settings_pages.QMessageBox.StandardButton.Yes, settings_pages.QMessageBox.StandardButton.No
+    w = _window(app, tmp_path, admin=True)
+    w.navigate("camera")
+    page = w.pages["camera"]
+    assert not page.audio.isChecked() and not page.audio.isHidden()
+    assert page.audio_format.isHidden() and page.audio_format.currentData() == "aac"       # under Advanced
+
+    def raw_camera() -> dict:
+        return tomllib.loads(Path(w.ctx.cfg_path).read_text(encoding="utf-8"))["camera"]
+
+    def save() -> None:
+        page.tested_ok_for = page._url()            # the connection test is not what is tried here
+        page.save()
+        _drain(app, 0.3)
+
+    page.audio.setChecked(True)
+    answers.append(no)
+    save()
+    assert len(asked) == 1 and asked[0].startswith("Switch sound recording ON?") and "authorised" in asked[0]
+    assert raw_camera().get("include_audio") is False                       # refused: nothing was changed
+    page.audio.setChecked(True)
+    answers.append(yes)
+    save()
+    cam = load_config(w.ctx.cfg_path).camera
+    assert cam.include_audio and cam.audio_format == "aac"
+    # the default format is not written, so an older version (which refuses keys it does not know) still reads it
+    assert raw_camera()["include_audio"] is True and "audio_format" not in raw_camera()
+    assert page.audio.isChecked()
+    save()                                                                  # already on: not asked again
+    assert len(asked) == 2
+    page.advanced.set_open(True)
+    page.audio_format.setCurrentIndex(page.audio_format.findData("copy"))
+    save()
+    assert raw_camera()["audio_format"] == "copy" and load_config(w.ctx.cfg_path).camera.audio_format == "copy"
+    page.audio_format.setCurrentIndex(page.audio_format.findData("aac"))
+    page.audio.setChecked(False)
+    save()
+    assert raw_camera()["include_audio"] is False and "audio_format" not in raw_camera()
+    assert len(asked) == 2                                                  # switching it off is not questioned
+    w.close()
+
+
+def test_status_page_says_what_sound_the_recording_holds(app: QApplication, tmp_path: Path) -> None:
+    def sound_row(doc: dict | None, **camera: Any) -> tuple[str, str]:
+        d = tmp_path / str(len(list(tmp_path.iterdir())))
+        w = _window(app, d, admin=False, doc=doc)
+        if camera:
+            w.ctx.cfg = replace(w.ctx.cfg, camera=replace(w.ctx.cfg.camera, **camera))
+            w.refresh()
+        it = w.pages["status"].items["sound"]
+        out = (it.text(0).strip(), it.text(1))
+        w.close()
+        return out
+
+    assert sound_row(None) == ("Sound", "not recorded (switched off)")
+    doc = status_doc(base_measurements(), time.time(), last_segment_end=time.time())
+    assert sound_row(doc, include_audio=True)[1] == "switched on; no report from the recorder yet"
+    doc["recording"]["audio"] = {"wanted": "aac", "action": "aac", "suspended": False,
+                                 "stored": {"video": True, "codec": "aac", "sample_rate": 8000, "channels": 1},
+                                 "text": "Recorded (AAC, 8000 Hz, 1 channel; converted by the recorder)"}
+    assert sound_row(doc, include_audio=True)[1] == "Recorded (AAC, 8000 Hz, 1 channel; converted by the recorder)"
+    doc["recording"]["audio"].update(stored={"video": True, "codec": None}, text="NOT recorded: the camera sends no sound")
+    assert sound_row(doc, include_audio=True)[1] == "NOT recorded: the camera sends no sound"
+    assert page_for_code("N-001") == "camera" and page_for_code("N-002") == "camera"
