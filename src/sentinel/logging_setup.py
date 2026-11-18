@@ -33,6 +33,19 @@ class RedactingFormatter(logging.Formatter):
 FORMAT = "%(asctime)s.%(msecs)03dZ %(levelname)-7s %(name)s: %(message)s"
 
 
+def line_buffered_output() -> None:
+    """Write every printed line at once, also when the output goes to another program (the Sentinel window).
+
+    Field report 2026-11-18: the window's live motion test showed nothing while it ran. Through a pipe Python
+    collects what is printed in blocks, and the built program does not read ``PYTHONUNBUFFERED`` (which the
+    window sets): every line arrived when the command ended, and none when it was stopped."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(line_buffering=True)        # type: ignore[union-attr]
+        except (AttributeError, ValueError, OSError):       # no console at all, or not a text stream
+            pass
+
+
 def setup_logging(log_dir: Path | None, level: str = "INFO", to_stderr: bool = True) -> None:
     import time as _time
 

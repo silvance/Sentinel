@@ -894,11 +894,18 @@ class MotionPage(SettingsPage):
         f.addRow("Share of picture that must change", self.percent)
         f.addRow("", Note("A smaller share notices smaller movements (more sensitive); a larger one ignores them. "
                           "Try it with the live test below."))
-        # GUI review 2026-11-17: the three settings above are the ones a site adjusts; the rest is tuning.
-        self.advanced = AdvancedRows(f, "Fine tuning of the detector; the defaults suit most scenes.")
+        # Field report 2026-11-18: this is set per camera at installation, so it is not behind Advanced; the
+        # whole address was typed here and accepted, so the line below says which address will be read.
         self.stream = self.editor(QLineEdit())
-        self.stream.setPlaceholderText("empty = key frames of the main stream")
-        self.advanced.add("Second stream path", self.stream)
+        self.stream.setPlaceholderText("for example stream2; empty = key frames of the main stream")
+        self.stream.setToolTip("Only the path of the camera's low-resolution stream, written like the Stream path on "
+                               "the Camera tab. A whole address is reduced to its path when you save.")
+        f.addRow("Second stream path", self.stream)
+        self.stream_note = Note()
+        f.addRow("", self.stream_note)
+        self.stream.textChanged.connect(lambda _t: self._show_detection_address())
+        # GUI review 2026-11-17: the settings above are the ones a site adjusts; the rest is tuning.
+        self.advanced = AdvancedRows(f, "Fine tuning of the detector; the defaults suit most scenes.")
         self.threshold = self._spin(5, 200, "", "Brightness change (0–255) that counts as a change")
         self.advanced.add("Brightness change that counts", self.threshold)
         self.frames = self._spin(1, 20, "", "Analysed frames in a row that must show change")
@@ -924,14 +931,17 @@ class MotionPage(SettingsPage):
         self.test_btn = self.editor(icon_button("Start test with the saved settings", "play", ctx.palette.text))
         self.test_btn.clicked.connect(self._test)
         self.stop_btn = QPushButton("Stop")
-        self.stop_btn.clicked.connect(lambda: self.log.current.kill() if self.log.current else None)
+        self.stop_btn.clicked.connect(lambda: self.log.stop())
         row.addWidget(self.secs)
         row.addWidget(self.test_btn)
         row.addWidget(self.stop_btn)
         row.addStretch(1)
         tl.addLayout(row)
+        tl.addWidget(Note("One line a second: how much of the picture changed, and MOTION when that counts as "
+                          "motion. Ten # marks are exactly the share set above."))
         self.log = OutputLog()
-        tl.addWidget(CommandPanel(self.log, ctx.palette))
+        self.panel = CommandPanel(self.log, ctx.palette)
+        tl.addWidget(self.panel)
         test.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
         self.body.addWidget(capped(test))  # same width as the form above; no empty box filling the page
         self.body.addStretch(1)
@@ -959,10 +969,32 @@ class MotionPage(SettingsPage):
         self.fps.setValue(float(m.analysis_fps))
         self.unhealthy.setValue(int(m.unhealthy_after_s))
         self.merge.setValue(int(m.marker_merge_s))
+        self._show_detection_address()
         self.result.clear()
 
+    def _show_detection_address(self) -> None:
+        """Say which address the detector will read, so a path that is not one shows before it is saved."""
+        from ...credentials import redact
+        from ...motion import detection_url, stream_path_only
+
+        cfg = self.cfg
+        typed = self.stream.text().strip()
+        path = stream_path_only(typed)
+        if cfg is None or cfg.camera.pending or not cfg.camera.url:
+            text = "" if not path else f"Detection will read the path “{path}” on the camera."
+        elif not path:
+            text = ("Detection reads only the key frames of the main stream. With the camera's low-resolution "
+                    "stream here, motion is noticed sooner.")
+        else:
+            text = f"Detection will read {redact(detection_url(cfg.camera.url, path))}"
+            if path != typed:
+                text += f" (only the path, “{path}”, is saved)"
+        self.stream_note.setText(text)
+
     def tables(self) -> dict[str, dict[str, Any]]:
-        return {"motion": {"markers": self.markers.isChecked(), "stream_path": self.stream.text().strip(),
+        from ...motion import stream_path_only
+
+        return {"motion": {"markers": self.markers.isChecked(), "stream_path": stream_path_only(self.stream.text()),
                            "keep_recording_s": self.keep.value(), "changed_percent": round(self.percent.value(), 2),
                            "pixel_threshold": self.threshold.value(), "min_frames": self.frames.value(),
                            "analysis_fps": round(self.fps.value(), 1), "unhealthy_after_s": self.unhealthy.value(),
@@ -971,6 +1003,8 @@ class MotionPage(SettingsPage):
     def _test(self) -> None:
         if self.ctx.cfg_path is None:
             return
+        # The lines ARE the test (field report 2026-11-18: with them behind Details it looked as if nothing ran).
+        self.panel.show_output()
         self.log.run(sentinel_argv("motion-test", "--config", str(self.ctx.cfg_path), "--seconds",
                                    str(self.secs.value())), "Motion test", busy=[self.test_btn])
 

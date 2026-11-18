@@ -356,6 +356,17 @@ class AppWindow(QMainWindow):
         for w in (self.sb_state, self.sb_alerts, self.sb_storage, self.sb_archive):
             sb.addWidget(w)
         sb.addPermanentWidget(self.sb_updated)
+        self._sb_set_up = True
+        # Qt hides these while it shows a message and shows them all again afterwards; put ours right then.
+        sb.messageChanged.connect(lambda _m: self._sb_show_items())
+
+    def _sb_show_items(self) -> None:
+        """The alert, storage and archive items show only on a computer that is set up, and never while the
+        status bar shows a message. Field report 2026-11-18 (0.3.18): they were shown again at every refresh,
+        on top of "The recorder was restarted with the saved settings."."""
+        on = self._sb_set_up and not self.statusBar().currentMessage()
+        for b in (self.sb_alerts, self.sb_storage, self.sb_archive):
+            b.setVisible(on)
 
     def _sb_button(self, key: str) -> QToolButton:
         b = QToolButton()
@@ -458,8 +469,8 @@ class AppWindow(QMainWindow):
         if cfg is not None:
             self._reload_if_changed()
             cfg = self.ctx.cfg
-        for b in (self.sb_alerts, self.sb_storage, self.sb_archive):      # nothing to say before setup
-            b.setVisible(cfg is not None)
+        self._sb_set_up = cfg is not None                                  # nothing to say before setup
+        self._sb_show_items()
         if cfg is None:
             self.state_label.setText("Not set up")
             self.sb_state.setText("Sentinel is not set up on this computer")

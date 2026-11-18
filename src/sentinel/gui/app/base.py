@@ -289,6 +289,7 @@ class OutputLog(QPlainTextEdit):
         self.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)   # long messages are read whole
         self.setPlaceholderText("Command output appears here.")
         self.current: Command | None = None
+        self.last_stopped = False       # the last command ended because the person pressed Stop
 
     def run(self, argv: list[str], title: str, on_done: Callable[[int, Command], None] | None = None,
             busy: list[QWidget] | None = None, show_output: bool = True,
@@ -312,7 +313,10 @@ class OutputLog(QPlainTextEdit):
         def finished(code: int) -> None:
             for w, was in before:          # restore, never enable what was disabled (review 2026-11-10)
                 w.setEnabled(was)
-            self.appendPlainText(f"── finished ({'OK' if code == 0 else f'exit code {code}'})\n")
+            # Stopped on request is not a failure (field report 2026-11-18: "failed (exit code 62097)").
+            self.last_stopped = bool(getattr(cmd, "stopped", False))
+            self.appendPlainText("── stopped\n" if self.last_stopped
+                                 else f"── finished ({'OK' if code == 0 else f'exit code {code}'})\n")
             self.ended.emit(title, code)
             if on_done is not None:
                 on_done(code, cmd)
@@ -320,6 +324,13 @@ class OutputLog(QPlainTextEdit):
         cmd.finished.connect(finished)
         self.current = cmd
         return cmd.start()
+
+    def stop(self) -> None:
+        """Stop the running command because the person asked for it (a Stop button)."""
+        cur = self.current
+        if cur is not None and cur.running():
+            cur.stopped = True  # type: ignore[attr-defined]
+            cur.kill()
 
     def _offer_stop(self) -> bool:
         """Another command is running. Field report 2026-11-12: "Wait until the current command has
@@ -389,12 +400,18 @@ class CommandPanel(QWidget):
     def _show(self, on: bool) -> None:
         self.log.setVisible(on)
 
+    def show_output(self) -> None:
+        """Open Details: for a command whose lines are what the person is waiting for (the live motion test)."""
+        self.toggle.setChecked(True)
+
     def _started(self, title: str) -> None:
         self.setVisible(True)
         self._set("refresh", f"{title}: running…")
 
     def _ended(self, title: str, code: int) -> None:
-        if code == 0:
+        if self.log.last_stopped:
+            self._set("info", f"{title}: stopped.", muted=True)
+        elif code == 0:
             self._set("ok", f"{title}: done.")
         else:
             self._set("critical", f"{title}: failed (exit code {code}). See Details.")

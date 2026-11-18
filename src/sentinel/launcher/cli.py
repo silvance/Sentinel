@@ -39,7 +39,7 @@ from .. import __version__
 from ..config import ConfigError, check_tools, load_config
 from ..install_check import location_problems
 from ..hashing import sha256_file
-from ..logging_setup import FORMAT, RedactingFilter, RedactingFormatter
+from ..logging_setup import FORMAT, RedactingFilter, RedactingFormatter, line_buffered_output
 from ..paths import (CONFIG_ENV, MANIFEST_NAME, TOOL_NAMES, app_dir, bundled_tool, config_candidates,
                      default_layout, default_tool, find_config, is_frozen)
 from ..platform import InstanceLockError, get_platform
@@ -442,6 +442,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    line_buffered_output()      # the window shows what a command prints while it runs, not when it has ended
     argv = list(sys.argv[1:] if argv is None else argv)
     if len(argv) == 1 and argv[0].lower().endswith(".sntu"):
         argv = ["update", "apply", argv[0]]      # an update file dropped onto Sentinel.exe (or opened with it)

@@ -1377,7 +1377,8 @@ def test_rarely_changed_settings_are_behind_advanced_and_still_saved(app: QAppli
     motion = w.pages["motion"]
     assert not motion.advanced.is_open()
     assert not motion.keep.isHidden() and not motion.percent.isHidden() and not motion.markers.isHidden()
-    for hidden in (motion.stream, motion.threshold, motion.frames, motion.fps, motion.unhealthy, motion.merge):
+    assert not motion.stream.isHidden()          # set per camera at installation (field report 2026-11-18)
+    for hidden in (motion.threshold, motion.frames, motion.fps, motion.unhealthy, motion.merge):
         assert hidden.isHidden()
     motion.frames.setValue(4)                                 # a hidden field keeps its value and is saved
     assert motion.tables()["motion"]["min_frames"] == 4
@@ -1438,3 +1439,92 @@ def test_small_things_that_looked_broken(app: QApplication, tmp_path: Path) -> N
     assert bar is not None and not bar.isHidden()
     assert any("Swapping the archive drive does not" in lab.text() for lab in bar.findChildren(type(op.state_label)))
     op.close()
+
+
+# ---------------------------------------------------------------------------- field report 2026-11-18
+def test_second_stream_path_is_in_sight_and_an_address_is_reduced_to_its_path(app: QApplication, tmp_path: Path,
+                                                                             monkeypatch: pytest.MonkeyPatch) -> None:
+    """On site the whole address ("192.168.0.10:554/stream2") was typed and accepted; the detector then asked
+    the camera for a path that began with the address."""
+    monkeypatch.setattr(base, "restart_recorder", lambda p, c: "Restarted.")
+    w = _window(app, tmp_path, admin=True)
+    w.navigate("motion")
+    page = w.pages["motion"]
+    assert not page.stream.isHidden() and not page.advanced.is_open()
+    assert "key frames of the main stream" in page.stream_note.text()
+    for typed in ("192.168.0.10:554/stream2", "rtsp://viewer:secret@192.168.0.10:554/stream2", "/stream2"):
+        page.stream.setText(typed)
+        said = page.stream_note.text()
+        assert said.startswith("Detection will read rtsp://192.0.2.64") and "/stream2" in said, said
+        assert "192.168.0.10" not in said and "secret" not in said, said
+        assert page.tables()["motion"]["stream_path"] == "stream2"
+    assert "only the path" in said
+    page.stream.setText("192.168.0.10:554/stream2")
+    page.save()
+    _drain(app, 0.3)
+    assert load_config(w.ctx.cfg_path).motion.stream_path == "stream2"
+    assert page.stream.text() == "stream2" and "only the path" not in page.stream_note.text()
+    w.close()
+
+
+def test_live_motion_test_shows_its_lines_and_stop_is_not_a_failure(app: QApplication, tmp_path: Path,
+                                                                    monkeypatch: pytest.MonkeyPatch) -> None:
+    """The lines were behind Details, so the test looked as if nothing ran; Stop then read "failed (exit code
+    62097)"."""
+    script = "import time\nprint('   1s  changed   3.20 %  MOTION  ##########', flush=True)\ntime.sleep(60)\n"
+    monkeypatch.setattr(settings_pages, "sentinel_argv", lambda *a: [sys.executable, "-c", script])
+    w = _window(app, tmp_path, admin=True)
+    w.navigate("motion")
+    page = w.pages["motion"]
+    assert page.log.isHidden()
+    page.test_btn.click()
+    end = time.monotonic() + 20
+    while "MOTION" not in page.log.toPlainText() and time.monotonic() < end:
+        _drain(app, 0.05)
+    assert "MOTION" in page.log.toPlainText()
+    assert page.panel.toggle.isChecked() and not page.log.isHidden()      # on screen while it runs
+    assert page.panel.text.text() == "Motion test: running…" and not page.test_btn.isEnabled()
+    page.stop_btn.click()
+    end = time.monotonic() + 20
+    while page.log.current.running() and time.monotonic() < end:
+        _drain(app, 0.05)
+    _drain(app, 0.1)
+    assert page.panel.text.text() == "Motion test: stopped."
+    assert "── stopped" in page.log.toPlainText() and "exit code" not in page.log.toPlainText()
+    assert page.test_btn.isEnabled()
+    # a command that fails by itself still says so
+    monkeypatch.setattr(settings_pages, "sentinel_argv", lambda *a: [sys.executable, "-c", "raise SystemExit(4)"])
+    page.test_btn.click()
+    end = time.monotonic() + 20
+    while page.log.current.running() and time.monotonic() < end:
+        _drain(app, 0.05)
+    _drain(app, 0.1)
+    assert page.panel.text.text() == "Motion test: failed (exit code 4). See Details."
+    w.close()
+
+
+def test_status_bar_items_are_not_drawn_over_a_message(app: QApplication, tmp_path: Path) -> None:
+    """0.3.18 showed the alert, storage and archive items again at every refresh, on top of the message Qt had
+    hidden them for ("The recorder was restarted with the saved settings.")."""
+    w = _window(app, tmp_path, admin=True)
+    items = (w.sb_alerts, w.sb_storage, w.sb_archive)
+    assert not any(b.isHidden() for b in items)
+    w.statusBar().showMessage("The recorder was restarted with the saved settings.", 15000)
+    for _ in range(3):
+        w.refresh()
+        app.processEvents()
+        assert all(b.isHidden() for b in items) and w.sb_state.isHidden()
+    w.statusBar().clearMessage()
+    w.refresh()
+    assert not any(b.isHidden() for b in items) and not w.sb_state.isHidden()
+    w.close()
+    first = AppWindow(None, None, admin=True, appearance="light", auto_refresh=False, prefs_path=tmp_path / "p.json")
+    first.show()
+    app.processEvents()
+    first.refresh()
+    assert all(b.isHidden() for b in (first.sb_alerts, first.sb_storage, first.sb_archive))
+    first.statusBar().showMessage("Starting the recorder…")
+    first.statusBar().clearMessage()                           # Qt shows every item again here; ours stay hidden
+    assert all(b.isHidden() for b in (first.sb_alerts, first.sb_storage, first.sb_archive))
+    first._closing_for_update = True
+    first.close()

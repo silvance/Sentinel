@@ -40,6 +40,7 @@ camera's day/night switch can be missed or cause false triggers; tune on site wi
 from __future__ import annotations
 
 import logging
+import re
 import subprocess
 import sys
 import threading
@@ -93,12 +94,37 @@ def validate(m: MotionConfig) -> None:
                                 "(no spaces, '@' or '://')")
 
 
+_HOST_PORT = re.compile(r"[A-Za-z0-9.\-]+:\d{2,5}")          # camera.local:8554, 192.168.0.10:554
+_IPV4 = re.compile(r"\d{1,3}(?:\.\d{1,3}){3}")
+
+
+def stream_path_only(text: str) -> str:
+    """The path of the camera's second stream out of what someone typed. A whole address is reduced to its
+    path: ``rtsp://192.168.0.10:554/stream2`` and ``192.168.0.10:554/stream2`` both give ``stream2``.
+
+    Field report 2026-11-18: the address was typed into "Second stream path" and accepted, and the detector
+    then asked the camera for ``/192.168.0.10:554/stream2``. An account in a pasted address is dropped, never
+    kept (credentials live in the credentials file only)."""
+    t = text.strip()
+    if "://" in t:
+        parts = urlsplit(t)
+        t = parts.path + (f"?{parts.query}" if parts.query else "")
+    t = t.lstrip("/")
+    first, sep, rest = t.partition("/")
+    host = first.rpartition("@")[2]
+    if sep and ("@" in first or _HOST_PORT.fullmatch(host) or _IPV4.fullmatch(host)):
+        t = rest
+    return t.lstrip("/")
+
+
 def detection_url(camera_url: str, stream_path: str) -> str:
-    """The camera URL with its path replaced by ``stream_path`` ("" = the main stream itself)."""
+    """The camera URL with its path replaced by ``stream_path`` ("" = the main stream itself). A ``stream_path``
+    saved as a whole address (see :func:`stream_path_only`) is read as its path."""
+    stream_path = stream_path_only(stream_path)
     if not stream_path:
         return camera_url
     parts = urlsplit(camera_url)
-    path, _, query = stream_path.lstrip("/").partition("?")
+    path, _, query = stream_path.partition("?")
     return urlunsplit((parts.scheme, parts.netloc, "/" + path, query, ""))
 
 

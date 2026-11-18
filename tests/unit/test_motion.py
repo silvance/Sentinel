@@ -73,6 +73,28 @@ def test_detection_url_and_command() -> None:
     assert main[main.index("-rtsp_transport") + 1] == "tcp"
 
 
+def test_an_address_given_as_the_second_stream_path_is_read_as_its_path(tmp_path: Path) -> None:
+    """Field report 2026-11-18: "192.168.0.10:554/stream2" was typed as the second stream path and accepted; the
+    detector asked the camera for rtsp://192.168.0.10:554/192.168.0.10:554/stream2."""
+    from sentinel.motion import stream_path_only
+
+    for typed in ("stream2", "/stream2", " stream2 ", "192.168.0.10:554/stream2", "192.168.0.10/stream2",
+                  "camera.local:8554/stream2", "rtsp://192.168.0.10:554/stream2", "rtsps://cam/stream2",
+                  "rtsp://viewer:secret@192.168.0.10:554/stream2", "viewer:secret@192.168.0.10:554/stream2"):
+        assert stream_path_only(typed) == "stream2", typed
+    assert stream_path_only("") == "" and stream_path_only("192.168.0.10:554/") == ""
+    # paths that only look unusual are left alone
+    for path in ("Streaming/Channels/102", "cam/realmonitor?channel=1&subtype=1", "h264/ch1/sub/av_stream",
+                 "live/ch00_1", "user=admin_password=x_channel=1_stream=1.sdp", "axis-media/media.amp?camera=1"):
+        assert stream_path_only(path) == path, path
+    assert stream_path_only("rtsp://192.168.0.10/cam/realmonitor?channel=1&subtype=1") == \
+        "cam/realmonitor?channel=1&subtype=1"
+    # a value saved by 0.3.18 and earlier keeps loading, and now means its path
+    cfg = make_config(tmp_path, motion={"stream_path": "192.168.0.10:554/stream2"})
+    url = "rtsp://user:pw@192.168.0.10:554/stream0"
+    assert detection_url(url, cfg.motion.stream_path) == "rtsp://user:pw@192.168.0.10:554/stream2"
+
+
 # ---------------------------------------------------------------------- record / wait decision
 class Clock:
     def __init__(self) -> None:

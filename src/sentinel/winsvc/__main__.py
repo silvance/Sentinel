@@ -713,6 +713,9 @@ def run_archive_in_host(host: object, config: str, worker_factory: Callable | No
 
 
 def main(argv: list[str] | None = None) -> int:
+    from ..logging_setup import line_buffered_output
+
+    line_buffered_output()      # install / repair steps are shown by the window as they happen
     ap = argparse.ArgumentParser(prog="python -m sentinel.winsvc",
                                  description="Install and manage the Sentinel recorder Windows service.")
     sub = ap.add_subparsers(dest="cmd", required=True)
