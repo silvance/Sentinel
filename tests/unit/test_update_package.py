@@ -258,6 +258,66 @@ def test_release_tool_refuses_dev_versions_dirty_builds_and_untrusted_keys(tmp_p
     assert release.main(["make", "--build", str(b2), "--releases", str(rel), "--key", str(other)]) == 2
 
 
+def test_a_build_recorded_without_the_key_is_carried_by_the_next_update_file(tmp_path: Path, monkeypatch,
+                                                                            capsys) -> None:
+    """2026-11-18: 0.3.18 was built away from the signing key, with another Python runtime, and installed as a
+    full program folder. Recorded with ``record``, the next update file carries what differs from that build;
+    not recorded, a computer running that build refuses the next update file."""
+    key = tmp_path / "k.key"
+    key.write_text(SECRET.hex(), "ascii")
+    monkeypatch.setattr(release, "trusted_in_source", lambda: TRUST)
+    away = dict(V2, **{"Sentinel.exe": b"exe 0.3.2", "SentinelService.exe": b"svc 0.3.2",
+                       "_internal/qt.dll": b"qt from the other build computer"})
+    home = dict(V2, **{"Sentinel.exe": b"exe 0.3.3", "SentinelService.exe": b"svc 0.3.3"})   # qt.dll as before
+    for case in ("recorded", "not recorded"):
+        top = tmp_path / case.replace(" ", "_")
+        rel = top / "releases"
+        for folder, version, files in (("d1", "0.3.0", V1), ("d2", "0.3.1", V2)):
+            assert release.main(["make", "--build", str(make_build(top / folder, version, files)),
+                                 "--releases", str(rel), "--key", str(key)]) == 0
+        b3 = make_build(top / "d3", "0.3.2", away)
+        if case == "recorded":
+            capsys.readouterr()
+            assert release.main(["record", "--build", str(b3), "--releases", str(rel)]) == 0        # no key
+            said = capsys.readouterr().out
+            assert "without an update file" in said and "INSTALL-FULL-FOLDER.cmd" in said and "Keep" in said
+            assert (rel / "0.3.2" / "release.json").is_file() and not list((rel / "0.3.2").glob("*.sntu"))
+            assert release.main(["record", "--build", str(b3), "--releases", str(rel)]) == 0        # again: no harm
+            assert "already recorded" in capsys.readouterr().out
+        b4 = make_build(top / "d4", "0.3.3", home)
+        assert release.main(["make", "--build", str(b4), "--releases", str(rel), "--key", str(key)]) == 0
+        pkg = read_package(rel / "0.3.3" / "Sentinel-update-0.3.3.sntu", installed_version="0.3.2", trusted=TRUST)
+        installed = make_build(top / "Sentinel", "0.3.2", away)       # the computer that got the full folder
+        staged = Folders(installed).staging("0.3.3")
+        if case == "recorded":
+            assert "_internal/qt.dll" in pkg.payload
+            stage(installed, pkg, staged)
+            assert _tree(staged) == _tree(b4)
+        else:
+            assert "_internal/qt.dll" not in pkg.payload
+            with pytest.raises(UpdateRefused) as e:
+                stage(installed, pkg, staged)
+            assert e.value.code == "needs_files"
+
+
+def test_record_refuses_what_make_refuses(tmp_path: Path, monkeypatch) -> None:
+    rel = tmp_path / "releases"
+    monkeypatch.setattr(release, "trusted_in_source", lambda: TRUST)
+    assert release.main(["record", "--build", str(tmp_path / "nothing"), "--releases", str(rel)]) == 2
+    dev = make_build(tmp_path / "dev", "0.4.0.dev0", V1)
+    assert release.main(["record", "--build", str(dev), "--releases", str(rel)]) == 2
+    dirty = make_build(tmp_path / "dirty", "0.3.0", V1)
+    man = json.loads((dirty / "BUILD-MANIFEST.json").read_text("utf-8"))
+    (dirty / "BUILD-MANIFEST.json").write_text(json.dumps(dict(man, git_dirty=True)), "utf-8")
+    assert release.main(["record", "--build", str(dirty), "--releases", str(rel)]) == 2
+    assert not rel.exists()
+    b1 = make_build(tmp_path / "d1", "0.3.0", V1)
+    assert release.main(["record", "--build", str(b1), "--releases", str(rel)]) == 0
+    other = make_build(tmp_path / "d1b", "0.3.0", dict(V1, **{"Sentinel.exe": b"another 0.3.0"}))
+    assert release.main(["record", "--build", str(other), "--releases", str(rel)]) == 2     # same version, other files
+    assert release.main(["record", "--build", str(other), "--releases", str(rel), "--replace"]) == 0
+
+
 def test_keygen_writes_a_private_key_and_trusts_its_public_key(tmp_path: Path) -> None:
     keys_py = tmp_path / "keys.py"
     keys_py.write_text('TRUSTED_KEYS: dict[str, str] = {\n}\n', "utf-8")

@@ -2,6 +2,7 @@
 
     python packaging/release.py keygen                # once: the release signing key
     python packaging/release.py make [--notes "..."]  # after each build of a new version
+    python packaging/release.py record                # instead of make: a build made without the key
     python packaging/release.py list
 
 ``keygen`` creates the Ed25519 private key outside the repository
@@ -15,6 +16,12 @@ keep it with ``third_party/sources``) and writes ``releases/<version>/Sentinel-u
 The update file can update every recorded release from ``--min-version`` (default: the oldest
 recorded one) up: it carries each file that differs from at least one of them. The very first release
 has nothing to update; it is installed as a full program folder.
+
+``record`` (2026-11-18) records the build the same way but writes no update file and needs no key: for a
+version built where the signing key is not at hand. That version is installed as a full program folder
+(``packaging/windows/INSTALL-FULL-FOLDER.cmd``, docs/08_PACKAGING.md section 10). **Keep its
+``release.json``**: the next ``make`` then carries every file that differs from that build. Without the
+record, computers running that build refuse the next update file (files it expects are not installed).
 """
 
 from __future__ import annotations
@@ -141,31 +148,74 @@ def payload_for(files: dict[str, dict], bases: list[dict]) -> list[str]:
                   if rel in BUILD_FILES or any(b["files"].get(rel) != meta["sha256"] for b in bases))
 
 
-def cmd_make(args: argparse.Namespace) -> int:
+def build_entry(args: argparse.Namespace) -> tuple[dict, dict[str, dict], dict] | None:
+    """(build manifest, files, release entry) of the build in ``args.build``; None after saying why that build
+    cannot be recorded as a release."""
     build, releases = Path(args.build), Path(args.releases)
     try:
         manifest = json.loads((build / "BUILD-MANIFEST.json").read_text("utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         print(f"No build in {build}: {exc}")
-        return 2
+        return None
     version = str(manifest["version"])
     if not is_release(version) and not args.allow_prerelease:
         print(f"{version} is not a release version (X.Y.Z). Set __version__ in src/sentinel/__init__.py and build again.")
-        return 2
+        return None
     if manifest.get("git_dirty") and not args.allow_dirty:
         print("The build was made from uncommitted changes; releases must be built from a commit.")
-        return 2
+        return None
     files = target_files(build, manifest)
-    trusted = trusted_in_source()
     entry = {"version": version, "git_commit": manifest.get("git_commit"), "built_utc": manifest.get("built_utc"),
-             "platform": platform_id(), "trusted_key_ids": sorted(trusted),
+             "platform": platform_id(), "trusted_key_ids": sorted(trusted_in_source()),
              "files": {rel: m["sha256"] for rel, m in files.items()}}
-    earlier = [r for r in recorded(releases) if parse_version(r["version"]) < parse_version(version)]
     same = [r for r in recorded(releases) if r["version"] == version]
     if same and same[0]["files"] != entry["files"] and not args.replace:
         print(f"Release {version} is already recorded with different files. Raise the version number "
               "(or use --replace if that release was never handed out).")
+        return None
+    return manifest, files, entry
+
+
+def cmd_record(args: argparse.Namespace) -> int:
+    """Record the build as a release without an update file (no signing key needed)."""
+    got = build_entry(args)
+    if got is None:
         return 2
+    _manifest, files, entry = got
+    releases, version = Path(args.releases), entry["version"]
+    out_dir = releases / version
+    same = [r for r in recorded(releases) if r["version"] == version]
+    if same and same[0]["files"] == entry["files"]:
+        print(f"Release {version} is already recorded with exactly these files; nothing to do.")
+        return 0
+    stale = [u.name for u in out_dir.glob(f"*{EXTENSION}")] if out_dir.is_dir() else []
+    if stale:       # only reachable with --replace: the update file there was made for other files
+        print(f"{out_dir} holds an update file made for other files ({stale[0]}). Remove it first if that "
+              "release was never handed out.")
+        return 2
+    earlier = [r for r in recorded(releases) if parse_version(r["version"]) < parse_version(version)]
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / RELEASE_JSON).write_text(json.dumps(entry, indent=1), "utf-8")
+    print(f"Recorded release {version} ({len(files)} files) without an update file.")
+    if earlier:
+        differ = sum(1 for rel, m in files.items() if earlier[-1]["files"].get(rel) != m["sha256"])
+        print(f"  {differ} files differ from {earlier[-1]['version']}.")
+    print("  Install it as the full program folder: put packaging/windows/INSTALL-FULL-FOLDER.cmd beside the "
+          "folder (docs/08_PACKAGING.md section 10).")
+    print(f"  Keep {out_dir / RELEASE_JSON}: the next update file must be made with it in place, or computers "
+          "running this build will refuse that file.")
+    return 0
+
+
+def cmd_make(args: argparse.Namespace) -> int:
+    build, releases = Path(args.build), Path(args.releases)
+    got = build_entry(args)
+    if got is None:
+        return 2
+    manifest, files, entry = got
+    version = entry["version"]
+    trusted = trusted_in_source()
+    earlier = [r for r in recorded(releases) if parse_version(r["version"]) < parse_version(version)]
     out_dir = releases / version
     out_dir.mkdir(parents=True, exist_ok=True)
     min_version = args.min_version or (earlier[0]["version"] if earlier else None)
@@ -229,10 +279,16 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--allow-dirty", action="store_true")
     p.add_argument("--allow-prerelease", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--replace", action="store_true", help="re-record a version that was never handed out")
+    p = sub.add_parser("record", help="record the build as a release without an update file (no signing key at hand)")
+    p.add_argument("--build", default=str(ROOT / "dist" / "Sentinel"))
+    p.add_argument("--releases", default=str(ROOT / "releases"))
+    p.add_argument("--allow-dirty", action="store_true")
+    p.add_argument("--allow-prerelease", action="store_true", help=argparse.SUPPRESS)
+    p.add_argument("--replace", action="store_true", help="re-record a version that was never handed out")
     p = sub.add_parser("list", help="recorded releases")
     p.add_argument("--releases", default=str(ROOT / "releases"))
     args = ap.parse_args(argv)
-    return {"keygen": cmd_keygen, "make": cmd_make, "list": cmd_list}[args.cmd](args)
+    return {"keygen": cmd_keygen, "make": cmd_make, "record": cmd_record, "list": cmd_list}[args.cmd](args)
 
 
 if __name__ == "__main__":

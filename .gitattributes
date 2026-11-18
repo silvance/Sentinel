@@ -1,4 +1,6 @@
 * text=auto eol=lf
+# Windows batch files misread labels with LF-only line endings.
+*.cmd text eol=crlf
 *.ts binary
 *.mp4 binary
 *.zip binary

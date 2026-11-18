@@ -58,9 +58,17 @@ widths, the operator notice. Unit suite on the second development machine (Windo
 passed, 2 failed, 3 skipped; the 2 failures are `test_launcher` objecting to FFmpeg on a drive any user can
 write (the checkout is on a removable drive there), not to this change.
 
+Full suite, 2026-11-18 (added after the commit that made this change): with a full FFmpeg on PATH on the second
+machine (the LGPL FFmpeg bundled for release has no libx264, which the simulated camera needs) the whole suite,
+integration tests included, gave 1554 passed, 2 skipped, 1 failed. The failure is
+`test_time_accuracy.py::test_absorbed_freeze_is_still_a_gap_under_drift`, a timing test that also fails on
+unchanged 0.3.16 on that machine (2 of 4 runs), so it was not taken as caused by this change. The two
+`test_launcher` failures above do not occur with that FFmpeg, which is not on the removable drive.
+
 ## NOT executed / not verified
 
-* **The integration tests were not run on this change.** The second development machine has only the LGPL FFmpeg
-  bundled for release, which has no libx264; the simulated camera needs it, so every test that records fails
-  there with "no media". They need a full FFmpeg on PATH (as on the first machine).
-* Not seen in the built `Sentinel.exe` or on the laptop's own display; the renders were made from source.
+* The full suite has not been run on the first development machine with this change. Run it there once: that
+  is where the timing test named above can be judged.
+* The 0.3.18 build was started on the second machine (first-run window, set up without a camera); the window
+  has not been seen on the laptop's own display, and the two-drive changes have not been tried with the real
+  drives.

@@ -559,7 +559,89 @@ yet run: with the Windows services installed and recording, and from the window 
    release has nothing to update (full install). `--min-version` raises the oldest version an update
    file serves (smaller files); `release.py list` shows what is recorded.
 3. Give people the `.sntu` file (and its SHA-256, printed by `make`, for the custody record).
+4. Built where the key is not at hand: `python packaging/release.py record` instead of `make`, and install the
+   full program folder (10.1).
 
 Signing uses Ed25519 in pure Python (`src/sentinel/update/ed25519.py`, RFC 8032 section 6; checked
 against the RFC test vectors and the `cryptography` package in the unit tests), so the program
 folder needs no extra library. Not done yet: updates on Linux (Windows only so far).
+
+### 10.1 Installing a full program folder without an update file (2026-11-18)
+
+For a version built where the release key is not at hand, and for a computer whose installed files an update
+file refuses ("Install the full program folder instead"). First use: 0.3.18 was built on the second development
+machine while the key was on the first, and the laptop (on 0.3.16) needed it.
+
+**Build computer**
+
+1. Build as usual and check it: `dist\Sentinel\Sentinel.exe about --verify`.
+2. `python packaging/release.py record` (no key needed) writes `releases/<version>/release.json`. **Keep that
+   file with the other releases.** The next `make` then carries every file that differs from this build,
+   including runtime files that differ only because another Python built it (0.3.18, built with Python 3.14.10
+   instead of 3.14.3: 30 files differ from 0.3.16). Without the record the next update file treats those files
+   as unchanged, and a computer running this build refuses it (`needs_files`). Do not build the same version
+   number again on another machine: raise the version.
+3. Copy `dist\Sentinel` and `packaging\windows\INSTALL-FULL-FOLDER.cmd` side by side onto a USB stick.
+
+**Computer that runs Sentinel (administrator; recording stops for about a minute)**
+
+Right-click `INSTALL-FULL-FOLDER.cmd` › *Run as administrator*. It looks for Sentinel in
+`C:\Program Files\Sentinel` and asks for the folder if it is elsewhere (or takes it as its first argument).
+
+| Step | What the script does | If it fails |
+|---|---|---|
+| 1 | Reads the version from the folder beside it and checks that folder against its build manifest (`about --verify`) | Stops; nothing changed |
+| 2 | A version already kept as `<app>.previous` is renamed `<app>.previous-before-<version>` | Stops; nothing changed |
+| 3 | Copies the new folder to `<app>.previous` (`robocopy /MIR`; it inherits the permissions of the folder it is in) and carries over a `sentinel.toml` / `camera.secret` kept inside the program folder | Stops; installed program unchanged |
+| 4 | Checks the copy the same way, and that the installed version reports it as the version kept | Stops; installed program unchanged |
+| 5 | Runs the installed version's `Sentinel.exe update rollback --reason "Full program folder install of <version> (no update file: the release signing key was not available on site)"`, which asks for `BACK`, then waits for the swap window and shows `update status` | As for an update: cancelled, or swapped back by itself; recording restarted |
+
+Recording continues during steps 1 to 4. Step 5 is the swap of section 10 from *Stop* on: recording is stopped
+gracefully, the folders are swapped, the **new** version checks itself and starts recording again, and the
+folders are swapped back if that check fails. The version that was installed becomes `<app>.previous`. What is
+different from an update file:
+
+* **No signature is checked.** `update rollback` uses whatever an administrator has placed in `<app>.previous`,
+  exactly as it uses the version an update left there. `about --verify` shows that the folder is complete and
+  unchanged since it was built, not who built it: carry the stick yourself, from the build computer.
+* **No 3-minute watch** by the reopened window. Check Status, System › Updates and Drives by hand, and Status
+  again five minutes later.
+* **The recording log says "went back"**: `software_rollback_started`, then `software_rolled_back` with
+  "Sentinel went back from 0.3.16 to 0.3.18. Reason: Full program folder install of 0.3.18 (no update file: the
+  release signing key was not available on site)." The reason is what tells the two apart later; System ›
+  Updates shows the same sentence as the last update.
+* Only `sentinel.toml` and `camera.secret` in the program folder itself are carried over, not other files
+  someone added there.
+* As with an update file, permissions and the service registration are not changed.
+
+By hand, when the script cannot be used (administrator Command Prompt; `X:` is the stick):
+
+```
+cd /d C:\Windows
+"X:\Sentinel\Sentinel.exe" about --verify
+"C:\Program Files\Sentinel\Sentinel.exe" update status
+ren "C:\Program Files\Sentinel.previous" "Sentinel.previous-before-0.3.18"
+robocopy "X:\Sentinel" "C:\Program Files\Sentinel.previous" /MIR
+"C:\Program Files\Sentinel.previous\Sentinel.exe" about --verify
+"C:\Program Files\Sentinel\Sentinel.exe" update status
+"C:\Program Files\Sentinel\Sentinel.exe" update rollback --reason "Full program folder install of 0.3.18 (no update file: the release signing key was not available on site)"
+```
+
+(`ren` only if a previous version is kept; the second `update status` must say `Previous version kept: 0.3.18`.)
+Never drag the new `Sentinel` folder into `C:\Program Files` with Explorer: Windows would merge it into the
+installed program folder while Sentinel runs from it.
+
+**Tried (2026-11-18, second development machine, scratch folder, real builds, administrator):** the home-built
+0.3.16 with an older version kept beside it and a `sentinel.toml` inside the program folder. The script set the
+older version aside, copied and checked the 0.3.18 build and carried the settings file; the swap took 16 s;
+0.3.18 passed its check; `about --verify` was clean and `update status` gave "Installed: Sentinel 0.3.18 /
+Previous version kept: 0.3.16". That run used the script with the version written into it; reading the version
+from the folder was added afterwards and checked as far as the administrator check (0.3.16 and 0.3.18 folders).
+**Not yet run:** on the laptop or under Program Files, with a recording in progress at the moment of the swap,
+with the Windows services installed.
+
+A caution from that trial: the window the swap reopens is an ordinary Sentinel window. If the computer has
+Sentinel settings (`C:\ProgramData\Sentinel\config\sentinel.toml`), it starts the recorder and the archive copy
+with them, also when the program folder is a scratch copy. On an installed computer that is what is wanted. On a
+development machine, stop them afterwards: `Sentinel.exe stop`, and end the `archive run` process as
+administrator (the detached archive copy has no stop command).
