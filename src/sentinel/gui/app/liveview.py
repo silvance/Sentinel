@@ -14,7 +14,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QPixmap
-from PySide6.QtWidgets import QLabel, QSizePolicy, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget
 
 from ...clock import parse_iso_utc
 from .. import textfmt as tf
@@ -22,6 +22,7 @@ from .base import Ctx
 
 TICK_MS = 500
 PICTURE_W = 560          # logical pixels; Windows display scaling enlarges it on high-DPI screens
+MAX_PICTURE_H = 520      # tallest picture when the panel sizes itself (Status page)
 REQUEST_EVERY_S = 5.0
 STALE_S = 6.0            # older than this: the caption says the picture is old
 NO_SERVICE_S = 15.0      # nothing at all after this long: the recorder is not providing a live view
@@ -36,19 +37,26 @@ class LiveView(QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(4)
+        self.fixed = fixed
         self.picture = QLabel()
         self.picture.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.picture.setWordWrap(True)
         if fixed:   # field report 2026-11-10: a stretching picture squeezed the camera form
             self.picture.setFixedSize(PICTURE_W, PICTURE_W * 9 // 16)
             self.picture.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         else:
+            # As wide as the panel allows and 16:9 for that width, up to MAX_PICTURE_H (see resizeEvent).
             self.picture.setMinimumSize(320, 180)
-            self.picture.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            self.picture.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.picture.setStyleSheet("background: #000; color: #ccc; border-radius: 4px;")
         if fixed:
             lay.addWidget(self.picture, 0, Qt.AlignmentFlag.AlignLeft)
         else:
-            lay.addWidget(self.picture, 1)
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            row.addWidget(self.picture, 1)
+            row.addStretch(0)                # takes what is left when the picture is at its widest
+            lay.addLayout(row)
         self.caption = QLabel()
         self.caption.setObjectName("muted")
         self.caption.setWordWrap(True)
@@ -188,4 +196,12 @@ class LiveView(QWidget):
 
     def resizeEvent(self, e) -> None:  # noqa: ANN001, N802
         super().resizeEvent(e)
+        if not self.fixed:
+            # GUI review 2026-11-17: the Status page set the height from the width the panel had BEFORE the new
+            # layout, so the picture got black bars at the sides and the caption was drawn over it. The panel
+            # sizes its own picture from the width it really has: 16:9, never wider than that height allows.
+            h = max(180, min(int(self.width() * 9 / 16), MAX_PICTURE_H))
+            if self.picture.minimumHeight() != h or self.picture.maximumHeight() != h:
+                self.picture.setFixedHeight(h)
+                self.picture.setMaximumWidth(max(320, int(h * 16 / 9)))
         self._fit()

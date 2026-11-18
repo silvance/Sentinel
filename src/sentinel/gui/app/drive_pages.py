@@ -13,7 +13,7 @@ import json
 import time
 from typing import Any
 
-from PySide6.QtCore import QDate, QTimer
+from PySide6.QtCore import QDate, Qt, QTimer
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDateEdit, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
                                QGroupBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMenu, QMessageBox,
                                QPushButton, QVBoxLayout)
@@ -74,10 +74,46 @@ def drive_letters_now() -> frozenset[str]:
 def _letters(d: dict[str, Any]) -> list[str]:
     return [p for p in d.get("mount_paths") or [] if len(p) == 3 and p[1:] == ":\\"] or list(d.get("mount_paths") or [])
 
+ZERO_BACKLOG = "Not yet archived: 0 h"
+# One line per archive drive in the Drives page's archive box (owner request 2026-11-11: two drives; GUI review
+# 2026-11-17: a line each instead of one sentence).
+_LINE_WORDS = {"in_use": "In use", "standby": "Standing by", "full": "Full: press Swap and safely remove",
+               "take_out": "Ready to take out",
+               "awaiting_return": "Back from the office: return it to service before it is used again"}
+# Archive drives the copier is using or keeping ready: Return to service is not for these.
+ACTIVE_USES = ("in_use", "standby", "full")
 
 
-_USE_WORDS = {"in_use": "In use", "full": "Full (swap it)", "standby": "Standing by", "take_out": "Ready to take out",
-              "awaiting_return": "Back from the office (return it to service)"}
+def archive_message(arc: dict[str, Any]) -> str:
+    """The copier's message without "Not yet archived: 0 h", which says nothing (the copier adds the backlog to
+    every message)."""
+    msg = str(arc.get("message") or "")
+    return msg.replace(f" {ZERO_BACKLOG}.", "").replace(f"{ZERO_BACKLOG}.", "").strip()
+
+
+def archive_drive_lines(arc: dict[str, Any]) -> list[tuple[str, str, str]]:
+    """(use, name, words) for every archive drive inserted, e.g. ("in_use", "SSD_1", "In use · 412 GB free")."""
+    out = []
+    for d in arc.get("drives") or []:
+        if not isinstance(d, dict):
+            continue
+        use = str(d.get("use"))
+        words = _LINE_WORDS.get(use, "Inserted")
+        free = d.get("free_bytes")
+        if use in ("in_use", "standby") and isinstance(free, (int, float)):
+            words += f" · {tf.size(free)} free"
+        out.append((use, str(d.get("label") or "Unnamed archive drive"), words))
+    return out
+
+
+def archive_drives_html(arc: dict[str, Any], palette: Any) -> str:
+    """The lines of :func:`archive_drive_lines` for a label: a coloured dot, the drive's name in bold, its state."""
+    from html import escape
+
+    tone = {"in_use": palette.ok, "full": palette.warning, "awaiting_return": palette.warning,
+            "take_out": palette.info}
+    return "<br>".join(f"<span style='color:{tone.get(use, palette.text3)}'>●</span>&nbsp; <b>{escape(name)}</b>"
+                       f"&nbsp;&nbsp;{escape(words)}" for use, name, words in archive_drive_lines(arc))
 
 
 def second_drive_hint(arc: dict[str, Any]) -> str:
@@ -116,21 +152,6 @@ def swap_under_way(arc: dict[str, Any]) -> bool:
                                          or bool(arc.get("awaiting_return")))
 
 
-def archive_drives_text(arc: dict[str, Any]) -> str:
-    """Every archive drive inserted, from the archive status (owner request 2026-11-11: two-bay dock),
-    e.g. "In use: SENTINEL_2 (1.2 TB free). Full (swap it): SENTINEL_1."."""
-    drives = [d for d in arc.get("drives") or [] if isinstance(d, dict)]
-    if not drives:
-        return f"Drive: {arc.get('drive_label') or 'none inserted'}."
-    parts = []
-    for d in drives:
-        name = str(d.get("label") or "unnamed archive drive")
-        words = _USE_WORDS.get(str(d.get("use")), "Inserted")
-        free = d.get("free_bytes")
-        extra = f" ({tf.size(free)} free)" if d.get("use") == "in_use" and isinstance(free, (int, float)) else ""
-        parts.append(f"{words}: {name}{extra}.")
-    return " ".join(parts)
-
 class DriveList:
     """Runs ``drives list --json`` and keeps the result."""
 
@@ -166,6 +187,7 @@ class EraseDialog(QDialog):
     def __init__(self, d: dict[str, Any], chars: int, parent=None) -> None:  # noqa: ANN001
         super().__init__(parent)
         self.setWindowTitle("Erase and set up drive")
+        self.setMinimumWidth(520)                # the serial-number hint was cut off (GUI review 2026-11-17)
         lay = QVBoxLayout(self)
         warn = QLabel(f"<b>This erases everything on:</b><br>{d.get('description', '')}<br>"
                       f"Now: {CLASS_WORDS.get(d.get('class', ''), d.get('class', ''))}"
@@ -259,9 +281,19 @@ class DrivesPage(Page):
 
     def __init__(self, ctx, parent=None) -> None:  # noqa: ANN001
         super().__init__(ctx, parent)
-        self.body.addWidget(ReadOnlyBar(ctx, "drives"))
+        # GUI review 2026-11-17: the bar said "Read-only" while Swap, an operator task, worked.
+        swap_for_operators = bool(ctx.cfg is not None and ctx.cfg.storage.status_dir)
+        self.body.addWidget(ReadOnlyBar(ctx, "drives", text=(
+            "Erasing, setting up, renaming and returning drives need Windows administrator rights. "
+            "Swapping the archive drive does not.") if swap_for_operators else ""))
         arc = QGroupBox("Archive drive")
         al = QVBoxLayout(arc)
+        # One line per archive drive (name, state, free space), then what the copier says, then what a second
+        # drive does (GUI review 2026-11-17: it was one run-on sentence).
+        self.arc_drives = QLabel()
+        self.arc_drives.setTextFormat(Qt.TextFormat.RichText)
+        self.arc_drives.setVisible(False)
+        al.addWidget(self.arc_drives)
         self.arc_text = QLabel("—")
         self.arc_text.setWordWrap(True)
         al.addWidget(self.arc_text)
@@ -356,6 +388,7 @@ class DrivesPage(Page):
         self._start_task: Task | None = None
         self.remove_btn.setEnabled(ctx.admin)
         self._removal: dict[str, Any] | None = None
+        self._arc_uses: dict[str, str] = {}      # copier's drive id -> in_use | standby | full | take_out | …
         self._auto_remove_until: float | None = None
         self.ack_btn.setEnabled(ctx.admin)
         # Swapping is an operator task (every few days): operators ask the archive copier through
@@ -421,6 +454,13 @@ class DrivesPage(Page):
         hint = second_drive_hint(arc)
         self.arc_hint.setText(hint)
         self.arc_hint.setVisible(bool(hint))
+        # Return to service is not offered for a drive the copier is using or keeping ready (see _update_actions).
+        uses = {str(d.get("drive_id")): str(d.get("use")) for d in arc.get("drives") or []
+                if isinstance(d, dict)} if arc.get("running") else {}
+        if uses != self._arc_uses:
+            self._arc_uses = uses
+            self._update_actions()
+        self.arc_drives.setVisible(False)
         if not arc:
             self.arc_text.setText("Archive copying is off. Turn it on in Settings › Storage.")
             return
@@ -435,15 +475,18 @@ class DrivesPage(Page):
             waiting = f" {backlog}." if backlog and isinstance(secs, (int, float)) and secs > 0 else ""
             self.arc_text.setText("Archive copying is not running." + waiting)
             return
-        msg = str(arc.get("message") or "")
+        msg = archive_message(arc)             # without "Not yet archived: 0 h", which says nothing
         if self._removal is not None and not two:
             # Only what to do now (field report 2026-11-13: "Drive: none inserted." while it was still plugged in).
             self.arc_text.setText(str(self._removal.get("text") or msg))
             return
         if not isinstance(bk.get("seconds"), (int, float)) or bk.get("seconds", 0) <= 0:
-            backlog = ""                   # "Not yet archived: 0 h" says nothing
-        parts = [archive_drives_text(arc), msg] + ([backlog] if backlog and backlog not in msg else [])
-        self.arc_text.setText(" ".join(x for x in parts if x))
+            backlog = ""
+        html = archive_drives_html(arc, self.ctx.palette)
+        self.arc_drives.setText(html)
+        self.arc_drives.setVisible(bool(html))
+        parts = [msg] + ([backlog] if backlog and backlog not in msg else [])
+        self.arc_text.setText(" ".join(x for x in parts if x) or "No archive drive is inserted.")
 
     def _cfg(self) -> str:
         return str(self.ctx.cfg_path)
@@ -612,11 +655,15 @@ class DrivesPage(Page):
         d = selected_data(self.table)
         d = d if isinstance(d, dict) else None
         role, cls = (d or {}).get("role"), (d or {}).get("class")
+        # GUI review 2026-11-17: Return to service (it deletes the drive's recordings) was the first button offered
+        # for the archive drive in use. It is for a drive that came back from the office: not offered while the
+        # running copier reports the drive as in use, standing by, or full and not yet swapped.
+        use = self._arc_uses.get(f"drive_uuid:{d['drive_uuid']}") if d is not None and d.get("drive_uuid") else None
         show = {
             self.erase_btn: d is not None and role is None and (bool(d.get("can_prepare"))
                                                                or d.get("refusal") == "erase_disabled"),
             self.designate_btn: d is not None and cls == "READY" and role != "archive",
-            self.return_btn: d is not None and cls == "READY" and role == "archive",
+            self.return_btn: d is not None and cls == "READY" and role == "archive" and use not in ACTIVE_USES,
             self.rename_btn: d is not None and cls == "READY",
             self.eject_btn: d is not None and bool(_letters(d)) and not is_noise(d),
         }
@@ -628,7 +675,10 @@ class DrivesPage(Page):
         elif not any(show.values()):
             self.hint.setText(str(d.get("message") or "Nothing can be done with this drive here."))
         else:
-            self.hint.setText(str(d.get("message") or ""))
+            now = {"in_use": " Archive copying is using it now.",
+                   "standby": " Standing by: copying moves to it when the drive in use is full.",
+                   "full": " It is full: press Swap and safely remove before taking it out."}.get(use or "", "")
+            self.hint.setText(str(d.get("message") or "") + now)
 
     def _selected(self) -> dict[str, Any] | None:
         d = selected_data(self.table)

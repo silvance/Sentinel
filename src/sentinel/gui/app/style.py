@@ -66,7 +66,12 @@ def stylesheet(p: Palette) -> str:
                                       border-left: 3px solid {p.accent}; }}
     QListWidget#nav::item:hover:!selected {{ background: {p.surface_alt}; }}
     QLabel#pageTitle {{ font-weight: 600; }}
-    QLabel#sectionTitle, QToolButton#sectionTitle {{ font-weight: 600; color: {p.text2}; }}
+    QLabel#sectionTitle {{ font-weight: 600; color: {p.text2}; }}
+    QToolButton#disclosure {{ font-weight: 600; color: {p.text2}; background: transparent; border: none;
+                              border-radius: 4px; padding: 3px 8px 3px 2px; }}
+    QToolButton#disclosure:hover, QToolButton#disclosure:focus {{ background: {p.surface_alt}; color: {p.text}; }}
+    QToolButton#disclosure:checked, QToolButton#disclosure:pressed {{ background: transparent; color: {p.text}; }}
+    QToolButton#disclosure:checked:hover {{ background: {p.surface_alt}; }}
     QFrame#sep {{ color: {p.border}; }}
     QLabel#muted {{ color: {p.text2}; }}
     QLabel#ok {{ color: {p.ok}; }}

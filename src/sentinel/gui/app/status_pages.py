@@ -14,8 +14,8 @@ from PySide6.QtWidgets import (QBoxLayout, QComboBox, QFormLayout, QFrame, QGrid
 from .. import textfmt as tf
 from ..ledger_view import SpanKind, load_admin, load_timeline, pretty_json
 from ..viewmodel import ReadKind, StatusRead, Tone
-from .base import (CommandPanel, OutputLog, Page, ReadOnlyBar, capped, fill, icon_button, muted, selected_data,
-                   table)
+from .base import (CommandPanel, ElidedLabel, OutputLog, Page, ReadOnlyBar, capped, disclosure_button, fill,
+                   icon_button, muted, selected_data, table)
 from .procs import Command, sentinel_argv, service_argv
 from .timeline import TimelineBar
 from .window import page_for_code
@@ -32,6 +32,43 @@ def _ep(iso: Any) -> float | None:
         return datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
     except ValueError:
         return None
+
+
+DETAIL_LABELS = {"outage_s": "Not recording for", "outage_seconds": "Not recording for",
+                 "backlog_s": "Waiting to be copied", "status_age_s": "Age of its last status",
+                 "down_s": "Not running for",
+                 "last_end_reason": "Cause", "reason": "Cause", "consecutive_errors": "Errors in a row",
+                 "open_problems": "Copies to look at", "attempts": "Attempts"}
+
+
+def alert_details(a: dict[str, Any], tone: str, tz: Any, now: float) -> list[tuple[str, str]]:
+    """What is shown under an alert, in words (GUI review 2026-11-17: it read "outage s: 420.0", "last end
+    reason: ffmpeg_error" and a UTC time stamp). The recorder's own reason code stays, in brackets, for
+    technical support; a detail this page does not know is shown as it is."""
+    from ..ledger_view import GAP_REASON_WORDS
+
+    out = [("Severity", str(a.get("severity_name") or tone).lower())]
+    since = _ep(a.get("since_utc"))
+    if since is not None:
+        out.append(("Since", f"{tf.when(since, tz, now)} ({tf.duration(max(0.0, now - since))} ago)"))
+    elif a.get("since_utc"):
+        out.append(("Since (UTC)", str(a["since_utc"])))
+    if a.get("recording_stopped"):
+        out.append(("Recording", "stopped by this problem"))
+    for key, value in (a.get("detail") or {}).items():
+        k = str(key)
+        label = DETAIL_LABELS.get(k, k.replace("_", " ").capitalize())
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and (k.endswith("_s") or
+                                                                                 k.endswith("_seconds")):
+            text = tf.duration(value)
+            if k not in DETAIL_LABELS:
+                label = k.rsplit("_", 1)[0].replace("_", " ").capitalize()
+        elif label == "Cause" and str(value) in GAP_REASON_WORDS:
+            text = f"{GAP_REASON_WORDS[str(value)]} ({value})"
+        else:
+            text = str(value)
+        out.append((label, text))
+    return out
 
 
 class StatusPage(Page):
@@ -52,6 +89,7 @@ class StatusPage(Page):
               ("Schedule and motion", [("schedule", "Schedule", "schedule"), ("motion", "Motion", "motion")]),
               ("System", [("clock", "Clock synchronised", "system"), ("service", "Recorder", "system")])]
     STACK_BELOW_PX = 1150      # narrower than this: the live view goes under the details
+    HEADER_STACK_BELOW_PX = 1000   # narrower than this: the header's facts go under the state
 
     def __init__(self, ctx, parent=None) -> None:  # noqa: ANN001
         super().__init__(ctx, parent)
@@ -77,12 +115,17 @@ class StatusPage(Page):
         # ---- compact status header: state + six key facts, two rows of label/value pairs
         header = QFrame()
         header.setObjectName("summary")
-        hl = QHBoxLayout(header)
+        # Side by side in a wide window; in a narrow one the facts go under the state (see resizeEvent), so
+        # their values are not cut off mid-word (GUI review 2026-11-17).
+        hl = QBoxLayout(QBoxLayout.Direction.LeftToRight, header)
+        self.header_lay = hl
         hl.setContentsMargins(12, 8, 12, 8)
         hl.setSpacing(12)
+        state_row = QHBoxLayout()
+        state_row.setSpacing(12)
         self.big_icon = QLabel()
         self.big_icon.setFixedSize(32, 32)
-        hl.addWidget(self.big_icon, 0, Qt.AlignmentFlag.AlignVCenter)
+        state_row.addWidget(self.big_icon, 0, Qt.AlignmentFlag.AlignVCenter)
         state = QVBoxLayout()
         state.setSpacing(0)
         self.headline = QLabel("…")
@@ -92,12 +135,16 @@ class StatusPage(Page):
         self.headline.setFont(f)
         state.addWidget(self.headline)
         self.supporting = muted()
+        self.supporting.setMinimumWidth(300)     # "Since 13:59 today · No action needed." on one line
         self.supporting.setMaximumWidth(380)
         state.addWidget(self.supporting)
-        hl.addLayout(state)
+        state_row.addLayout(state)
+        state_row.addStretch(1)
+        hl.addLayout(state_row)
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.VLine)
         sep.setObjectName("sep")
+        self.header_sep = sep
         hl.addWidget(sep)
         self.facts_grid = QGridLayout()
         self.facts_grid.setHorizontalSpacing(10)
@@ -110,7 +157,7 @@ class StatusPage(Page):
                            ("archive", "Archive"), ("verified", "Last verified file"), ("updated", "Status")):
             lab = muted(label)
             lab.setWordWrap(False)
-            val = QLabel("—")
+            val = ElidedLabel("—")
             val.setFont(vf)
             val.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             # A narrow window cuts a long value (full text in its tooltip) rather than widening the page.
@@ -142,15 +189,7 @@ class StatusPage(Page):
         left.addWidget(self.alerts)
         left.addSpacing(8)
         # GUI simplification 2026-11-13: the header already says what matters; the full list is one click away.
-        from PySide6.QtWidgets import QToolButton
-
-        self.details_btn = QToolButton()
-        self.details_btn.setText("Details")
-        self.details_btn.setObjectName("sectionTitle")
-        self.details_btn.setCheckable(True)
-        self.details_btn.setAutoRaise(True)
-        self.details_btn.setArrowType(Qt.ArrowType.RightArrow)
-        self.details_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.details_btn = disclosure_button("Details")
         self.details_btn.toggled.connect(self._show_details)
         left.addWidget(self.details_btn)
         self.details = _tree(["Item", "Now"])
@@ -184,8 +223,7 @@ class StatusPage(Page):
         right.addWidget(lt)
         from .liveview import LiveView
 
-        self.live = LiveView(ctx, fixed=False)
-        self.live.picture.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.live = LiveView(ctx, fixed=False)       # sizes its own picture: 16:9 for the width it gets
         right.addWidget(self.live)
         right.addStretch(1)
         self.columns.addLayout(right, 2)
@@ -230,12 +268,13 @@ class StatusPage(Page):
         narrow = self.width() < self.STACK_BELOW_PX
         self._layout_facts(2 if self.width() < 1400 else 3)
         self.columns.setDirection(QBoxLayout.Direction.TopToBottom if narrow else QBoxLayout.Direction.LeftToRight)
-        w = self.live.width()
-        self.live.picture.setFixedHeight(max(180, min(int(w * 9 / 16), 560)))   # 16:9 for the column width
+        stacked = self.width() < self.HEADER_STACK_BELOW_PX
+        self.header_lay.setDirection(QBoxLayout.Direction.TopToBottom if stacked
+                                     else QBoxLayout.Direction.LeftToRight)
+        self.header_sep.setFrameShape(QFrame.Shape.HLine if stacked else QFrame.Shape.VLine)
 
     def _show_details(self, on: bool) -> None:
         self.details.setVisible(on)
-        self.details_btn.setArrowType(Qt.ArrowType.DownArrow if on else Qt.ArrowType.RightArrow)
         if on:
             self._fit_tree(self.details, 30)
 
@@ -310,14 +349,7 @@ class StatusPage(Page):
             color = {"critical": p.critical, "warning": p.warning}.get(tone, p.info)
             it.setIcon(0, glyph(tone, color, 16))
             it.setToolTip(1, msg)
-            extra = [("Severity", str(a.get("severity_name") or tone).lower())]
-            if a.get("since_utc"):
-                extra.append(("Since (UTC)", str(a["since_utc"])))
-            if a.get("recording_stopped"):
-                extra.append(("Recording", "stopped by this problem"))
-            for k2, v2 in (a.get("detail") or {}).items():
-                extra.append((str(k2).replace("_", " "), str(v2)))
-            for k2, v2 in extra:
+            for k2, v2 in alert_details(a, tone, self.ctx.tz, (self.ctx.clock or __import__("time").time)()):
                 child = QTreeWidgetItem(["", f"{k2}: {v2}"])
                 child.setFlags(Qt.ItemFlag.ItemIsEnabled)
                 it.addChild(child)
@@ -372,15 +404,20 @@ class StatusPage(Page):
         elif not arc.get("running"):
             self._fact("archive", "copying not running", "warning")
         else:
-            bk = (arc.get("backlog") or {}).get("text") or ""
+            backlog = arc.get("backlog") or {}
+            secs = backlog.get("seconds")
+            # "Not yet archived: 0 h" says nothing (GUI review 2026-11-17: it also pushed the rest out of view).
+            bk = str(backlog.get("text") or "") if not isinstance(secs, (int, float)) or secs > 0 else ""
             label = arc.get("drive_label") or "no drive"
-            uses = {d.get("use") for d in arc.get("drives") or [] if isinstance(d, dict)}
+            drives = [d for d in arc.get("drives") or [] if isinstance(d, dict)]
+            uses = {d.get("use") for d in drives}
             if "take_out" in uses:
                 label += " · a drive is ready to be taken out"
             elif "full" in uses:
                 label += " · a full drive is waiting to be swapped"
             elif "standby" in uses:
-                label += " · second drive standing by"
+                other = next((d.get("label") for d in drives if d.get("use") == "standby" and d.get("label")), None)
+                label += f" · {other} standing by" if other else " · second drive standing by"
             self._fact("archive", label + (f" · {bk}" if bk else ""),
                        "" if arc.get("drive_label") else "warning")
         last = (doc.get("last_segment") or {}).get("end_utc")
@@ -419,7 +456,9 @@ class StatusPage(Page):
         if stale:
             self._set("archive", "unknown (status not updating)")
         else:
-            self._set("archive", arc.get("message") or ("not enabled" if not arc else "—"),
+            from .drive_pages import archive_message
+
+            self._set("archive", archive_message(arc) or ("not enabled" if not arc else "—"),
                       "" if not arc else "ok" if arc.get("running") else "warning")
         sch = doc.get("schedule") or {}
         if not sch:
@@ -656,6 +695,8 @@ class SystemPage(Page):
         hl.addLayout(top)
         self.checks = table(["Check", "Result", "Detail"])
         self.checks.setMaximumHeight(210)
+        fill(self.checks, [], empty="Press Check everything to check the settings, the recorder, the camera, the "
+                                    "saved recordings and the alerts.")
         hl.addWidget(self.checks)
         good = QGroupBox("Last known good settings")
         gl = QHBoxLayout(good)
@@ -820,10 +861,12 @@ class SystemPage(Page):
         db = cfg.ledger_snapshot_path or (cfg.data_path / "sentinel.db")
         data = load_admin(db, cfg.camera.id)
         fill(self.events, [[e.get("ts_utc", ""), e.get("severity", ""), e.get("category", ""), e.get("code", ""),
-                            e.get("message", "")] for e in data.events])
+                            e.get("message", "")] for e in data.events],
+             empty="No events to show (none recorded yet, or the recording log cannot be read from this account).")
         fill(self.gaps, [[g.get("gap_id", ""), g.get("kind", ""), g.get("start_utc") or "", g.get("end_utc") or "open",
                           f"{g['duration_s']:.1f}" if isinstance(g.get("duration_s"), (int, float)) else "",
-                          g.get("reason", "")] for g in data.recent_gaps])
+                          g.get("reason", "")] for g in data.recent_gaps],
+             empty="No gaps to show (none recorded yet, or the recording log cannot be read from this account).")
         read = self.ctx.read
         self.raw.setPlainText(pretty_json(read.doc) if read is not None and read.doc else "No status available.")
         self._load_history()

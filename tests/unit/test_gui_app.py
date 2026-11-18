@@ -1196,7 +1196,8 @@ def test_the_drive_a_swap_could_not_eject_gets_its_own_safely_remove_button(
                removal={"drive_id": "drive_uuid:u4", "safe": False, "text": "SENTINEL_4 is ready to be taken out"})
     page.on_status(SimpleNamespace(doc={"archive": two}))
     assert not page.remove_btn.isHidden() and page.remove_btn.text().strip() == "Safely remove SENTINEL_4"
-    assert "In use: SENTINEL_5" in page.arc_text.text() and "ready to be taken out" in page.arc_text.text()
+    assert "SENTINEL_5" in page.arc_drives.text() and "In use" in page.arc_drives.text()
+    assert "ready to be taken out" in page.arc_text.text()
     runs.clear()
     page.remove_btn.click()
     assert runs and runs[0][runs[0].index("--disk") + 1] == "1"
@@ -1268,3 +1269,172 @@ def test_archive_copying_not_running_offers_to_start_it(app: QApplication, tmp_p
     page.on_status(SimpleNamespace(doc={"archive": {"running": True, "drive_label": "SSD_1"}}))
     assert page.start_arc_btn.isHidden() and not page.swap_btn.isHidden()
     w.close()
+
+
+# ---------------------------------------------------------------------------- GUI review 2026-11-17
+def _two_drive_archive(**kw: Any) -> dict[str, Any]:
+    arc = {"running": True, "state": "UP_TO_DATE", "heartbeat_epoch": time.time(), "drive_label": "SSD_1",
+           "message": "Archive drive connected. All recordings are copied. Not yet archived: 0 h.",
+           "backlog": {"text": "Not yet archived: 0 h", "seconds": 0.0},
+           "drives": [{"drive_id": "drive_uuid:u1", "label": "SSD_1", "use": "in_use", "free_bytes": 412 * 10**9},
+                      {"drive_id": "drive_uuid:u2", "label": "SSD_2", "use": "standby", "free_bytes": 2 * 10**12}]}
+    arc.update(kw)
+    return arc
+
+
+def test_archive_box_has_one_line_per_drive_and_no_empty_backlog(app: QApplication, tmp_path: Path) -> None:
+    """The Drives page said everything in one run-on sentence, ending in "Not yet archived: 0 h."."""
+    from types import SimpleNamespace
+
+    from sentinel.gui.app.drive_pages import archive_drive_lines, archive_message
+
+    arc = _two_drive_archive()
+    assert archive_message(arc) == "Archive drive connected. All recordings are copied."
+    assert archive_drive_lines(arc) == [("in_use", "SSD_1", "In use · 412 GB free"),
+                                        ("standby", "SSD_2", "Standing by · 2.0 TB free")]
+    doc = status_doc(base_measurements(), time.time(), last_segment_end=time.time())
+    doc["archive"] = arc
+    w = _window(app, tmp_path, admin=True, doc=doc)
+    page = w.pages["drives"]
+    page.on_status(SimpleNamespace(doc=doc))
+    assert not page.arc_drives.isHidden()
+    assert "<b>SSD_1</b>" in page.arc_drives.text() and "Standing by · 2.0 TB free" in page.arc_drives.text()
+    assert page.arc_text.text() == "Archive drive connected. All recordings are copied."
+    # the Status header names the drive standing by and has room for it
+    assert w.pages["status"].facts["archive"].text() == "SSD_1 · SSD_2 standing by"
+    # a real backlog is still said
+    busy = _two_drive_archive(state="COPYING", message="Copying recordings to the archive drive. Do not unplug it. "
+                                                       "Not yet archived: 2.0 h.",
+                              backlog={"text": "Not yet archived: 2.0 h", "seconds": 7200.0})
+    page.on_status(SimpleNamespace(doc={"archive": busy}))
+    assert page.arc_text.text().endswith("Not yet archived: 2.0 h.")
+    # no drive, copier not running: no drive lines
+    page.on_status(SimpleNamespace(doc={"archive": {"running": False}}))
+    assert page.arc_drives.isHidden()
+    w.close()
+
+
+def test_return_to_service_is_not_offered_for_a_drive_the_copier_is_using(
+        app: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """It deletes the drive's recordings and was the first button offered for the archive drive in use. It is for
+    a drive that came back from the office."""
+    from types import SimpleNamespace
+
+    w = _window(app, tmp_path, admin=True)
+    page = w.pages["drives"]
+    monkeypatch.setattr(page.list, "refresh", lambda: None)
+    page.list.drives = [{"disk_id": "1", "class": "READY", "role": "archive", "label": "SSD_1", "drive_uuid": "u1",
+                         "fingerprint": "f1", "size_bytes": 2 * 10**12, "mount_paths": ["E:\\"],
+                         "message": "Archive drive SSD_1."}]
+    page._show_drives()
+    page.table.selectRow(0)
+    assert not page.return_btn.isHidden()                     # what the copier does with it is not known yet
+    arc = _two_drive_archive()
+
+    def use(word: str) -> None:
+        arc["drives"][0]["use"] = word
+        page.on_status(SimpleNamespace(doc={"archive": dict(arc, drives=[dict(d) for d in arc["drives"]])}))
+
+    use("in_use")
+    assert page.return_btn.isHidden() and not page.rename_btn.isHidden() and not page.eject_btn.isHidden()
+    assert "using it now" in page.hint.text()
+    for word in ("standby", "full"):
+        use(word)
+        assert page.return_btn.isHidden(), word
+    use("awaiting_return")                                    # back from the office: what the button is for
+    assert not page.return_btn.isHidden()
+    use("in_use")
+    page.on_status(SimpleNamespace(doc={"archive": {"running": False}}))
+    assert not page.return_btn.isHidden()                     # copier stopped: not known, offered as before
+    w.close()
+
+
+def test_alert_details_are_in_words() -> None:
+    """They read "outage s: 420.0", "last end reason: ffmpeg_error" and a UTC time stamp."""
+    from zoneinfo import ZoneInfo
+
+    from sentinel.clock import iso_utc
+    from sentinel.gui.app.status_pages import alert_details
+
+    now = 1_800_000_000.0
+    a = {"code": "R-003", "severity_name": "CRITICAL", "since_utc": iso_utc(now - 420), "recording_stopped": True,
+         "detail": {"outage_s": 420.0, "last_end_reason": "ffmpeg_error", "attempts": 23, "new_thing": "x",
+                    "wait_s": 90}}
+    d = dict(alert_details(a, "critical", ZoneInfo("UTC"), now))
+    assert d["Severity"] == "critical" and d["Recording"] == "stopped by this problem"
+    assert d["Since"].endswith("(7 min ago)") and "Since (UTC)" not in d
+    assert d["Not recording for"] == "7 min" and d["Cause"] == "camera disconnected (ffmpeg_error)"
+    assert d["Attempts"] == "23" and d["New thing"] == "x" and d["Wait"] == "1 min"
+    # a reason this page does not know, and a time it cannot read, are shown as they are
+    odd = dict(alert_details({"since_utc": "soon", "detail": {"reason": "brand_new"}}, "warning", ZoneInfo("UTC"), now))
+    assert odd["Since (UTC)"] == "soon" and odd["Cause"] == "brand_new"
+
+
+def test_rarely_changed_settings_are_behind_advanced_and_still_saved(app: QApplication, tmp_path: Path) -> None:
+    """Motion, Storage and Camera showed every tuning value in one list."""
+    w = _window(app, tmp_path, admin=True)
+    w.navigate("motion")
+    motion = w.pages["motion"]
+    assert not motion.advanced.is_open()
+    assert not motion.keep.isHidden() and not motion.percent.isHidden() and not motion.markers.isHidden()
+    for hidden in (motion.stream, motion.threshold, motion.frames, motion.fps, motion.unhealthy, motion.merge):
+        assert hidden.isHidden()
+    motion.frames.setValue(4)                                 # a hidden field keeps its value and is saved
+    assert motion.tables()["motion"]["min_frames"] == 4
+    motion.advanced.set_open(True)
+    assert not motion.frames.isHidden() and not motion.merge.isHidden()
+    motion.advanced.toggle.click()
+    assert motion.frames.isHidden()
+    storage = w.pages["storage"]
+    assert storage.margin.isHidden() and storage.serial_chars.isHidden() and storage.min_size.isHidden()
+    assert not storage.keep.isHidden() and not storage.erase_on.isHidden()
+    assert set(storage.tables()["drives"]) >= {"erase_enabled", "serial_confirm_chars", "min_size_gb"}
+    camera = w.pages["camera"]
+    assert not camera.advanced.is_open() and camera.transport.isHidden() and camera.secure.isHidden()
+    # a setting that is not the default is never out of sight
+    w.ctx.cfg = replace(w.ctx.cfg, camera=replace(w.ctx.cfg.camera, transport="udp"))
+    camera.load()
+    assert camera.advanced.is_open() and not camera.transport.isHidden()
+    w.close()
+
+
+def test_schedule_page_says_when_the_schedule_is_off(app: QApplication, tmp_path: Path) -> None:
+    w = _window(app, tmp_path, admin=True)
+    page = w.pages["schedule"]
+    assert not page.enabled.isChecked() and not page.off_note.isHidden()
+    assert page.weekly.t.isHidden() and not page.weekly.empty_note.isHidden()
+    assert page.dates.t.isHidden() and not page.dates.empty_note.isHidden()
+    assert page.tz.lineEdit().placeholderText() == "same as the General tab (America/New_York)"
+    page._preset()
+    assert page.off_note.isHidden() and not page.weekly.t.isHidden() and page.weekly.empty_note.isHidden()
+    page.weekly.clear()
+    assert page.weekly.t.isHidden() and not page.weekly.empty_note.isHidden()
+    w.close()
+
+
+def test_small_things_that_looked_broken(app: QApplication, tmp_path: Path) -> None:
+    """Toggles drawn as a solid blue block, numbers in boxes as wide as the form, a live view with black bars,
+    "Read-only" on a page where Swap works, tables that were blank boxes."""
+    from sentinel.gui.app.base import ReadOnlyBar
+    from sentinel.gui.app.liveview import MAX_PICTURE_H
+
+    w = _window(app, tmp_path, admin=True)
+    status = w.pages["status"]
+    assert status.details_btn.objectName() == "disclosure"
+    assert w.pages["motion"].log.parent().toggle.objectName() == "disclosure"
+    assert w.pages["motion"].keep.maximumWidth() <= 200 and w.pages["storage"].backlog.maximumWidth() <= 200
+    live = status.live
+    for width in (1000, 1280, 1700):                           # stacked, stacked, side by side
+        w.resize(width, 800)
+        _drain(app, 0.05)
+        h = max(180, min(int(live.width() * 9 / 16), MAX_PICTURE_H))
+        assert live.picture.height() == h, width
+        assert live.picture.width() <= int(h * 16 / 9) + 1, width          # never wider than 16:9: no side bars
+    system = w.pages["system"]
+    assert "Press Check everything" in system.checks.item(0, 0).text()
+    w.close()
+    op = _window(app, tmp_path / "operator", admin=False)
+    bar = op.pages["drives"].findChild(ReadOnlyBar)
+    assert bar is not None and not bar.isHidden()
+    assert any("Swapping the archive drive does not" in lab.text() for lab in bar.findChildren(type(op.state_label)))
+    op.close()

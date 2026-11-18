@@ -57,7 +57,7 @@ class SetupPage(Page):
         f = QFormLayout(cam)
         self.later = QCheckBox("Add the camera later (on site, in Camera)")
         self.later.toggled.connect(self._later)
-        f.addRow("", self.later)
+        f.addRow(self.later)
         self.host = QLineEdit()
         self.host.setPlaceholderText("IP address or host name")
         self.port = QSpinBox()

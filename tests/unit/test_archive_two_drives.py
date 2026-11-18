@@ -256,20 +256,21 @@ def test_worker_writes_playlists_that_point_at_the_verified_copies(env: Env) -> 
 
 @pytest.mark.skipif(os.name != "nt", reason="drive text formatting only")
 def test_window_lists_both_drives() -> None:
-    from sentinel.gui.app.drive_pages import archive_drives_text
+    from sentinel.gui.app.drive_pages import archive_drive_lines
 
     arc = {"drive_label": "ARCHIVE_B", "drives": [
         {"label": "ARCHIVE_A", "use": "full", "free_bytes": 0},
         {"label": "ARCHIVE_B", "use": "in_use", "free_bytes": 1_200_000_000_000}]}
-    text = archive_drives_text(arc)
-    assert text.startswith("Full (swap it): ARCHIVE_A.") and "In use: ARCHIVE_B (" in text
-    assert archive_drives_text({"drive_label": None}) == "Drive: none inserted."
+    # one line per drive (0.3.18; it was one sentence: "Full (swap it): ARCHIVE_A. In use: ARCHIVE_B (…)")
+    assert archive_drive_lines(arc) == [("full", "ARCHIVE_A", "Full: press Swap and safely remove"),
+                                        ("in_use", "ARCHIVE_B", "In use · 1.2 TB free")]
+    assert archive_drive_lines({"drive_label": None}) == []
 
 
 @pytest.mark.skipif(os.name != "nt", reason="drive text formatting only")
 def test_window_says_what_a_second_drive_does() -> None:
     """End-user request 2026-11-17: nothing on the screen said that copying moves on to a second drive by itself."""
-    from sentinel.gui.app.drive_pages import archive_drives_text, second_drive_hint
+    from sentinel.gui.app.drive_pages import archive_drive_lines, second_drive_hint
 
     a = {"label": "SSD_1", "use": "in_use", "full": False, "free_bytes": 10**12}
     b = {"label": "SSD_2", "use": "standby", "full": False, "free_bytes": 10**12}
@@ -277,7 +278,7 @@ def test_window_says_what_a_second_drive_does() -> None:
     assert "second archive drive can stay plugged in" in one and "when SSD_1 is full" in one
     two = second_drive_hint({"running": True, "drives": [a, b]})
     assert two.startswith("When SSD_1 is full, copying moves to SSD_2 by itself.")
-    assert "Standing by: SSD_2." in archive_drives_text({"drives": [a, b]})
+    assert archive_drive_lines({"drives": [a, b]})[1] == ("standby", "SSD_2", "Standing by · 1.0 TB free")
     full = second_drive_hint({"running": True, "drives": [dict(a, full=True)]})
     assert "plug in a second archive drive that has room" in full
     # nothing to add: not running, no drive, already moved on, a swap under way, a drive back from the office

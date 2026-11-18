@@ -9,8 +9,9 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import (QAbstractItemView, QFrame, QHBoxLayout, QHeaderView, QLabel, QMessageBox,
-                               QPlainTextEdit, QPushButton, QScrollArea, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QAbstractItemView, QFormLayout, QFrame, QHBoxLayout, QHeaderView, QLabel,
+                               QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QTableWidget,
+                               QTableWidgetItem, QToolButton, QVBoxLayout, QWidget)
 
 from ...config import AppConfig
 from ..theme import Palette
@@ -135,6 +136,56 @@ def muted(text: str = "") -> QLabel:
     return lab
 
 
+class Note(QLabel):
+    """Muted help text under a field in a form. A wrapped QLabel there asks for the height its text would have
+    in a narrow column, which left a wide gap above and below the words (GUI review 2026-11-17); this one asks
+    for the height its text has at the width it was given."""
+
+    def __init__(self, text: str = "", parent: QWidget | None = None) -> None:
+        super().__init__(text, parent)
+        self.setObjectName("muted")
+        self.setWordWrap(True)
+        self.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+
+    def _height(self) -> int:
+        w = self.width() if self.width() > 120 else 480
+        return max(self.heightForWidth(w), self.fontMetrics().height())
+
+    def sizeHint(self):  # noqa: ANN201, N802
+        from PySide6.QtCore import QSize
+
+        return QSize(super().sizeHint().width(), self._height())
+
+    def minimumSizeHint(self):  # noqa: ANN201, N802
+        from PySide6.QtCore import QSize
+
+        return QSize(120, self._height())
+
+    def resizeEvent(self, e) -> None:  # noqa: ANN001, N802
+        super().resizeEvent(e)
+        if e.oldSize().width() != e.size().width():
+            self.updateGeometry()
+
+
+class ElidedLabel(QLabel):
+    """One line of text; when it does not fit it ends in "…" instead of being cut off mid-word (GUI review
+    2026-11-17). The full text is the caller's tooltip. Text that fits is drawn (and can be selected) as usual."""
+
+    def paintEvent(self, e) -> None:  # noqa: ANN001, N802
+        from PySide6.QtGui import QPainter, QPalette
+
+        rect = self.contentsRect()
+        fm = self.fontMetrics()
+        if fm.horizontalAdvance(self.text()) <= rect.width():
+            super().paintEvent(e)
+            return
+        qp = QPainter(self)
+        qp.setPen(self.palette().color(QPalette.ColorRole.WindowText))
+        qp.drawText(rect, int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                    fm.elidedText(self.text(), Qt.TextElideMode.ElideRight, rect.width()))
+        qp.end()
+
+
 def toned(text: str, tone: str) -> QLabel:
     lab = QLabel(text)
     lab.setObjectName(tone)
@@ -149,10 +200,61 @@ def icon_button(text: str, icon: str, color: str) -> QPushButton:
     return b
 
 
+def disclosure_button(text: str) -> QToolButton:
+    """A small arrow-and-word toggle ("Details", "Advanced") that opens what is below it. Drawn flat in every
+    state (style.py, #disclosure): the native checked look is a solid accent block that hid the word (GUI
+    review 2026-11-17)."""
+    b = QToolButton()
+    b.setObjectName("disclosure")
+    b.setText(text)
+    b.setCheckable(True)
+    b.setAutoRaise(True)
+    b.setArrowType(Qt.ArrowType.RightArrow)
+    b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+    b.setCursor(Qt.CursorShape.PointingHandCursor)
+    b.toggled.connect(lambda on: b.setArrowType(Qt.ArrowType.DownArrow if on else Qt.ArrowType.RightArrow))
+    return b
+
+
+class AdvancedRows:
+    """Rows of a form that stay hidden until "Advanced" is opened (GUI review 2026-11-17): the settings a
+    technician changes once, if ever, are one click away and out of the way of the person running the laptop.
+    Hidden fields keep their values and are saved like the others."""
+
+    def __init__(self, form: QFormLayout, note: str = "Rarely changed; the defaults suit most sites.") -> None:
+        self.form = form
+        self.fields: list[QWidget] = []
+        self.toggle = disclosure_button("Advanced")
+        head = QWidget()
+        row = QHBoxLayout(head)
+        row.setContentsMargins(0, 2, 0, 0)
+        row.addWidget(self.toggle)
+        row.addWidget(muted(note), 1)
+        form.addRow(head)
+        self.toggle.toggled.connect(self._show)
+
+    def add(self, label: str, field: QWidget) -> QWidget:
+        self.form.addRow(label, field)
+        self.fields.append(field)
+        self.form.setRowVisible(field, self.toggle.isChecked())
+        return field
+
+    def _show(self, on: bool) -> None:
+        for f in self.fields:
+            self.form.setRowVisible(f, on)
+
+    def set_open(self, on: bool) -> None:
+        self.toggle.setChecked(on)
+
+    def is_open(self) -> bool:
+        return self.toggle.isChecked()
+
+
 class ReadOnlyBar(QFrame):
     """Shown on settings pages when the window is not running as administrator."""
 
-    def __init__(self, ctx: Ctx, what: str = "these settings", parent: QWidget | None = None) -> None:
+    def __init__(self, ctx: Ctx, what: str = "these settings", parent: QWidget | None = None, *,
+                 text: str = "") -> None:
         super().__init__(parent)
         from .icons import glyph_pixmap
 
@@ -162,7 +264,9 @@ class ReadOnlyBar(QFrame):
         ic = QLabel()
         ic.setPixmap(glyph_pixmap("lock", ctx.palette.text2, 16))
         lay.addWidget(ic)
-        lay.addWidget(QLabel(f"Read-only. Changing {what} needs Windows administrator rights."), 1)
+        words = QLabel(text or f"Read-only. Changing {what} needs Windows administrator rights.")
+        words.setWordWrap(True)
+        lay.addWidget(words, 1)
         b = QPushButton("Unlock…")
         b.setToolTip("Reopen Sentinel as administrator (Windows asks for approval)")
         b.clicked.connect(ctx.unlock)
@@ -251,8 +355,6 @@ class CommandPanel(QWidget):
 
     def __init__(self, log: OutputLog, palette: Palette, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        from PySide6.QtWidgets import QToolButton
-
         self.log, self.p = log, palette
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -261,12 +363,7 @@ class CommandPanel(QWidget):
         self.icon = QLabel()
         self.text = QLabel("")
         self.text.setWordWrap(True)
-        self.toggle = QToolButton()
-        self.toggle.setText("Details")
-        self.toggle.setCheckable(True)
-        self.toggle.setArrowType(Qt.ArrowType.RightArrow)
-        self.toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        self.toggle.setAutoRaise(True)
+        self.toggle = disclosure_button("Details")
         self.toggle.toggled.connect(self._show)
         row.addWidget(self.icon)
         row.addWidget(self.text, 1)
@@ -291,7 +388,6 @@ class CommandPanel(QWidget):
 
     def _show(self, on: bool) -> None:
         self.log.setVisible(on)
-        self.toggle.setArrowType(Qt.ArrowType.DownArrow if on else Qt.ArrowType.RightArrow)
 
     def _started(self, title: str) -> None:
         self.setVisible(True)
@@ -324,6 +420,10 @@ def table(headers: list[str], stretch_last: bool = True) -> QTableWidget:
         # long values are cut with the full text in the tooltip (fill), never a sideways scroll bar
         t.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
     t.horizontalHeader().setHighlightSections(False)
+    # An empty table keeps these widths: wide enough for each heading (GUI review 2026-11-17: "Saved (replaced a").
+    fm = t.horizontalHeader().fontMetrics()
+    for c, h in enumerate(headers):
+        t.setColumnWidth(c, max(t.columnWidth(c), fm.horizontalAdvance(h) + 28))
     return t
 
 

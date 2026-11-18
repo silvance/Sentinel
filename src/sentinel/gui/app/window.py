@@ -458,6 +458,8 @@ class AppWindow(QMainWindow):
         if cfg is not None:
             self._reload_if_changed()
             cfg = self.ctx.cfg
+        for b in (self.sb_alerts, self.sb_storage, self.sb_archive):      # nothing to say before setup
+            b.setVisible(cfg is not None)
         if cfg is None:
             self.state_label.setText("Not set up")
             self.sb_state.setText("Sentinel is not set up on this computer")

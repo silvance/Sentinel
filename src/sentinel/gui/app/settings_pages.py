@@ -10,15 +10,28 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from PySide6.QtCore import QDate, QDateTime, Qt, QTime
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QDateEdit, QDialog, QDialogButtonBox,
+from PySide6.QtWidgets import (QAbstractSpinBox, QCheckBox, QComboBox, QDateEdit, QDialog, QDialogButtonBox,
                                QDoubleSpinBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
                                QPlainTextEdit, QPushButton, QSizePolicy, QSpinBox, QTableWidget,
                                QToolButton, QVBoxLayout, QWidget)
 
 from ...config import AppConfig
-from .base import CommandPanel, OutputLog, Page, ReadOnlyBar, capped, icon_button, muted
+from .base import AdvancedRows, CommandPanel, Note, OutputLog, Page, ReadOnlyBar, capped, icon_button, muted
 from .configedit import ConfigEditError, check_text, replace_sections, save_sections
 from .procs import Task, sentinel_argv
+
+
+NUMBER_FIELD_W = 170
+
+
+def form(parent: QWidget | None = None) -> QFormLayout:
+    """A settings form: fields start at the same left edge, and a short field (a number, a tick box) stays short
+    and at that edge instead of being stretched or centred."""
+    f = QFormLayout(parent) if parent is not None else QFormLayout()
+    f.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+    f.setFormAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+    f.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+    return f
 
 
 class SettingsPage(Page):
@@ -50,6 +63,9 @@ class SettingsPage(Page):
         self.load()
 
     def editor(self, w: QWidget) -> QWidget:
+        if isinstance(w, QAbstractSpinBox):
+            # A number is a short field (GUI review 2026-11-17: "2" sat in a box as wide as the form).
+            w.setFixedWidth(NUMBER_FIELD_W)
         self.editors.append(w)
         return w
 
@@ -117,10 +133,10 @@ class CameraPage(SettingsPage):
     def __init__(self, ctx, parent=None) -> None:  # noqa: ANN001
         super().__init__(ctx, parent)
         box = QGroupBox("Camera")
-        f = QFormLayout(box)
+        f = form(box)
         self.pending = self.editor(QCheckBox("No camera yet (set everything else up; nothing is recorded)"))
         self.pending.toggled.connect(self._pending_changed)
-        f.addRow("", self.pending)
+        f.addRow(self.pending)
         self.name = self.editor(QLineEdit())
         f.addRow("Label for reports", self.name)
         self.cam_id = QLabel()
@@ -140,21 +156,25 @@ class CameraPage(SettingsPage):
         self.transport = self.editor(QComboBox())
         self.transport.addItem("TCP (recommended)", "tcp")
         self.transport.addItem("UDP", "udp")
-        f.addRow("Transport", self.transport)
         self.secure = self.editor(QCheckBox("Encrypted stream (rtsps://; only if the camera supports it)"))
-        f.addRow("", self.secure)
+        # GUI review 2026-11-17: how the stream is carried is set once, if ever; opened by load() when it is not
+        # the default, so a setting that matters is never out of sight.
+        self.advanced = AdvancedRows(f, "How the video is carried; the defaults suit most cameras.")
+        self.advanced.add("Transport", self.transport)
+        self.advanced.add("", self.secure)
         self.body.addWidget(capped(box))
 
         acc = QGroupBox("Camera account (use a view-only account)")
-        f2 = QFormLayout(acc)
+        f2 = form(acc)
         self.user = self.editor(QLineEdit())
         self.user.setPlaceholderText("empty if the camera needs no login")
         f2.addRow("User name", self.user)
         self.password = self.editor(QLineEdit())
         self.password.setEchoMode(QLineEdit.EchoMode.Password)
         f2.addRow("Password", self.password)
-        self.cred_note = muted()
+        self.cred_note = Note()
         f2.addRow("", self.cred_note)
+        self.acc_form = f2
         self.body.addWidget(capped(acc))
 
         row = QHBoxLayout()
@@ -198,6 +218,7 @@ class CameraPage(SettingsPage):
         if scheme == "rtsps" and urlsplit(cfg.camera.url).port is None:
             port = 322                           # RTSPS default port (review 2026-11-10)
         self.secure.setChecked(scheme == "rtsps")
+        self.advanced.set_open(self.advanced.is_open() or scheme == "rtsps" or cfg.camera.transport != "tcp")
         self.name.setText(cfg.camera.name)
         self.cam_id.setText(cfg.camera.id)
         self.host.setText(host)
@@ -222,6 +243,7 @@ class CameraPage(SettingsPage):
         else:
             self.cred_note.setText("")
             self.password.setPlaceholderText("")
+        self.acc_form.setRowVisible(self.cred_note, bool(self.cred_note.text()))
         self.user.setText(self.saved_user)
         self.pending.setChecked(cfg.camera.pending)
         self._pending_changed(cfg.camera.pending)
@@ -366,6 +388,9 @@ GROUPS = {"weekdays": set(DAY_KEYS[:5]), "weekend": set(DAY_KEYS[5:]), "daily": 
 
 def _action_combo(value: str) -> QComboBox:
     c = QComboBox()
+    # Wide enough for the longest choice (GUI review 2026-11-17: "Pause (do not recorc").
+    c.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+    c.setMinimumContentsLength(max(len(t) for _k, t in ACTIONS) + 2)
     for k, t in ACTIONS:
         c.addItem(t, k)
     c.setCurrentIndex(max(0, c.findData(value)))
@@ -542,6 +567,21 @@ def _schedule_table(headers: list[str]) -> QTableWidget:
     return t
 
 
+def _empty_note(t: QTableWidget, text: str) -> QLabel:
+    """Shown in place of a schedule table that has no rows (GUI review 2026-11-17: an empty grid said nothing)."""
+    note = muted(text)
+
+    def sync(*_a: object) -> None:
+        empty = t.rowCount() == 0
+        t.setVisible(not empty)
+        note.setVisible(empty)
+
+    t.model().rowsInserted.connect(sync)
+    t.model().rowsRemoved.connect(sync)
+    sync()
+    return note
+
+
 class WeeklyTable(QWidget):
     """Weekly periods: action, days (toggle buttons), from and until (time lists), Remove."""
 
@@ -551,6 +591,8 @@ class WeeklyTable(QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
         self.t = _schedule_table(["Action", "Days", "From", "Until", ""])
         lay.addWidget(self.t)
+        self.empty_note = _empty_note(self.t, "No weekly periods yet. Press Add, or use Quick setup above.")
+        lay.addWidget(self.empty_note)
         row = QHBoxLayout()
         self.add_btn = QPushButton("Add")
         self.add_btn.clicked.connect(lambda: self.add("record", set(DAY_KEYS[:5]), "07:00", "18:00"))
@@ -600,6 +642,8 @@ class DatesTable(QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
         self.t = _schedule_table(["Action", "From", "Until", ""])
         lay.addWidget(self.t)
+        self.empty_note = _empty_note(self.t, "No particular dates yet. Press Days off… for leave or holidays.")
+        lay.addWidget(self.empty_note)
         row = QHBoxLayout()
         self.leave_btn = QPushButton("Days off…")
         self.leave_btn.setToolTip("Stop recording for whole days (leave, holidays); recording starts again by itself")
@@ -650,6 +694,7 @@ class DaysOffDialog(QDialog):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Days off")
+        self.setMinimumWidth(460)               # "Wednesday 18 November 2026" was cut off (GUI review 2026-11-17)
         lay = QVBoxLayout(self)
         f = QFormLayout()
         today = QDate.currentDate()
@@ -699,9 +744,15 @@ class SchedulePage(SettingsPage):
 
     def __init__(self, ctx, parent=None) -> None:  # noqa: ANN001
         super().__init__(ctx, parent)
-        top = QFormLayout()
+        top = form()
+        self.top_form = top
         self.enabled = self.editor(QCheckBox("Use a recording schedule (off = record all the time)"))
-        top.addRow("", self.enabled)
+        top.addRow(self.enabled)
+        # GUI review 2026-11-17: with the schedule off the page looked exactly as if it were in use.
+        self.off_note = muted("The schedule is off: Sentinel records all the time. The periods below are kept, "
+                              "but not used until the box above is ticked.")
+        top.addRow(self.off_note)
+        self.enabled.toggled.connect(lambda on: top.setRowVisible(self.off_note, not on))
         self.default = self.editor(_action_combo("record"))
         top.addRow("Outside the periods below", self.default)
         self.tz = self.editor(QComboBox())
@@ -710,12 +761,15 @@ class SchedulePage(SettingsPage):
 
         self.tz.addItem("", "")
         self.tz.addItems(COMMON_ZONES)
-        self.tz.setToolTip("Empty: the time zone on the General page")
+        self.tz.setToolTip("Empty: the time zone on the General tab")
         top.addRow("Time zone", self.tz)
         preset = self.editor(icon_button("Work hours, motion at other times", "time", ctx.palette.text))
         preset.setToolTip("Record all the time Monday to Friday 07:00–18:00; at other times record only on motion")
         preset.clicked.connect(self._preset)
-        top.addRow("Quick setup", preset)
+        prow = QHBoxLayout()
+        prow.addWidget(preset)
+        prow.addStretch(1)
+        top.addRow("Quick setup", prow)
         topw = QWidget()
         topw.setLayout(top)
         top.setContentsMargins(0, 0, 0, 0)
@@ -747,8 +801,12 @@ class SchedulePage(SettingsPage):
     def load(self) -> None:
         raw = self.raw().get("schedule", {}) or {}
         self.enabled.setChecked(bool(raw.get("enabled", False)))
+        self.top_form.setRowVisible(self.off_note, not self.enabled.isChecked())
         self.default.setCurrentIndex(max(0, self.default.findData(raw.get("default", "record"))))
         self.tz.setEditText(str(raw.get("timezone", "") or ""))
+        cfg = self.cfg
+        if cfg is not None and self.tz.lineEdit() is not None:     # an empty box said nothing
+            self.tz.lineEdit().setPlaceholderText(f"same as the General tab ({cfg.recording.display_timezone})")
         self.weekly.clear()
         for w in raw.get("weekly", []) or []:
             self.weekly.add(str(w.get("action", "record")), days_from_config(w.get("days", [])),
@@ -823,32 +881,37 @@ class MotionPage(SettingsPage):
     def __init__(self, ctx, parent=None) -> None:  # noqa: ANN001
         super().__init__(ctx, parent)
         box = QGroupBox("Detection")
-        f = QFormLayout(box)
+        f = form(box)
         self.markers = self.editor(QCheckBox("Mark motion in recordings for reviewers (timeline and export summary)"))
-        f.addRow("", self.markers)
-        self.stream = self.editor(QLineEdit())
-        self.stream.setPlaceholderText("empty = key frames of the main stream")
-        f.addRow("Second stream path", self.stream)
+        f.addRow(self.markers)
         self.keep = self._spin(10, 3600, " s", "Keep recording this long after the last motion (each motion restarts it)")
         f.addRow("Keep recording after motion", self.keep)
         self.percent = self.editor(QDoubleSpinBox())
         self.percent.setRange(0.05, 50)
         self.percent.setDecimals(2)
         self.percent.setSuffix(" %")
+        self.percent.setToolTip("How much of the picture must change to count as motion")
         f.addRow("Share of picture that must change", self.percent)
+        f.addRow("", Note("A smaller share notices smaller movements (more sensitive); a larger one ignores them. "
+                          "Try it with the live test below."))
+        # GUI review 2026-11-17: the three settings above are the ones a site adjusts; the rest is tuning.
+        self.advanced = AdvancedRows(f, "Fine tuning of the detector; the defaults suit most scenes.")
+        self.stream = self.editor(QLineEdit())
+        self.stream.setPlaceholderText("empty = key frames of the main stream")
+        self.advanced.add("Second stream path", self.stream)
         self.threshold = self._spin(5, 200, "", "Brightness change (0–255) that counts as a change")
-        f.addRow("Brightness change that counts", self.threshold)
+        self.advanced.add("Brightness change that counts", self.threshold)
         self.frames = self._spin(1, 20, "", "Analysed frames in a row that must show change")
-        f.addRow("Frames in a row", self.frames)
+        self.advanced.add("Frames in a row", self.frames)
         self.fps = self.editor(QDoubleSpinBox())
         self.fps.setRange(0.5, 15)
         self.fps.setDecimals(1)
         self.fps.setSuffix(" per second")
-        f.addRow("Analysis rate (second stream)", self.fps)
+        self.advanced.add("Analysis rate (second stream)", self.fps)
         self.unhealthy = self._spin(5, 300, " s", "Record all the time if the detector gets no pictures this long")
-        f.addRow("Fail-safe after", self.unhealthy)
+        self.advanced.add("Fail-safe after", self.unhealthy)
         self.merge = self._spin(1, 300, " s", "Motion closer together than this is one marker")
-        f.addRow("Join markers closer than", self.merge)
+        self.advanced.add("Join markers closer than", self.merge)
         self.body.addWidget(capped(box))
 
         test = QGroupBox("Live test (walk through the scene while it runs; records nothing)")
@@ -926,34 +989,37 @@ class StoragePage(SettingsPage):
     def __init__(self, ctx, parent=None) -> None:  # noqa: ANN001
         super().__init__(ctx, parent)
         arc = QGroupBox("Archive drive")
-        f = QFormLayout(arc)
+        f = form(arc)
         self.arc_on = self.editor(QCheckBox("Copy every recording to the archive drive"))
-        f.addRow("", self.arc_on)
+        f.addRow(self.arc_on)
         self.backlog = self._dspin(1, 720, " hours", "Alarm (A-004) when recordings wait longer than this to be copied")
         f.addRow("Alarm when not copied for", self.backlog)
         self.body.addWidget(capped(arc))
         ret = QGroupBox("Recordings on this computer")
-        r = QFormLayout(ret)
-        self.ret_on = self.editor(QCheckBox("When space runs low, delete recordings already copied to a REMOVED "
-                                            "archive drive"))
-        r.addRow("", self.ret_on)
+        r = form(ret)
+        self.ret_on = self.editor(QCheckBox("When space runs low, delete recordings already copied to an archive "
+                                            "drive that has been taken out"))
+        r.addRow(self.ret_on)
         self.keep = self._dspin(1, 24 * 365, " hours", "Never delete recordings newer than this")
         r.addRow("Always keep the newest", self.keep)
         self.swap_days = self._dspin(1, 60, " days", "Warn (L-001) if space will run out before the next swap")
         r.addRow("Days between drive swaps", self.swap_days)
+        # GUI review 2026-11-17: set once by a technician, if ever.
+        self.ret_advanced = AdvancedRows(r)
         self.margin = self._dspin(1, 10_000, " GB", "Free only this much above the low-space level")
-        r.addRow("Free up to", self.margin)
+        self.ret_advanced.add("Free up to", self.margin)
         self.body.addWidget(capped(ret))
         drv = QGroupBox("Erasing and setting up drives")
-        d = QFormLayout(drv)
+        d = form(drv)
         self.erase_on = self.editor(QCheckBox("Allow 'Erase and set up' (Drives page; administrator only)"))
-        d.addRow("", self.erase_on)
+        d.addRow(self.erase_on)
+        self.drv_advanced = AdvancedRows(d, "The checks before a drive is erased.")
         self.serial_chars = self.editor(QSpinBox())
         self.serial_chars.setRange(4, 12)
         self.serial_chars.setToolTip("How many last characters of the serial number must be typed to erase")
-        d.addRow("Serial characters to type", self.serial_chars)
+        self.drv_advanced.add("Serial characters to type", self.serial_chars)
         self.min_size = self._dspin(1, 100_000, " GB", "Smaller drives are refused")
-        d.addRow("Smallest drive accepted", self.min_size)
+        self.drv_advanced.add("Smallest drive accepted", self.min_size)
         self.body.addWidget(capped(drv))
         self.body.addStretch(1)
         self.finish_layout()
@@ -1012,21 +1078,21 @@ class GeneralPage(SettingsPage):
         from .setup_page import COMMON_ZONES
 
         box = QGroupBox("This recorder")
-        f = QFormLayout(box)
+        f = form(box)
         self.org = self.editor(QLineEdit())
         self.org.setMaxLength(100)
         self.org.setPlaceholderText("optional; leave empty to name no organisation")
         f.addRow("Organisation", self.org)
-        f.addRow("", muted("Shown in the window, on diagnostic reports and on review-drive summaries. "
-                           "Empty: the organisation is not named anywhere."))
+        f.addRow("", Note("Shown in the window, on diagnostic reports and on review-drive summaries. "
+                          "Empty: the organisation is not named anywhere."))
         self.tz = self.editor(QComboBox())
         self.tz.setEditable(True)
         self.tz.addItems(COMMON_ZONES)
         f.addRow("Time zone for times shown", self.tz)
         self.seglen = self.editor(QComboBox())
         f.addRow("Length of each recording file", self.seglen)
-        f.addRow("", muted("Each recording file covers this much time and starts on the clock (for one hour: "
-                           "14:00 to 15:00). A file is copied to the archive drive once it is finished."))
+        f.addRow("", Note("Each recording file covers this much time and starts on the clock (for one hour: "
+                          "14:00 to 15:00). A file is copied to the archive drive once it is finished."))
         self.body.addWidget(capped(box))
         self.body.addStretch(1)
         self.finish_layout()
