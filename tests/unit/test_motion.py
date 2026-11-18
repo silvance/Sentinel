@@ -89,10 +89,13 @@ def test_an_address_given_as_the_second_stream_path_is_read_as_its_path(tmp_path
         assert stream_path_only(path) == path, path
     assert stream_path_only("rtsp://192.168.0.10/cam/realmonitor?channel=1&subtype=1") == \
         "cam/realmonitor?channel=1&subtype=1"
-    # a value saved by 0.3.18 and earlier keeps loading, and now means its path
+    # a value saved by 0.3.18 and earlier keeps loading, and now means its path, wherever it is used or shown
     cfg = make_config(tmp_path, motion={"stream_path": "192.168.0.10:554/stream2"})
+    assert cfg.motion.stream_path == "stream2"
     url = "rtsp://user:pw@192.168.0.10:554/stream0"
-    assert detection_url(url, cfg.motion.stream_path) == "rtsp://user:pw@192.168.0.10:554/stream2"
+    assert detection_url(url, "192.168.0.10:554/stream2") == "rtsp://user:pw@192.168.0.10:554/stream2"
+    assert make_config(tmp_path, motion={"stream_path": "Streaming/Channels/102"}).motion.stream_path == \
+        "Streaming/Channels/102"
 
 
 # ---------------------------------------------------------------------- record / wait decision

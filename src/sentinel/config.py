@@ -18,7 +18,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .drives.policy import DrivePolicy, DrivePolicyError, load_policy
 from .paths import TOOL_NAMES, absolute_tool, default_storage_dirs, default_tool
-from .motion import MotionConfig, MotionConfigError
+from .motion import MotionConfig, MotionConfigError, stream_path_only
 from .motion import validate as validate_motion
 from .schedule import ScheduleConfig, ScheduleError, parse_schedule
 
@@ -468,7 +468,10 @@ def load_config_dict(raw: dict[str, Any], base_dir: Path | None = None, source: 
         sched = parse_schedule(raw.get("schedule"), cfg.recording.display_timezone)
     except (ScheduleError, MotionConfigError) as exc:
         raise ConfigError(str(exc)) from None
-    return replace(cfg, schedule=sched)
+    # A second stream path saved as an address ("192.168.0.10:554/stream2", accepted up to 0.3.18) means its
+    # path: the same value everywhere it is used or shown (field report 2026-11-18).
+    motion = replace(cfg.motion, stream_path=stream_path_only(cfg.motion.stream_path))
+    return replace(cfg, schedule=sched, motion=motion)
 
 
 def load_config(path: str | Path) -> AppConfig:
