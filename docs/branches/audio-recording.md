@@ -70,6 +70,17 @@ Cost when it happens: about two connection time-outs of video, once per recorder
 * `tests/unit/test_audio.py`: the guard's decisions, the FFmpeg options for each case, settings, status and
   alerts, what is noted with a sealed recording, the connection test's wording, review-video options. Window
   tests: the question before switching on, the default not being written, the Status line.
+* Full suite on the second development machine on 0.3.20 (added after the commit that made the change): 1593
+  passed, 2 skipped, 1 failed. The failure, `test_recorder_faults.py::
+  test_corrupted_stream_data_does_not_stop_recording` ("corruption injected into the stream left no trace"),
+  had not failed before; alone it then passed 5 times out of 5 on 0.3.20 and 5 out of 5 on 0.3.19. The machine
+  was in use during the run (a screen-capture stream, MediaMTX and an installed Sentinel recording it). It is
+  the third full run that day with a different single one-off failure in a real-time test (field report
+  2026-11-18), so it is put down to the machine, without proof. Run the full suite on the first development
+  machine, idle, before the next keyed release.
+* First run outside the simulator (2026-11-18, the installed 0.3.20 on the second development machine, a
+  screen capture sent by OBS through MediaMTX as RTSP): "Sound is recorded with the video (AAC, 48000 Hz,
+  2 channels; converted by the recorder)". The source was AAC, not G.711.
 * **Not tried:** the real camera's sound (format unknown until the firmware arrives); G.711 through the whole
   recorder (the simulator sends MPEG-TS, which cannot carry it: MP2 stood in for "not AAC"; G.711 itself was
   tried with FFmpeg directly, table above); a camera that announces sound and sends none (the guard is
