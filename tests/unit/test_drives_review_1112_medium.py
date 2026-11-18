@@ -269,6 +269,29 @@ def test_the_drive_a_swap_prepared_can_be_safely_removed_while_copying_runs(tmp_
     assert cli.cmd_eject(env, _eject_args()) == cli.EXIT_REFUSED and removals == ["4"]
 
 
+def test_a_prepared_drive_that_shares_its_dock_is_to_be_taken_out_as_it_is(tmp_path: Path, ledger: Ledger,
+                                                                           monkeypatch, capsys) -> None:
+    """2026-11-17: with two drives the page offers Safely remove for the full drive the swap prepared. In a dock
+    whose bays share one USB device the removal refuses; the person is told to take out only that drive, not to
+    remove the drive copying continues on."""
+    from sentinel.archive.status import STATUS_FILE
+    from sentinel.drives.errors import SafeRemoveError
+
+    def shared(d, disks, protected, *, enumerate_fn):
+        raise SafeRemoveError("shared_device", "Another drive is connected through the same device. "
+                              "Remove it from the dock first, or contact technical support.")
+
+    monkeypatch.setattr(ej, "safe_remove", shared)
+    doc = {"state": "COPYING", "heartbeat_epoch": time.time(),
+           "removal": {"drive_id": f"drive_uuid:{UID}", "label": "SENTINEL_4", "safe": False, "text": "…"}}
+    (tmp_path / "data" / STATUS_FILE).write_text(json.dumps(doc), encoding="utf-8")
+    arc, insp = _ready_archive()
+    env = EjectEnv(tmp_path, [arc, SYS], insp)
+    assert cli.cmd_eject(env, _eject_args()) == cli.EXIT_REFUSED
+    out = capsys.readouterr().out
+    assert "take out only that drive" in out and "Remove it from the dock first" not in out
+
+
 def test_safely_removing_another_drive_records_nothing(tmp_path: Path, ledger: Ledger, removals) -> None:
     d = foreign_disk(disk_id="4")
     env = EjectEnv(tmp_path, [d, SYS])

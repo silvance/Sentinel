@@ -379,6 +379,8 @@ class StatusPage(Page):
                 label += " · a drive is ready to be taken out"
             elif "full" in uses:
                 label += " · a full drive is waiting to be swapped"
+            elif "standby" in uses:
+                label += " · second drive standing by"
             self._fact("archive", label + (f" · {bk}" if bk else ""),
                        "" if arc.get("drive_label") else "warning")
         last = (doc.get("last_segment") or {}).get("end_utc")

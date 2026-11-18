@@ -76,8 +76,33 @@ def _letters(d: dict[str, Any]) -> list[str]:
 
 
 
-_USE_WORDS = {"in_use": "In use", "full": "Full (swap it)", "standby": "Next", "take_out": "Ready to take out",
+_USE_WORDS = {"in_use": "In use", "full": "Full (swap it)", "standby": "Standing by", "take_out": "Ready to take out",
               "awaiting_return": "Back from the office (return it to service)"}
+
+
+def second_drive_hint(arc: dict[str, Any]) -> str:
+    """What a second archive drive does, in one sentence for the operator (end-user request 2026-11-17: nothing on
+    the screen said that copying moves on to another archive drive by itself when the one in use is full)."""
+    if not arc.get("running") or arc.get("removal") or arc.get("awaiting_return"):
+        return ""           # a swap is under way, or the message already says why a drive is not used
+    drives = [d for d in arc.get("drives") or [] if isinstance(d, dict)]
+    by_use: dict[str, list[dict[str, Any]]] = {}
+    for d in drives:
+        by_use.setdefault(str(d.get("use")), []).append(d)
+    using = (by_use.get("in_use") or [None])[0]
+    if using is None or by_use.get("full"):
+        return ""           # no drive, or copying has already moved on (the message says so)
+    name = str(using.get("label") or "the drive in use")
+    standby = by_use.get("standby") or []
+    if using.get("full"):
+        return ("To keep copying without a swap, plug in a second archive drive that has room: copying moves to it "
+                "by itself.")
+    if standby:
+        other = str(standby[0].get("label") or "the other drive")
+        return (f"When {name} is full, copying moves to {other} by itself. Recording is not interrupted and "
+                "there is nothing to press.")
+    return (f"A second archive drive can stay plugged in: when {name} is full, copying moves to the other drive "
+            "by itself.")
 
 
 SWAP_STATES = (ST_SWAP_PENDING, ST_SAFE, ST_REMOVE_MANUALLY)
@@ -240,6 +265,10 @@ class DrivesPage(Page):
         self.arc_text = QLabel("—")
         self.arc_text.setWordWrap(True)
         al.addWidget(self.arc_text)
+        self.arc_hint = muted()
+        self.arc_hint.setWordWrap(True)
+        self.arc_hint.setVisible(False)
+        al.addWidget(self.arc_hint)
         row = QHBoxLayout()
         c = ctx.palette.text
         self.swap_btn = icon_button("Swap and safely remove", "swap", c)
@@ -378,14 +407,20 @@ class DrivesPage(Page):
             b.setVisible(bool(arc))
         self.ack_btn.setVisible(bool(arc) and "A-006" in codes)
         rem = arc.get("removal") if arc.get("running") else None
-        # Only when the copier asks for a Windows removal (one drive in the dock). With a second drive in the dock it
-        # says to take the drive out as it is: a removal there could stop the other drive too.
-        self._removal = rem if (isinstance(rem, dict) and not rem.get("safe") and not rem.get("text")
-                                and arc.get("state") == ST_REMOVE_MANUALLY) else None
+        # When the copier asks for a removal: one drive plugged in (REMOVE_MANUALLY), or, from 2026-11-17, a full
+        # drive prepared while copying continues on a second one (``text`` set; two separate USB drives). In a
+        # two-bay dock that shares one USB device the removal itself refuses (drives eject: shared_device) and says
+        # to take the drive out as it is.
+        two = isinstance(rem, dict) and bool(rem.get("text")) and arc.get("state") != ST_REMOVE_MANUALLY
+        self._removal = rem if (isinstance(rem, dict) and not rem.get("safe")
+                                and (two or arc.get("state") == ST_REMOVE_MANUALLY)) else None
         if isinstance(rem, dict) and rem.get("safe"):
             self._auto_remove_until = None       # the copier made it safe to remove by itself
         self._update_remove_btn()
         self._auto_remove()
+        hint = second_drive_hint(arc)
+        self.arc_hint.setText(hint)
+        self.arc_hint.setVisible(bool(hint))
         if not arc:
             self.arc_text.setText("Archive copying is off. Turn it on in Settings › Storage.")
             return
@@ -401,7 +436,7 @@ class DrivesPage(Page):
             self.arc_text.setText("Archive copying is not running." + waiting)
             return
         msg = str(arc.get("message") or "")
-        if self._removal is not None:
+        if self._removal is not None and not two:
             # Only what to do now (field report 2026-11-13: "Drive: none inserted." while it was still plugged in).
             self.arc_text.setText(str(self._removal.get("text") or msg))
             return

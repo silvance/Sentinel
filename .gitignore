@@ -17,3 +17,6 @@ logs/
 third_party/
 # releases: recorded builds and their signed update files (packaging/release.py; keep with third_party/sources)
 releases/
+# virtualenvs on a second development machine (.venv and .venv-build point at the first one's Python)
+.venv-tdy/
+.venv-build-tdy/

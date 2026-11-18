@@ -1290,9 +1290,13 @@ class ArchiveWorker:
         if self._swap_result and self._swap_result[0]:
             return f"{name} is safe to remove."
         if self.att is not None or self._present:
-            return (f"{name} is ready to be taken out: Sentinel has finished writing to it. Take out only that "
-                    f"drive. Do not use Windows' \"Safely Remove Hardware\" for it: in a two-bay dock that would "
-                    "also stop the other drive.")
+            # 2026-11-17 (two separate USB drives instead of the two-bay dock): the Drives page offers the removal
+            # for exactly this drive; in a dock that shares one USB device that removal refuses and says to take
+            # the drive out as it is. Windows' own "Safely Remove Hardware" is not named: in such a dock it would
+            # stop the other drive too.
+            return (f"{name} is ready to be taken out: Sentinel has finished writing to it, and copying continues "
+                    "on the other drive. Press Safely remove on Sentinel's Drives page and unplug only that drive "
+                    "when it says it is safe to remove.")
         return None
 
     def _rollover_text(self) -> str | None:

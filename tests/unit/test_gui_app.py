@@ -1188,11 +1188,23 @@ def test_the_drive_a_swap_could_not_eject_gets_its_own_safely_remove_button(
     assert runs and runs[0][runs[0].index("--disk") + 1] == "1" and "fp4" in runs[0]
     page.on_status(SimpleNamespace(doc={"archive": dict(arc, removal={"drive_id": "drive_uuid:u4", "safe": True})}))
     assert page.remove_btn.isHidden() and not page.swap_btn.isHidden()
-    # Two-bay dock: the copier says to take it out as it is (a removal could stop the other drive): no button.
-    two = dict(arc, state="COPYING", removal={"drive_id": "drive_uuid:u4", "safe": False,
-                                              "text": "SENTINEL_4 is ready to be taken out"})
+    # Two drives (2026-11-17, two separate USB drives): the full drive was prepared while copying continues on the
+    # other one. The button is offered for exactly that drive, and the page still shows what copying is doing.
+    two = dict(arc, state="COPYING", message="SENTINEL_4 is ready to be taken out. Copying recordings.",
+               drives=[{"label": "SENTINEL_5", "use": "in_use", "free_bytes": 10**12},
+                       {"label": "SENTINEL_4", "use": "take_out"}],
+               removal={"drive_id": "drive_uuid:u4", "safe": False, "text": "SENTINEL_4 is ready to be taken out"})
     page.on_status(SimpleNamespace(doc={"archive": two}))
-    assert page.remove_btn.isHidden()
+    assert not page.remove_btn.isHidden() and page.remove_btn.text().strip() == "Safely remove SENTINEL_4"
+    assert "In use: SENTINEL_5" in page.arc_text.text() and "ready to be taken out" in page.arc_text.text()
+    runs.clear()
+    page.remove_btn.click()
+    assert runs and runs[0][runs[0].index("--disk") + 1] == "1"
+    # One drive in use: the page says what a second one would do.
+    page.on_status(SimpleNamespace(doc={"archive": {
+        "running": True, "state": "COPYING", "heartbeat_epoch": time.time(),
+        "drives": [{"label": "SENTINEL_5", "use": "in_use", "free_bytes": 10**12}]}}))
+    assert not page.arc_hint.isHidden() and "when SENTINEL_5 is full" in page.arc_hint.text()
     w.close()
 
 

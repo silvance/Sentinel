@@ -316,3 +316,16 @@ the number of files either. Instead:
   cost per TB matters; not USB flash sticks. Sentinel needs no change (drives are found by their marker).
   The two-drive mode should work with two such drives on separate USB ports, but must be bench-tested
   first (docs/09 U.1-U.4). Next trial: two 2 TB external SSDs the owner already has.
+* **Two Samsung T7 drives on separate USB ports; the screen says what a second drive does (end-user
+  request 2026-11-17).** The end user asked for copying to move to a second drive when the first is full:
+  that is the rollover above, but nothing on the screen said so. The Drives page now adds one sentence under
+  the archive status ("A second archive drive can stay plugged in: when SSD_1 is full, copying moves to the
+  other drive by itself"; with two inserted, "When SSD_1 is full, copying moves to SSD_2 by itself…"), a
+  standby drive is listed as "Standing by" (was "Next"), and the Status page shows "second drive standing
+  by". After the rollover, Swap and safely remove now ends with the page's own Safely remove for the full
+  drive (button and, for an administrator, automatically), as with one drive; before, the button was
+  withheld and the message warned about a two-bay dock. In a dock whose bays share one USB device that
+  removal refuses (`shared_device`) and says to take out only that drive. Not changed: a drive taken out
+  with Swap is still not written again until Return to service or Cancel swap. Tests: `test_archive_two_drives`
+  (hint, message), `test_gui_app` (button with two drives), `test_drives_review_1112_medium` (shared dock).
+  **Not run on the real T7 drives** (docs/09 U.4 still applies). Version 0.3.17.

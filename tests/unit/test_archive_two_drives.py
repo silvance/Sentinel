@@ -126,7 +126,9 @@ def test_full_drive_rolls_over_to_the_other_drive_then_swap_takes_out_the_full_o
     assert len(claimed(env.ledger, db)) > 2 * len(on_b)          # the new recording went to B
     st = env.status()
     assert st["removal"]["label"] == la and st["state"] == "UP_TO_DATE"
-    assert f"{la} is ready to be taken out" in st["message"] and "Safely Remove Hardware" in st["message"]
+    # 2026-11-17: the Drives page removes exactly that drive; Windows' own icon is not named (two-bay docks)
+    assert f"{la} is ready to be taken out" in st["message"] and "Safely Remove Hardware" not in st["message"]
+    assert "Press Safely remove on Sentinel's Drives page" in st["message"]
     assert {d["label"]: d["use"] for d in st["drives"]} == {lb: "in_use", la: "take_out"}
     # A taken out of its bay: forgotten after two scans, B never interrupted
     bays.targets = [b]
@@ -262,6 +264,29 @@ def test_window_lists_both_drives() -> None:
     text = archive_drives_text(arc)
     assert text.startswith("Full (swap it): ARCHIVE_A.") and "In use: ARCHIVE_B (" in text
     assert archive_drives_text({"drive_label": None}) == "Drive: none inserted."
+
+
+@pytest.mark.skipif(os.name != "nt", reason="drive text formatting only")
+def test_window_says_what_a_second_drive_does() -> None:
+    """End-user request 2026-11-17: nothing on the screen said that copying moves on to a second drive by itself."""
+    from sentinel.gui.app.drive_pages import archive_drives_text, second_drive_hint
+
+    a = {"label": "SSD_1", "use": "in_use", "full": False, "free_bytes": 10**12}
+    b = {"label": "SSD_2", "use": "standby", "full": False, "free_bytes": 10**12}
+    one = second_drive_hint({"running": True, "drives": [a]})
+    assert "second archive drive can stay plugged in" in one and "when SSD_1 is full" in one
+    two = second_drive_hint({"running": True, "drives": [a, b]})
+    assert two.startswith("When SSD_1 is full, copying moves to SSD_2 by itself.")
+    assert "Standing by: SSD_2." in archive_drives_text({"drives": [a, b]})
+    full = second_drive_hint({"running": True, "drives": [dict(a, full=True)]})
+    assert "plug in a second archive drive that has room" in full
+    # nothing to add: not running, no drive, already moved on, a swap under way, a drive back from the office
+    moved = [dict(a, use="full", full=True), dict(b, use="in_use")]
+    for arc in ({"running": False, "drives": [a]}, {"running": True, "drives": []},
+                {"running": True, "drives": moved},
+                {"running": True, "drives": [a], "removal": {"label": "SSD_2"}},
+                {"running": True, "drives": [a], "awaiting_return": [{"label": "SSD_2"}]}):
+        assert second_drive_hint(arc) == ""
 
 
 def test_status_heartbeat_continues_while_one_long_file_is_copied_and_read_back(env: Env, tmp_path: Path) -> None:

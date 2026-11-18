@@ -341,6 +341,13 @@ def cmd_eject(env: _Env, args: argparse.Namespace) -> int:
     try:
         res = safe_remove(d, disks, env.protected, enumerate_fn=env.enumerate)
     except DriveError as exc:
+        if prepared and exc.reason == "shared_device":
+            # 2026-11-17: a drive the swap prepared, in a dock whose bays share one USB device. Switching it off
+            # would stop the drive copying continues on; nothing is written to this one any more.
+            print(f"{arc.get('label') or 'This drive'} shares its dock with the archive drive in use, so it cannot "  # type: ignore[union-attr]
+                  "be switched off by itself. Sentinel has finished writing to it: take out only that drive and "
+                  "leave the other one in.")
+            return EXIT_REFUSED
         print(f"{_alert_line(exc.code)}\n{exc}")
         return EXIT_REFUSED
     print(res.message if res.ok else f"{_alert_line('M-007')}\n{res.message}")
