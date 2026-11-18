@@ -29,6 +29,19 @@ first twenty minutes, from the key frames of the main stream. What made it look 
   of `test_gui_app.py`); the pipe test was run with the change removed and failed as intended.
 * The built 0.3.18 program was timed through a pipe on the second development machine: all ten lines of an 8 s
   test arrived together at the end; from source they arrived one a second.
+* The built 0.3.19 program, timed the same way without `PYTHONUNBUFFERED`: one line a second. With
+  `192.168.0.10:554/stream2` saved as the second stream path it says "Watching the second stream stream2".
+* Full suite on the second development machine, twice, on 0.3.19 (added after the commits that made the
+  change): 1567 passed, 2 skipped, 2 failed each time. `test_time_accuracy.py::
+  test_absorbed_freeze_is_still_a_gap_under_drift` failed in both (it also fails on unchanged 0.3.16 there).
+  The other failure differed: `test_service_process.py::test_hard_kill_restart_recovery_and_graceful_stop`
+  in the first run (its failure message was not kept; it then passed 6 times out of 6 alone and in the second
+  full run), `test_time_accuracy.py::test_fast_camera_stays_on_reception_time` in the second. The timing file
+  was then run three times each on 0.3.19 and on unchanged 0.3.18, alternating: 2 failures in 12 tests on
+  0.3.19, 3 in 12 on 0.3.18, the "fast camera" test failing on 0.3.18 too. So the timing failures belong to
+  that machine (it was in use during these runs; the 0.3.17 and 0.3.18 runs were made on it idle), not to
+  this change. The single hard-kill failure is unexplained. Run the full suite on the first development
+  machine before the next keyed release.
 * **Not known:** why Status showed "Recording normally" with no W-001 while the second stream path was the
   address. Either the camera serves a stream for a path it does not know (the detector then works, and people
   in view keep it recording), or W-001 was missed; it could not be told from the screenshots. To be checked on
