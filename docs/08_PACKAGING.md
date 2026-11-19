@@ -596,22 +596,37 @@ Right-click `INSTALL-FULL-FOLDER.cmd` › *Run as administrator*. It looks for S
 | 2 | A version already kept as `<app>.previous` is renamed `<app>.previous-before-<version>` | Stops; nothing changed |
 | 3 | Copies the new folder to `<app>.previous` (`robocopy /MIR`; it inherits the permissions of the folder it is in) and carries over a `sentinel.toml` / `camera.secret` kept inside the program folder | Stops; installed program unchanged |
 | 4 | Checks the copy the same way, and that the installed version reports it as the version kept | Stops; installed program unchanged |
-| 5 | Runs the installed version's `Sentinel.exe update rollback --reason "Full program folder install of <version> (no update file: the release signing key was not available on site)"`, which asks for `BACK`, then waits for the swap window and shows `update status` | As for an update: cancelled, or swapped back by itself; recording restarted |
+| 5 | Asks `Type YES and press Enter to install Sentinel <version> now` (not with `--yes` after the folder), then runs the installed version's `Sentinel.exe update install --yes --reason "Full program folder install of <version> (no update file: the release signing key was not available on site)"`, waits for the swap window and shows `update status` | As for an update: cancelled, or swapped back by itself; recording restarted |
 
 Recording continues during steps 1 to 4. Step 5 is the swap of section 10 from *Stop* on: recording is stopped
 gracefully, the folders are swapped, the **new** version checks itself and starts recording again, and the
 folders are swapped back if that check fails. The version that was installed becomes `<app>.previous`. What is
 different from an update file:
 
-* **No signature is checked.** `update rollback` uses whatever an administrator has placed in `<app>.previous`,
-  exactly as it uses the version an update left there. `about --verify` shows that the folder is complete and
-  unchanged since it was built, not who built it: carry the stick yourself, from the build computer.
+* **No signature is checked.** `update install` uses whatever an administrator has placed in `<app>.previous`,
+  exactly as `update rollback` uses the version an update left there. `about --verify` shows that the folder is
+  complete and unchanged since it was built, not who built it: carry the stick yourself, from the build computer.
 * **No 3-minute watch** by the reopened window. Check Status, System › Updates and Drives by hand, and Status
   again five minutes later.
-* **The recording log says "went back"**: `software_rollback_started`, then `software_rolled_back` with
-  "Sentinel went back from 0.3.16 to 0.3.18. Reason: Full program folder install of 0.3.18 (no update file: the
-  release signing key was not available on site)." The reason is what tells the two apart later; System ›
-  Updates shows the same sentence as the last update.
+* **The recording log says "installed"**: `software_install_started` ("Installing Sentinel 0.3.25 over 0.3.24
+  from a full program folder"), then `software_installed` with "Sentinel 0.3.25 was installed over 0.3.24 from a
+  full program folder. 0.3.24 is kept as the previous version. Reason: Full program folder install of 0.3.25 (no
+  update file: the release signing key was not available on site)." System › Updates shows the first two
+  sentences as the last update.
+
+**An install is not "going back" (owner, 2026-11-19; 0.3.24).** Until 0.3.23 the script used
+`update rollback` for step 5, because that command already did the swap. Everything then spoke of going back:
+the question ("Go back from Sentinel 0.3.19 to 0.3.23? … Type BACK"), the swap window, the message in the reopened
+window and the log ("Sentinel went back from 0.3.19 to 0.3.23"). To the people at the recorder that reads as a
+failure. `update install` is the same swap under its own name (`cli._switch`, `Pending.action = "install"`,
+`apply.is_install`); going back from System › Updates is unchanged and still says so.
+
+The words on the way *to* a version come from the version that is installed, so two cases remain:
+
+| Installed version | The script uses | What still says "going back" |
+|---|---|---|
+| 0.3.24 or later | `update install` | Nothing |
+| 0.3.23 or earlier (no `update install`; the script finds out with `update install --help`) | `update rollback --yes`, with what that command prints sent to a file and shown only if it fails | The first line of that version's swap window ("Going back from Sentinel 0.3.23 to 0.3.24."), `update.log`, and the log entry `software_rollback_started`. The script says so once, before it asks. Everything after the swap is said by the new version: the message in the reopened window, *Last update*, and the log entry `software_installed`, which recognises the install by the script's reason (`FOLDER_INSTALL_REASON`) |
 * Only `sentinel.toml` and `camera.secret` in the program folder itself are carried over, not other files
   someone added there.
 * As with an update file, permissions and the service registration are not changed.
@@ -626,10 +641,12 @@ ren "C:\Program Files\Sentinel.previous" "Sentinel.previous-before-0.3.18"
 robocopy "X:\Sentinel" "C:\Program Files\Sentinel.previous" /MIR
 "C:\Program Files\Sentinel.previous\Sentinel.exe" about --verify
 "C:\Program Files\Sentinel\Sentinel.exe" update status
-"C:\Program Files\Sentinel\Sentinel.exe" update rollback --reason "Full program folder install of 0.3.18 (no update file: the release signing key was not available on site)"
+"C:\Program Files\Sentinel\Sentinel.exe" update install --reason "Full program folder install of 0.3.18 (no update file: the release signing key was not available on site)"
 ```
 
-(`ren` only if a previous version is kept; the second `update status` must say `Previous version kept: 0.3.18`.)
+(`ren` only if a previous version is kept; the second `update status` must say `Previous version kept: 0.3.18`.
+`update install` asks for `INSTALL`. An installed version before 0.3.24 does not have it: use `update rollback`
+with the same reason there; it asks for `BACK` and words the step as going back.)
 Never drag the new `Sentinel` folder into `C:\Program Files` with Explorer: Windows would merge it into the
 installed program folder while Sentinel runs from it.
 
@@ -640,7 +657,12 @@ older version aside, copied and checked the 0.3.18 build and carried the setting
 Previous version kept: 0.3.16". That run used the script with the version written into it; reading the version
 from the folder was added afterwards and checked as far as the administrator check (0.3.16 and 0.3.18 folders).
 **Not yet run:** on the laptop or under Program Files, with a recording in progress at the moment of the swap,
-with the Windows services installed.
+with the Windows services installed. (Since then the laptop was brought to 0.3.18, 0.3.19 and 0.3.23 this way.)
+
+**The script as changed on 2026-11-19 (0.3.24)** is run by `tests/unit/test_full_folder_install_script.py`
+with a stand-in for each `Sentinel.exe` and without the administrator check: an installed version that knows
+`update install`, one that does not, no `YES`, and a refusal. **Not run:** the changed script against real
+builds with a real swap (it needs an administrator).
 
 A caution from that trial: the window the swap reopens is an ordinary Sentinel window. If the computer has
 Sentinel settings (`C:\ProgramData\Sentinel\config\sentinel.toml`), it starts the recorder and the archive copy

@@ -9,13 +9,18 @@ rem
 rem Put this file and the built program folder (named "Sentinel") side by side on a USB stick.
 rem
 rem How: the new folder is copied next to the installed one as "<program folder>.previous", and the
-rem installed Sentinel is then asked to switch to it ("Sentinel.exe update rollback"). That command
+rem installed Sentinel is then asked to switch to it ("Sentinel.exe update install"). That command
 rem stops recording properly, swaps the two folders, lets the new version check itself, starts
 rem recording again, writes the change into the recording log, and swaps back by itself if the check
 rem fails. The version that was installed is kept as "<program folder>.previous".
 rem
+rem An installed Sentinel from before 2026-11-19 has no "update install". For it the same swap is asked
+rem for under its older name ("update rollback"), with its own words kept off this window: it calls
+rem the step "going back", which is not what an install is.
+rem
 rem Use:   right-click this file, Run as administrator.
-rem   or:  INSTALL-FULL-FOLDER.cmd "installed program folder" [options passed to 'update rollback']
+rem   or:  INSTALL-FULL-FOLDER.cmd "installed program folder" [--yes] [options for 'update install']
+rem        --yes: do not ask before recording is stopped (for trials)
 rem ------------------------------------------------------------------------------------------------
 set "NEW=%~dp0Sentinel"
 set "APP=%~1"
@@ -109,18 +114,39 @@ if errorlevel 1 goto copy_bad
 if errorlevel 1 goto copy_bad
 echo               OK.
 echo.
-echo  Step 5 of 5 - asking the installed Sentinel to switch to %NEWVER%.
+rem Does the installed Sentinel know "update install"? An older one answers an unknown command with an error.
+set "VIA=rollback"
+"%APP%\Sentinel.exe" update install --help >nul 2>&1
+if not errorlevel 1 set "VIA=install"
+set "ASK=1"
+for %%o in (%EXTRA%) do if /i "%%~o"=="--yes" set "ASK="
+
+echo  Step 5 of 5 - installing Sentinel %NEWVER%.
 echo.
-echo    * Sentinel calls this "going back". That is expected: it is its command for switching to
-echo      the program folder kept beside it. When it asks, type BACK and press Enter.
 echo    * Recording stops for about a minute and starts again by itself.
 echo    * A window titled "Sentinel update - do not close" opens. Leave it alone.
+if "%VIA%"=="rollback" echo    * The Sentinel on this computer is an earlier one. Its window calls this step "Going back".
+if "%VIA%"=="rollback" echo      That is only its name for changing program folders: it is installing %NEWVER%.
 echo.
-"%APP%\Sentinel.exe" update rollback --reason "%WHY%" %EXTRA%
+if not defined ASK goto switch
+set "GO="
+set /p "GO=  Type YES and press Enter to install Sentinel %NEWVER% now: "
+if /i not "%GO%"=="YES" goto not_confirmed
+:switch
+echo.
+if "%VIA%"=="install" goto switch_install
+echo  Stopping the recording properly (the current recording file is closed and saved first).
+echo  This usually takes under a minute, at most ten. Do not close this window...
+"%APP%\Sentinel.exe" update rollback --yes --reason "%WHY%" %EXTRA% >"%CHECK%" 2>&1 <nul
+if errorlevel 1 goto not_switched_quiet
+goto switched
+:switch_install
+"%APP%\Sentinel.exe" update install --yes --reason "%WHY%" %EXTRA%
 if errorlevel 1 goto not_switched
+:switched
 
 echo.
-echo  Waiting for the switch to finish (do not close this window either)...
+echo  Waiting for the install to finish (do not close this window either)...
 set /a N=0
 :wait
 if not exist "%WORK%\pending.json" goto finished
@@ -148,7 +174,7 @@ set "RC=0"
 goto end
 
 :not_admin
-echo  This needs an administrator: right-click INSTALL-FULL-FOLDER.cmd, Run as administrator.
+echo  This needs an administrator: right-click %~nx0, Run as administrator.
 goto fail
 :no_new
 echo  The new program folder was not found beside this file:
@@ -189,14 +215,24 @@ echo  The copy in "%PREV%" does not check out:
 type "%CHECK%"
 "%APP%\Sentinel.exe" update status
 goto fail
+:not_confirmed
+echo.
+echo  Not confirmed: Sentinel %NEWVER% was not installed, and recording was not interrupted.
+echo  The new version is ready in "%PREV%";
+echo  run this again to install it.
+goto fail
+:not_switched_quiet
+echo.
+echo  What the installed Sentinel said (it calls an install from a folder "going back"):
+type "%CHECK%"
 :not_switched
 echo.
-echo  Sentinel did not start the switch (see its message above). Recording was not interrupted,
+echo  Sentinel did not start the install (see its message above). Recording was not interrupted,
 echo  or was started again. The new version is ready in "%PREV%";
 echo  run this again to retry.
 goto fail
 :slow
-echo  The switch has not finished after ten minutes. Look at the window titled
+echo  The install has not finished after ten minutes. Look at the window titled
 echo  "Sentinel update - do not close" and at "%WORK%\update.log".
 goto fail_changed
 :swapped_back

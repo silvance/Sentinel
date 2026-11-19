@@ -22,7 +22,10 @@ How an update is applied (Windows; ``Sentinel update apply FILE``, or System > U
    itself if the recorder does not run.
 
 ``<app>.previous`` keeps the version before; ``Sentinel update rollback`` swaps back to it the same
-way. Work files (state, finisher script, log, result) are in ``<app>.updates``, next to the program
+way. ``Sentinel update install`` is that same swap under its own name, for a complete program folder an
+administrator has placed there with INSTALL-FULL-FOLDER.cmd (a build with no update file): the
+progress window, the message afterwards and the recording log say "installing", not "going back"
+(``is_install``). Work files (state, finisher script, log, result) are in ``<app>.updates``, next to the program
 folder, so they have the program folder's permissions (only administrators may change them).
 """
 
@@ -386,7 +389,7 @@ def start_recording(st: RecordingState, cfg_path: Path | None, *, control_factor
 # ---------------------------------------------------------------------- state and result
 @dataclass
 class Pending:
-    action: str                  # "update" | "rollback"
+    action: str                  # "update" | "rollback" | "install" (see is_install)
     from_version: str
     to_version: str
     app: str
@@ -413,6 +416,23 @@ class Pending:
         doc = json.loads(Path(path).read_text("utf-8-sig"))
         known = set(cls.__dataclass_fields__)
         return cls(**{k: v for k, v in doc.items() if k in known})   # a newer version may add fields
+
+
+# How packaging/windows/INSTALL-FULL-FOLDER.cmd names itself in the reason it gives. Versions before 0.3.24 have
+# no "install" action: the script asks them to "go back" to the folder it placed beside the program folder, and
+# this reason is the only thing that tells such an install from a real return to an earlier version.
+FOLDER_INSTALL_REASON = "Full program folder install"
+
+
+def is_install(p: Pending) -> bool:
+    """True when a complete program folder placed beside the installed one is being switched to
+    (``Sentinel update install``, used by INSTALL-FULL-FOLDER.cmd): a version being installed, not a return to an
+    earlier one. Owner 2026-11-19: an install that says "going back" alarms the people at the recorder.
+
+    The swap is the same as for going back; only what it is called differs. A state file written by a version
+    before 0.3.24 says "rollback" for it and is recognised by the script's reason."""
+    return p.action == "install" or (p.action == "rollback"
+                                     and str(p.reason or "").startswith(FOLDER_INSTALL_REASON))
 
 
 def write_result(folders: Folders, outcome: str, pending: Pending | None, message: str, *,
@@ -500,8 +520,9 @@ def in_progress(folders: Folders, now: float | None = None, stale_s: float = 360
         pass
     if finisher_alive(folders, alive) is False:
         return None
-    return (f"Updating to Sentinel {p.to_version}" if p.action == "update"
-            else f"Going back to Sentinel {p.to_version}")
+    if p.action == "update":
+        return f"Updating to Sentinel {p.to_version}"
+    return f"Installing Sentinel {p.to_version}" if is_install(p) else f"Going back to Sentinel {p.to_version}"
 
 
 def abandoned(folders: Folders, alive: Callable[[int], bool | None] | None = None) -> Pending | None:
@@ -582,8 +603,12 @@ def finisher_script(p: Pending, folders: Folders, window_pid: int | None) -> str
     prev_old = app.parent / f"{app.name}.previous-old"
     failed = app.parent / f"{app.name}.failed-{p.to_version}"
     exe = app / "Sentinel.exe"
-    what = (f"Updating Sentinel {p.from_version} to {p.to_version}" if p.action == "update"
-            else f"Going back from Sentinel {p.from_version} to {p.to_version}")
+    if p.action == "update":
+        what = f"Updating Sentinel {p.from_version} to {p.to_version}"
+    elif is_install(p):
+        what = f"Installing Sentinel {p.to_version} over {p.from_version}"
+    else:
+        what = f"Going back from Sentinel {p.from_version} to {p.to_version}"
     rec = p.recording if isinstance(p.recording, dict) else {}
     services = [s for s in rec.get("services") or [] if s in SERVICES] if rec.get("service_managed") else []
     svc_list = ", ".join(_ps(s) for s in services)
@@ -645,7 +670,7 @@ if (@(Recorders).Count -gt 0) {{
   Say 'The recorder is still running; this is cancelled and recording continues on the installed version.'
   & $exe update restart --state $state --outcome aborted --reason 'the recorder did not stop'
   {"Remove-Item -LiteralPath $staged -Recurse -Force -ErrorAction SilentlyContinue" if p.action == "update"
-   else "# (going back: $staged is the kept previous version; it stays)"}
+   else "# (no update file: $staged is the folder kept beside the program folder; it stays)"}
   End-Update
   Start-Sleep -Seconds 5; exit 1
 }}

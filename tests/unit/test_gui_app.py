@@ -1783,3 +1783,23 @@ def test_help_opens_the_user_guide(app: QApplication, tmp_path: Path, monkeypatc
     guide.trigger()
     assert len(opened) == 1 and "Sentinel User Guide.pdf" in said[0] and "the file is not there" in said[0]
     w.close()
+
+def test_after_a_folder_install_the_window_says_installed_and_not_as_a_warning(
+        app: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Owner 2026-11-19: installing a version from a full program folder used to come back as "went back"."""
+    import json
+
+    from sentinel.update import apply as ap
+
+    w = _window(app, tmp_path, admin=True)
+    folders = ap.Folders(tmp_path / "Sentinel")
+    text = "Sentinel 0.3.24 was installed over 0.3.23 from a full program folder. 0.3.23 is kept as the previous version."
+    ap.write_result(folders, "installed", None, text)
+    doc = json.loads(folders.result.read_text("utf-8"))
+    doc["action"] = "install"
+    folders.result.write_text(json.dumps(doc), "utf-8")
+    monkeypatch.setattr(w, "_update_folders", lambda: folders)
+    shown: list[tuple[str, bool]] = []
+    monkeypatch.setattr(w, "_notice", lambda text, warning=False: shown.append((text, warning)))
+    w.show_update_result()
+    assert shown == [(text, False)] and ap.read_result(folders)["shown"]

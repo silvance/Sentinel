@@ -3,6 +3,8 @@
 * ``info FILE``      - check an update file and say what it contains (changes nothing)
 * ``apply FILE``     - apply it (also: drop the file onto Sentinel.exe, or System > Updates)
 * ``rollback``       - go back to the version kept in ``<program folder>.previous``
+* ``install``        - the same swap, for a complete program folder that INSTALL-FULL-FOLDER.cmd has placed
+  there (a build with no update file); everything it shows and records says "install"
 * ``status``         - installed and previous version, last update result
 * ``finish`` / ``restart`` - used by the update itself (see ``apply``); not for people
 """
@@ -20,8 +22,9 @@ from .. import __version__
 from ..clock import iso_utc
 from ..paths import app_dir, find_config
 from .apply import (SERVICES, Folders, Pending, RecordingState, abandoned, check_installed, end_state,
-                    finisher_script, folder_version, in_progress, launch_finisher, read_result, record_event,
-                    restart_after_refusal, stage, start_recording, stop_recording, stop_services, write_result)
+                    finisher_script, folder_version, in_progress, is_install, launch_finisher, read_result,
+                    record_event, restart_after_refusal, stage, start_recording, stop_recording, stop_services,
+                    write_result)
 from .package import UpdateRefused, read_package
 
 EXIT_OK, EXIT_REFUSED, EXIT_FAILED = 0, 2, 1
@@ -230,57 +233,83 @@ def cmd_apply(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def cmd_rollback(args: argparse.Namespace) -> int:
+def _switch(args: argparse.Namespace, install: bool) -> int:
+    """``rollback`` and ``install``: stop recording and swap to the program folder kept in
+    ``<program folder>.previous``. The two differ only in what the step is called: going back to the version that
+    was installed before, or installing the version INSTALL-FULL-FOLDER.cmd has placed there (owner 2026-11-19:
+    an install must not say "going back")."""
     app = _app()
     if app is None or sys.platform != "win32":
-        print("Going back to a previous version is available for the installed Windows program only.")
+        print(("Installing a program folder" if install else "Going back to a previous version")
+              + " is available for the installed Windows program only.")
         return EXIT_REFUSED
     if not _is_admin():
-        print("Going back needs an administrator. Windows will ask for permission.")
-        argv = ["update", "rollback"] + (["--config", args.config] if args.config else [])
+        print(("Installing" if install else "Going back") + " needs an administrator. Windows will ask for permission.")
+        argv = ["update", "install" if install else "rollback"] + (["--config", args.config] if args.config else [])
         if args.reason:
             argv += ["--reason", args.reason]
         return EXIT_OK if _relaunch_elevated(argv) else EXIT_REFUSED
     folders = Folders(app)
     prev_version = folder_version(folders.previous)
     if prev_version is None:
-        print("No previous version is kept on this computer. Nothing was changed.")
+        print(f"No program folder to install was found in {folders.previous}. Nothing was changed." if install
+              else "No previous version is kept on this computer. Nothing was changed.")
+        return EXIT_REFUSED
+    if install and prev_version == __version__:
+        print(f"Sentinel {__version__} is installed already. Nothing was changed.")
         return EXIT_REFUSED
     busy = _busy(folders)
     if busy:
         print(busy)
         return EXIT_REFUSED
-    if not args.yes and not _confirm(f"Go back from Sentinel {__version__} to {prev_version}? Recording stops for "
-                                     "about a minute.", "BACK"):
+    if install:
+        ask = (f"Install Sentinel {prev_version} over {__version__}, from the program folder placed beside the "
+               "installed one? Recording stops for about a minute.", "INSTALL")
+    else:
+        ask = (f"Go back from Sentinel {__version__} to {prev_version}? Recording stops for about a minute.", "BACK")
+    if not args.yes and not _confirm(*ask):
         print("Not confirmed. Nothing was changed.")
         return EXIT_REFUSED
+    what = "install" if install else "going back"
     cfg_path = _config(args.config)
     print("Stopping the recorder (the current recording file is closed and saved first)...")
     try:
         st = stop_recording(cfg_path, on_wait=_still_stopping)
     except UpdateRefused as exc:
         again = restart_after_refusal(exc, cfg_path)          # review 2026-11-12: never leave it stopped
-        print(f"Sentinel did not go back to the previous version: {exc} {again}".rstrip())
+        print((f"Sentinel {prev_version} was not installed: " if install
+               else "Sentinel did not go back to the previous version: ") + f"{exc} {again}".rstrip())
         _pause()
         return EXIT_REFUSED
     except BaseException as exc:  # noqa: BLE001 - nothing was stopped yet (asking Windows failed)
-        return _undo_after_stop(folders, None, cfg_path, None, None, exc, "going back")
+        return _undo_after_stop(folders, None, cfg_path, None, None, exc, what)
     pending = None
     try:
         st = _take_over(st, folders)
-        pending = Pending("rollback", __version__, prev_version, str(app), str(folders.previous),
-                          str(folders.previous), str(cfg_path) if cfg_path else None, asdict(st), who=_who(),
-                          started_utc=iso_utc(time.time()), reason=args.reason or "requested by an administrator")
+        reason = args.reason or ("a full program folder placed beside the installed one" if install
+                                 else "requested by an administrator")
+        pending = Pending("install" if install else "rollback", __version__, prev_version, str(app),
+                          str(folders.previous), str(folders.previous), str(cfg_path) if cfg_path else None,
+                          asdict(st), who=_who(), started_utc=iso_utc(time.time()), reason=reason)
         pending.write(folders.state)
-        record_event(pending.config, "software_rollback_started",
-                     f"Going back from Sentinel {__version__} to {prev_version}",
+        record_event(pending.config, "software_install_started" if install else "software_rollback_started",
+                     (f"Installing Sentinel {prev_version} over {__version__} from a full program folder" if install
+                      else f"Going back from Sentinel {__version__} to {prev_version}"),
                      {"from": __version__, "to": prev_version, "who": pending.who, "reason": pending.reason})
         launch_finisher(finisher_script(pending, folders, args.window_pid), folders)
     except BaseException as exc:  # noqa: BLE001 - review 2026-11-12: never leave recording stopped
-        return _undo_after_stop(folders, st, cfg_path, None, pending, exc, "going back")
-    print("Going back continues in a new window; this one closes now.")
+        return _undo_after_stop(folders, st, cfg_path, None, pending, exc, what)
+    print(("The install" if install else "Going back") + " continues in a new window; this one closes now.")
     time.sleep(2)
     return EXIT_OK
+
+
+def cmd_rollback(args: argparse.Namespace) -> int:
+    return _switch(args, install=False)
+
+
+def cmd_install(args: argparse.Namespace) -> int:
+    return _switch(args, install=True)
 
 
 def cmd_status(_args: argparse.Namespace) -> int:
@@ -305,6 +334,7 @@ def cmd_finish(args: argparse.Namespace) -> int:
     """Run by the version just swapped in. Exit 0 = keep it; anything else = the finisher swaps back."""
     pending = Pending.read(Path(args.state))
     folders = Folders(Path(pending.app))
+    install = is_install(pending)                 # (asked before a failed check replaces the reason below)
     problems = check_installed(Path(pending.app), pending.config)
     if not problems:
         st = RecordingState(**pending.recording)
@@ -320,14 +350,25 @@ def cmd_finish(args: argparse.Namespace) -> int:
         pending.write(folders.state)
         print("The new version did not pass its check:\n  " + "\n  ".join(problems))
         return EXIT_FAILED
-    verb = "updated" if pending.action == "update" else "went back"
-    msg = (f"Sentinel {verb} from {pending.from_version} to {pending.to_version}."
-           + (f" Reason: {pending.reason}." if pending.action == "rollback" and pending.reason else ""))
-    record_event(pending.config, "software_updated" if pending.action == "update" else "software_rolled_back", msg,
-                 {"from": pending.from_version, "to": pending.to_version, "package_sha256": pending.package_sha256,
-                  "key_id": pending.key_id, "who": pending.who, "action": pending.action})
-    write_result(folders, "updated" if pending.action == "update" else "rolled_back", pending, msg,
-                 watch=pending.action == "update")
+    detail = {"from": pending.from_version, "to": pending.to_version, "package_sha256": pending.package_sha256,
+              "key_id": pending.key_id, "who": pending.who}
+    if pending.action == "update":
+        code, outcome = "software_updated", "updated"
+        msg = logged = f"Sentinel updated from {pending.from_version} to {pending.to_version}."
+    elif install:
+        # A version before 0.3.24 could only ask for this as a "rollback"; it is recorded as what it was.
+        pending.action = "install"
+        code, outcome = "software_installed", "installed"
+        msg = (f"Sentinel {pending.to_version} was installed over {pending.from_version} from a full program "
+               f"folder. {pending.from_version} is kept as the previous version.")
+        logged = msg + (f" Reason: {pending.reason}." if pending.reason else "")
+        detail["reason"] = pending.reason
+    else:
+        code, outcome = "software_rolled_back", "rolled_back"
+        msg = logged = (f"Sentinel went back from {pending.from_version} to {pending.to_version}."
+                        + (f" Reason: {pending.reason}." if pending.reason else ""))
+    record_event(pending.config, code, logged, {**detail, "action": pending.action})
+    write_result(folders, outcome, pending, msg, watch=pending.action == "update")
     print(msg)
     return EXIT_OK
 
@@ -338,7 +379,8 @@ def cmd_restart(args: argparse.Namespace) -> int:
     folders = Folders(Path(pending.app))
     ok, detail = start_recording(RecordingState(**pending.recording), pending.config)
     reason = pending.reason or args.reason or "unknown"
-    target = "update to" if pending.action == "update" else "going back to"
+    target = ("update to" if pending.action == "update" else "install of" if is_install(pending)
+              else "going back to")
     msg = (f"The {target} Sentinel {pending.to_version} was "
            f"{'cancelled' if args.outcome == 'aborted' else 'undone'}: {reason}. "
            f"Sentinel {__version__} is in use"
@@ -361,11 +403,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--config")
     p.add_argument("--yes", action="store_true", help="do not ask for confirmation")
     p.add_argument("--window-pid", type=int, default=None, help=argparse.SUPPRESS)
-    p = sub.add_parser("rollback", help="go back to the previous version (administrator)")
-    p.add_argument("--config")
-    p.add_argument("--yes", action="store_true")
-    p.add_argument("--reason", default="")
-    p.add_argument("--window-pid", type=int, default=None, help=argparse.SUPPRESS)
+    for name, text in (("rollback", "go back to the previous version (administrator)"),
+                       ("install", "install the full program folder placed beside the installed one by "
+                                   "INSTALL-FULL-FOLDER.cmd (administrator)")):
+        p = sub.add_parser(name, help=text)
+        p.add_argument("--config")
+        p.add_argument("--yes", action="store_true", help="do not ask for confirmation")
+        p.add_argument("--reason", default="")
+        p.add_argument("--window-pid", type=int, default=None, help=argparse.SUPPRESS)
     sub.add_parser("status", help="installed and previous version, last update")
     p = sub.add_parser("finish")
     p.add_argument("--state", required=True)
@@ -378,5 +423,5 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str]) -> int:
     args = build_parser().parse_args(argv)
-    return {"info": cmd_info, "apply": cmd_apply, "rollback": cmd_rollback, "status": cmd_status,
-            "finish": cmd_finish, "restart": cmd_restart}[args.cmd](args)
+    return {"info": cmd_info, "apply": cmd_apply, "rollback": cmd_rollback, "install": cmd_install,
+            "status": cmd_status, "finish": cmd_finish, "restart": cmd_restart}[args.cmd](args)

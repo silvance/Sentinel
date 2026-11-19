@@ -534,3 +534,114 @@ def test_the_update_waits_as_long_as_the_services_may_take_to_stop() -> None:
 
     deadline = inspect.signature(ServiceHost.__init__).parameters["stop_deadline_s"].default
     assert ap.STOP_TIMEOUT_S > deadline
+
+
+# ---------------------------------------------------------------------- owner 2026-11-19: an install is not "going back"
+# A complete program folder placed beside the installed one (INSTALL-FULL-FOLDER.cmd) is switched to with the same
+# swap as going back. It was also worded as going back, which alarmed the people at the recorder.
+def _software_events(cfg: Path) -> list[tuple[str, str, str]]:
+    from sentinel.config import load_config
+    from sentinel.db import Ledger
+
+    led = Ledger(load_config(cfg).data_path / "sentinel.db")
+    try:
+        return [(r[0], r[1], r[2]) for r in led.query("SELECT code, message, detail FROM events "
+                                                      "WHERE category='software' ORDER BY rowid")]
+    finally:
+        led.close()
+
+
+SCRIPT_REASON = "Full program folder install of 9.9.9 (no update file: the release signing key was not available on site)"
+
+
+@pytest.mark.parametrize("action, reason", [("install", SCRIPT_REASON), ("rollback", SCRIPT_REASON)])
+def test_a_folder_install_is_reported_as_an_install(tmp_path: Path, action: str, reason: str) -> None:
+    """``rollback`` with the script's reason is how a version before 0.3.24 hands an install over."""
+    app = _installed(tmp_path / "Sentinel")
+    cfg = _cfg(tmp_path)
+    state = _pending(app, cfg, action=action, reason=reason)
+    assert ap.is_install(ap.Pending.read(state))
+    assert ap.in_progress(ap.Folders(app)) == f"Installing Sentinel {__version__}"
+    assert ucli.cmd_finish(argparse.Namespace(state=str(state))) == 0
+    res = ap.read_result(ap.Folders(app))
+    assert (res["outcome"], res["action"], res["watch"]) == ("installed", "install", False)
+    assert res["message"] == (f"Sentinel {__version__} was installed over 0.3.0 from a full program folder. "
+                              "0.3.0 is kept as the previous version.")
+    code, message, detail = _software_events(cfg)[-1]
+    assert code == "software_installed" and "no update file" in message and json.loads(detail)["reason"] == reason
+    assert "back" not in (res["message"] + message).lower()
+
+
+def test_going_back_is_still_called_going_back(tmp_path: Path) -> None:
+    app = _installed(tmp_path / "Sentinel")
+    cfg = _cfg(tmp_path)
+    state = _pending(app, cfg, action="rollback", reason="requested by an administrator")
+    assert not ap.is_install(ap.Pending.read(state))
+    assert ap.in_progress(ap.Folders(app)) == f"Going back to Sentinel {__version__}"
+    assert ucli.cmd_finish(argparse.Namespace(state=str(state))) == 0
+    res = ap.read_result(ap.Folders(app))
+    assert (res["outcome"], res["action"]) == ("rolled_back", "rollback")
+    assert res["message"] == f"Sentinel went back from 0.3.0 to {__version__}. Reason: requested by an administrator."
+    assert _software_events(cfg)[-1][0] == "software_rolled_back"
+
+
+def test_the_swap_window_says_installing_and_keeps_the_folder_if_cancelled(tmp_path: Path) -> None:
+    app = tmp_path / "Sentinel"
+    folders = ap.Folders(app)
+    for action, reason in (("install", ""), ("rollback", SCRIPT_REASON)):
+        p = ap.Pending(action, "0.3.23", "0.3.24", str(app), str(folders.previous), str(folders.previous), None,
+                       asdict(ap.RecordingState()), reason=reason)
+        s = ap.finisher_script(p, folders, None)
+        assert "Say 'Installing Sentinel 0.3.24 over 0.3.23.'" in s and "Going back from" not in s
+        assert "Remove-Item -LiteralPath $staged" not in s          # the new folder stays for another try
+        assert "update finish --state $state" in s and "--outcome rolled_back" in s
+    back = ap.Pending("rollback", "0.3.24", "0.3.23", str(app), str(folders.previous), str(folders.previous), None,
+                      asdict(ap.RecordingState()), reason="requested by an administrator")
+    assert "Say 'Going back from Sentinel 0.3.24 to 0.3.23.'" in ap.finisher_script(back, folders, None)
+
+
+def test_a_cancelled_install_says_install(tmp_path: Path) -> None:
+    app = _installed(tmp_path / "Sentinel")
+    state = _pending(app, None, action="install", reason="the recorder did not start: C-001")
+    assert ucli.cmd_restart(argparse.Namespace(state=str(state), outcome="rolled_back", reason="x")) == 0
+    msg = ap.read_result(ap.Folders(app))["message"]
+    assert msg.startswith(f"The install of Sentinel {__version__} was undone: the recorder did not start: C-001.")
+
+
+@pytest.mark.skipif(__import__("sys").platform != "win32", reason="the swap is Windows only")
+def test_update_install_stops_recording_and_hands_over_as_an_install(tmp_path: Path, monkeypatch, capsys) -> None:
+    app = _installed(tmp_path / "Sentinel")
+    folders = ap.Folders(app)
+    _installed(folders.previous, version="9.9.9")
+    cfg = _cfg(tmp_path)
+    scripts: list[str] = []
+    monkeypatch.setattr(ucli, "_app", lambda: app)
+    monkeypatch.setattr(ucli, "_is_admin", lambda: True)
+    monkeypatch.setattr(ucli, "_config", lambda _explicit: cfg)
+    monkeypatch.setattr(ucli, "stop_recording", lambda _cfg, on_wait=None: ap.RecordingState())
+    monkeypatch.setattr(ucli, "launch_finisher", lambda script, _folders: scripts.append(script))
+    monkeypatch.setattr(ucli.time, "sleep", lambda _s: None)
+    args = ucli.build_parser().parse_args(["install", "--yes", "--reason", SCRIPT_REASON])
+    assert ucli.main(["install", "--yes", "--reason", SCRIPT_REASON]) == 0 and args.cmd == "install"
+    said = capsys.readouterr().out
+    assert "The install continues in a new window" in said and "back" not in said.lower()
+    p = ap.Pending.read(folders.state)
+    assert (p.action, p.from_version, p.to_version, p.reason) == ("install", __version__, "9.9.9", SCRIPT_REASON)
+    assert p.staged == p.previous == str(folders.previous)
+    assert len(scripts) == 1 and f"Installing Sentinel 9.9.9 over {__version__}." in scripts[0]
+    code, message, _detail = _software_events(cfg)[-1]
+    assert code == "software_install_started" and message.startswith(f"Installing Sentinel 9.9.9 over {__version__}")
+
+
+@pytest.mark.skipif(__import__("sys").platform != "win32", reason="the swap is Windows only")
+def test_update_install_refuses_without_a_folder_or_when_it_is_the_same_version(tmp_path: Path, monkeypatch,
+                                                                                capsys) -> None:
+    app = _installed(tmp_path / "Sentinel")
+    monkeypatch.setattr(ucli, "_app", lambda: app)
+    monkeypatch.setattr(ucli, "_is_admin", lambda: True)
+    monkeypatch.setattr(ucli, "stop_recording", lambda *_a, **_k: pytest.fail("recording must not be stopped"))
+    assert ucli.main(["install", "--yes"]) == ucli.EXIT_REFUSED
+    assert "No program folder to install was found" in capsys.readouterr().out
+    _installed(ap.Folders(app).previous)                       # the same version as the one installed
+    assert ucli.main(["install", "--yes"]) == ucli.EXIT_REFUSED
+    assert "is installed already" in capsys.readouterr().out

@@ -911,7 +911,8 @@ class AppWindow(QMainWindow):
             mark_result(folders, shown=True)
         except OSError:
             pass
-        good = (res.get("outcome"), res.get("action")) in (("updated", "update"), ("rolled_back", "rollback"))
+        good = (res.get("outcome"), res.get("action")) in (("updated", "update"), ("rolled_back", "rollback"),
+                                                           ("installed", "install"))
         # Review 2026-11-12: start the 3-minute check first; the message does not wait for a click.
         if res.get("outcome") == "updated" and res.get("watch") and self.ctx.cfg is not None:
             self._update_folders_override = folders
