@@ -317,7 +317,11 @@ problems detected" (fresh one, docs/branches/design-single-executable.md, limita
 `Sentinel stop`, 18 s wait, Start recording, "Recording normally" again: `tests/integration/test_gui_stop_start.py`.
 The window was also drawn with Windows' own drawing and looked at (wide and 990 px wide). Full suite on that
 PC: 1702 passed, 2 skipped, 1 failed, the timing test that fails there on unchanged versions too
-(docs/branches/motion-recording.md). **Not tried:** on
+(docs/branches/motion-recording.md). The built 0.3.25 program (commit 72a5217, window and recorder both from
+the build, simulated camera, its window read and its button pressed through Windows UI Automation): "Not
+recording", "The recorder was stopped at ...", camera "not in use (recorder stopped)" and the Start recording
+button at 4 s and at 20 s after `Sentinel.exe stop`; button pressed; "Recording normally" 30 s after the
+stop and the button gone. **Not tried:** on
 the laptop; with the real camera; with the Windows service installed (the control is the tested
 `ServiceControl`, but a real StartService from the window was not run); pressing the button by hand.
 
