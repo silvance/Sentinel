@@ -9,9 +9,10 @@ that the sound can be heard. Settings > Camera > "Test picture and sound", or ``
   clip never enters the recordings, the recording log or an archive drive. **The clip is not evidence.**
 * It works whether or not sound recording is switched on, so it is the first thing to try once a microphone
   is fitted. Switching sound recording on stays a separate, deliberate step (docs/00 R5).
-* The clip holds a few seconds of the scene, with sound. It is kept in the user's temporary folder, replaced
-  by the next test and deleted when the Camera page is left or the next test starts
-  (:func:`delete_clip`). A player that still has it open keeps it until it is closed.
+* The clip holds a few seconds of the scene, with sound. It is kept in the user's temporary folder and
+  replaced by the next test. The window deletes it when the Camera page is left and when it is next opened
+  (:func:`delete_clip`); from the command line it stays until the next test or until it is deleted by hand.
+  A player that still has it open keeps it until it is closed.
 * The video is copied as the camera sends it; the sound is converted to AAC, as the recorder does, so that
   the clip plays in any player.
 
@@ -193,7 +194,7 @@ def av_test(ffmpeg: str, ffprobe: str, url: str, transport: str = "tcp", input_f
         out("Sentinel is set to record sound with the video." if records_sound else
             "Sentinel is NOT set to record sound (Settings > Camera > Record the camera's sound with the video).")
     out(f"Test clip: {clip}")
-    out("It is not evidence. It is replaced by the next test and deleted when the Camera page is left.")
+    out("It is not evidence. The next test replaces it.")
     has_picture = any(s.get("codec_type") == "video" for s in facts.get("streams", []))
     return (0 if has_picture else 4), clip
 
@@ -215,5 +216,6 @@ def run_av_test(cfg: Any, seconds: float = DEFAULT_SECONDS, out: Callable[[str],
     code, clip = av_test(cfg.tools.ffmpeg, cfg.tools.ffprobe, url_with_credentials(cfg.camera.url, creds),
                          cfg.camera.transport, cfg.camera.input_format, seconds, out, cfg.camera.include_audio)
     if clip is not None:
-        out("Open that file to watch and listen (double-click it in the file manager).")
+        out("Open that file to watch and listen (double-click it in the file manager), and delete it when you "
+            "have: from the command line nothing removes it until the next test.")
     return code

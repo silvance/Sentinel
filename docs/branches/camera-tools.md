@@ -30,6 +30,8 @@ The clip is **not evidence**: it never enters the recordings, the recording log 
 ten seconds of the scene with sound, so it does not stay: it is in the user's temporary folder
 (`Sentinel-camera-test\camera-test.mp4`), is replaced by the next test, and is deleted when the Camera page
 is left and when the window is next opened. A player that still has it open keeps it until it is closed.
+Run from the command line, nothing removes it until the next test: the command says so and asks for it to be
+deleted by hand.
 The test works whether or not sound recording is switched on; switching that on remains a separate step
 with its own question (docs/00 R5).
 
