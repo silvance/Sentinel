@@ -27,6 +27,7 @@ from .procs import Task
 
 REFRESH_MS = 3000
 WATCH_EVERY_MS = 5000          # after a settings change: check every 5 s ...
+USER_GUIDE = "Sentinel User Guide.pdf"   # at the top of the program folder (packaging/userguide.py makes it)
 WATCH_LIMIT_S = 180.0          # ... for up to 3 minutes ...
 WATCH_PASSES = 3               # ... until it passes 3 times in a row (not a passing moment while starting)
 
@@ -337,6 +338,10 @@ class AppWindow(QMainWindow):
                 act.setShortcut(QKeySequence(f"Ctrl+{n}"))
             act.triggered.connect(lambda _c=False, k=self._rows[row]: self.navigate(k))
         hm = mb.addMenu("&Help")
+        # Owner request 2026-11-18: the guide for the people who use the recorder, beside the program.
+        a = hm.addAction("&User guide (PDF)")
+        a.setShortcut(QKeySequence("F1"))
+        a.triggered.connect(self.open_user_guide)
         a = hm.addAction("Open the &licences folder")
         a.triggered.connect(self.open_licences)
         hm.addSeparator()
@@ -419,6 +424,25 @@ class AppWindow(QMainWindow):
 
     def _save_geometry(self) -> None:
         save_pref("window_geometry", bytes(self.saveGeometry().toBase64()).decode("ascii"), self.prefs_path)
+
+    def user_guide_path(self) -> Path | None:
+        """The guide beside the program (an installed copy), or the one in the source tree; None if neither."""
+        import sys
+
+        for p in (Path(sys.executable).parent / USER_GUIDE,
+                  Path(__file__).resolve().parents[4] / "docs" / "user-guide" / USER_GUIDE):
+            if p.is_file():
+                return p
+        return None
+
+    def open_user_guide(self) -> None:
+        from . import settings_pages
+
+        guide = self.user_guide_path()
+        if guide is None or not settings_pages.open_with_its_program(guide):
+            QMessageBox.information(self, "Sentinel", f"The user guide is the file \"{USER_GUIDE}\" in the Sentinel "
+                                    "program folder. It could not be opened from here"
+                                    + ("." if guide is not None else ": the file is not there."))
 
     def open_licences(self) -> None:
         import sys

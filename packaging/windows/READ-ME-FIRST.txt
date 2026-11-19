@@ -1,6 +1,9 @@
 SENTINEL CAMERA RECORDER
 ========================
 
+The user guide is the file "Sentinel User Guide.pdf" in this folder
+(in the Sentinel window: Help, User guide).
+
 To start Sentinel or check that it is recording:
 
     Double-click  Sentinel.exe

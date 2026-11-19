@@ -404,6 +404,15 @@ def build(ffmpeg_dir: Path, dist_root: Path, work: Path, allow_dirty: bool,
                             status=ff["licence_block"]["license_status"]), encoding="utf-8")
     readme = ROOT / "packaging" / ("windows" if IS_WIN else "linux") / "READ-ME-FIRST.txt"
     shutil.copy2(readme, app / readme.name)
+    # The user guide, at the top of the program folder (owner request 2026-11-18). A build is refused while
+    # the guide is not the one for this version: no entry under "What changed", words that are no longer on
+    # the screen, or a PDF made from an earlier text (packaging/userguide.py).
+    import userguide
+
+    stale = userguide.problems()
+    if stale:
+        raise BuildError("the user guide is not up to date:\n  " + "\n  ".join(stale))
+    shutil.copy2(userguide.PDF, app / userguide.PDF.name)
     try:
         licences = licences_bundle.write_licences(app, ff["version"], ffmpeg_source_ref(ff["version"]),
                                                   btbn, source_offer_contact, ffmpeg_licence=ff["license"],

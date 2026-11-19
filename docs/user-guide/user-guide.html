@@ -1,0 +1,211 @@
+<!--
+  Source of "Sentinel User Guide.pdf" (the PDF at the top of the program folder). Make the PDF with
+      python packaging/userguide.py
+  Rules (docs/user-guide/README.md):
+  * Written for the people who use the recorder, not for whoever installs it. Short sentences, no jargon.
+  * Words shown on the screen are marked <b class="ui">like this</b>, exactly as the program shows them.
+    A test fails if such words are no longer in the program.
+  * {{VERSION}} and {{ALERTS}} are filled in by the script (the version number; the list of messages).
+  * Every version gets an entry under "What changed", even if it only says that nothing changed for users.
+-->
+<h1>Sentinel camera recorder</h1>
+<p class="sub">User guide &nbsp;&middot;&nbsp; for Sentinel {{VERSION}}</p>
+
+<table class="box" width="100%" cellpadding="10" cellspacing="0"><tr><td>
+<p><b>The three things you do</b></p>
+<ol>
+<li><b>Check that it is recording.</b> The Sentinel window says <b class="ui">Recording normally</b> or
+    <b class="ui">Watching for motion</b>. See part 1.</li>
+<li><b>Change the archive drive</b> on the day you were given, or when the screen says a drive is full.
+    See part 3.</li>
+<li><b>Watch recordings</b> from an archive drive: open the folder <b class="ui">1 - Watch the recordings</b>
+    on it and double-click a day. See part 4.</li>
+</ol>
+<p><b>If the screen shows a problem:</b> do not switch anything off and do not unplug anything. Read the
+message, write down its code (for example R-003) and the time, and call the person who looks after the
+system. See part 5.</p>
+</td></tr></table>
+
+<h2>1. Is it recording?</h2>
+<p>Double-click <b>Sentinel</b> on the computer. The window opens on <b class="ui">Status</b>. The large
+words at the top tell you what the recorder is doing:</p>
+<table class="grid" width="100%" border="1" cellpadding="5" cellspacing="0">
+<tr><th width="27%">The screen says</th><th width="46%">What it means</th><th width="27%">What you do</th></tr>
+<tr><td><b class="ui">Recording normally</b></td><td>It is recording.</td><td>Nothing.</td></tr>
+<tr><td><b class="ui">Watching for motion</b></td><td>Outside the recording hours it records only when something
+    moves. It starts by itself.</td><td>Nothing.</td></tr>
+<tr><td><b class="ui">Paused by schedule</b></td><td>A pause that was planned, for example days off. The message
+    says when recording starts again.</td><td>Nothing.</td></tr>
+<tr><td><b class="ui">Starting recording</b></td><td>It is connecting to the camera.</td><td>Wait a
+    minute.</td></tr>
+<tr><td><b class="ui">Recording interrupted</b></td><td>It lost the camera and is trying again by
+    itself.</td><td>If it stays for more than a few minutes, call.</td></tr>
+<tr><td><b class="ui">Storage warning</b></td><td>It is recording, but the computer is running out of
+    space.</td><td>Call today.</td></tr>
+<tr><td><b class="ui">Recording stopped</b><br><b class="ui">Not recording</b><br><b class="ui">System error</b></td>
+    <td>It is not recording.</td><td>Call now. Have the code ready (part 5).</td></tr>
+</table>
+<p>Under the large words, <b class="ui">Alerts</b> lists anything that needs attention, each with a code.
+The rest of the page shows the camera, the last file saved, the storage and the archive drive.</p>
+<p>You can close the Sentinel window. <b>Recording continues</b> with the window closed and while the computer
+is locked.</p>
+
+<h2>2. Leaving the computer</h2>
+<ul>
+<li>Press <b class="ui">Lock computer</b> on the Status page (or Windows key + L). Recording continues.</li>
+<li><b>Do not close the lid.</b> Do not shut the computer down, put it to sleep or unplug its power.</li>
+<li>Do not unplug the camera's cable or an archive drive (part 3 says how a drive is taken out).</li>
+</ul>
+
+<h2 style="page-break-before: always">3. Changing the archive drive</h2>
+<p>Sentinel copies every finished recording to the archive drive, about once an hour, and checks each copy.
+Each archive drive has its name on a sticker, for example SSD_1 and SSD_2. The recordings stay on the
+computer as well until a drive has been taken away.</p>
+<h3>Taking a drive out and putting the next one in</h3>
+<ol>
+<li>Open <b class="ui">Drives</b>. Under <b class="ui">Archive drive</b> every drive that is plugged in has a
+    line with its name and one of: <b class="ui">In use</b>, <b class="ui">Standing by</b>,
+    <b class="ui">Full: press Swap and safely remove</b>, <b class="ui">Ready to take out</b>.</li>
+<li>Press <b class="ui">Swap and safely remove</b>.</li>
+<li><b>Wait.</b> Sentinel first finishes copying to the drive and checks it. This can take several
+    minutes. Do not unplug anything yet.</li>
+<li>The page then names the drive and says it is <b>safe to remove</b>. If it asks you to press
+    <b class="ui">Safely remove</b> first, press it and wait for the page to say the drive is safe to
+    remove.</li>
+<li>Unplug <b>that drive only</b>: the one whose name the page shows. Check the sticker.</li>
+<li>Plug in the next drive. Within a minute the page shows it as <b class="ui">In use</b> or
+    <b class="ui">Standing by</b>.</li>
+<li>Fill in the sheet for the drive you took out and hand the drive over as you were told.</li>
+</ol>
+<p>If two archive drives are plugged in and one fills up, copying moves to the other one by itself. Nothing
+has to be pressed for that, and recording is not interrupted.</p>
+<h3>Never</h3>
+<ul class="never">
+<li>Never unplug a drive that the page has not named as safe to remove.</li>
+<li>Never use Windows' own "Safely Remove Hardware" instead of the button in Sentinel, unless the page tells
+    you to.</li>
+<li>Never plug in any drive other than the archive drives with a sticker. A new drive has to be set up
+    first by the person who looks after the system (<b class="ui">Erase and set up…</b>).</li>
+<li>Never delete, rename or move anything on an archive drive.</li>
+<li>Do not press <b class="ui">Cancel swap</b> unless you are told to. It undoes the swap.</li>
+</ul>
+<h3>If something went differently</h3>
+<ul>
+<li><b>You unplugged a drive too early.</b> Plug it in again and tell the person who looks after the system.
+    Nothing is lost: the recordings are still on the computer.</li>
+<li><b>A drive came back from the office.</b> Plug it in. Its line reads <b class="ui">Back from the office:
+    return it to service before it is used again</b>. That step (<b class="ui">Return to service…</b>) is for
+    the person who looks after the system, after the office has copied the drive and checked the copy.</li>
+<li><b>No drive is plugged in for a while.</b> Recording continues; the recordings wait on the computer and
+    are copied when a drive is put in.</li>
+</ul>
+
+<h2 style="page-break-before: always">4. Watching recordings</h2>
+<p>From an archive drive, or from the copy of one that the office made:</p>
+<ol>
+<li>Open the drive (or the folder the office copied it into).</li>
+<li>Open the folder <b class="ui">1 - Watch the recordings</b>.</li>
+<li>Double-click a day, for example <b>2026-11-18 Wednesday - CAM01</b>. The whole day plays in order, one
+    hour after the other. If Windows asks which program to use, choose <b>VLC media player</b>.</li>
+<li>In the player's list every line is one recording, with the time it starts and ends. To go to a time of
+    day, pick the line for that hour.</li>
+</ol>
+<ul>
+<li>Leave the folder <b>Sentinel</b> on the drive alone. It holds the original recordings and the lists
+    that prove they are unchanged. Nobody needs to open it to watch.</li>
+<li>The file <b class="ui">START HERE.txt</b> on the drive says the same in a few lines.</li>
+<li>A day that is not in the folder has no recordings on that drive.</li>
+<li>The newest hour appears once its recording is finished and has been copied and checked.</li>
+<li>On a drive last written by a version before 0.3.22 the day files are in the folder Sentinel, then the
+    camera's folder, then Playlists.</li>
+</ul>
+<p>The <b class="ui">Recordings</b> page of the Sentinel window shows when there are recordings, where
+there are gaps and why, and when there was motion. It does not play video.</p>
+<p>To give recordings to a reviewer, a <b>review drive</b> is made on the <b class="ui">Export</b> page
+(<b class="ui">Export new recordings</b>). Do this only if it is part of your instructions.</p>
+
+<h2>5. When the screen shows a problem</h2>
+<p>A problem is shown in plain words with a code, for example:</p>
+<p class="quote">Recording stopped. Error R-003: Camera connection lost. Automatic recovery unsuccessful.
+Contact technical support and provide diagnostic report.</p>
+<ol>
+<li><b>Do not switch the computer off</b>, do not restart it and do not unplug anything. Sentinel keeps
+    trying by itself, and many problems go away again.</li>
+<li>Write down the <b>code</b> and the <b>time</b>.</li>
+<li>Press <b class="ui">Diagnostic report…</b> on the Status page and save the report where it suggests. Send
+    it if you are asked to.</li>
+<li>Call the person who looks after the system and read them the code. The list at the end of this guide
+    says what each code means.</li>
+</ol>
+<p>The word beside a message says how urgent it is: <b class="ui">Notice</b> and
+<b class="ui">Recovering automatically</b> need nothing from you; <b class="ui">Attention needed</b> means
+recording continues but someone should look; <b class="ui">Action required</b> and
+<b class="ui">Recording stopped</b> mean call now.</p>
+
+<h2 style="page-break-before: always">6. For the person who looks after the system</h2>
+<p>Everything is done in the Sentinel window. Settings can only be changed after
+<b class="ui">Unlock settings (administrator)…</b> in the <b class="ui">File</b> menu, with a Windows
+administrator's password.</p>
+<table class="grid" width="100%" border="1" cellpadding="5" cellspacing="0">
+<tr><th width="24%">Where</th><th>What</th></tr>
+<tr><td>Settings, Schedule</td><td><b class="ui">Work hours, motion at other times</b> sets recording all the
+    time Monday to Friday 07:00 to 18:00 and on motion otherwise. <b class="ui">Days off…</b> enters leave and
+    holidays; recording starts again by itself afterwards.</td></tr>
+<tr><td>Settings, Camera</td><td><b class="ui">Test connection</b> says whether the camera answers and
+    whether it sends sound. <b class="ui">Test picture and sound</b> records ten seconds, says what arrived
+    and how loud the sound was, and plays the clip (<b class="ui">Play the test clip</b>); the clip is not
+    kept. <b class="ui">Record the camera's sound with the video</b> switches sound recording on; do this
+    only where recording sound is authorised.</td></tr>
+<tr><td>Settings, Motion</td><td><b class="ui">Start test with the saved settings</b> shows, once a second,
+    how much of the picture changed and whether that counts as motion. Lighting: the room light being
+    switched counts as motion at once. <b class="ui">If no motion is seen for a long time</b>: record all
+    the time after the set number of days without motion; days off are not counted.</td></tr>
+<tr><td>Drives</td><td><b class="ui">Erase and set up…</b> prepares a new archive drive and gives it its name.
+    <b class="ui">Return to service…</b> empties a drive that came back from the office, and only after the
+    office has copied it and checked the copy.</td></tr>
+<tr><td>System</td><td>The recorder service, updates, the settings history, and the check of the recording
+    log against a drive.</td></tr>
+<tr><td>Help</td><td><b class="ui">User guide (PDF)</b> opens this guide.</td></tr>
+</table>
+<p class="small">The file READ-ME-FIRST.txt beside the program lists the commands for technical support.</p>
+
+<h2 style="page-break-before: always">7. Messages and their codes</h2>
+<p>The first letter of a code says what it is about. Codes do not change their meaning between
+versions.</p>
+{{ALERTS}}
+
+<h2 style="page-break-before: always">8. What changed</h2>
+<p>Changes that matter to the people who use the recorder, newest first.</p>
+<h3>0.3.23</h3>
+<ul>
+<li>This guide. It is the file "Sentinel User Guide.pdf" in the program folder, and
+    <b class="ui">User guide (PDF)</b> in the Help menu opens it.</li>
+</ul>
+<h3>0.3.22</h3>
+<ul>
+<li>Archive drives: the day files to watch are now in the folder <b class="ui">1 - Watch the recordings</b> at
+    the top of the drive, named by date and weekday, with <b class="ui">START HERE.txt</b> beside it. A drive
+    that is already in use changes over by itself.</li>
+<li>Settings, Camera: <b class="ui">Test picture and sound</b>.</li>
+<li>Settings, Motion: the Lighting option. The room light being switched on or off counts as motion at
+    once.</li>
+</ul>
+<h3>0.3.21</h3>
+<ul>
+<li>Settings, Motion: <b class="ui">If no motion is seen for a long time</b>. When it switches on, the screen
+    shows code W-003 and the recorder records all the time until it sees motion again.</li>
+</ul>
+<h3>0.3.20</h3>
+<ul>
+<li>Settings, Camera: <b class="ui">Record the camera's sound with the video</b>. Off unless switched on.
+    Codes N-001 and N-002 are about sound.</li>
+</ul>
+<h3>0.3.19</h3>
+<ul>
+<li>Settings, Motion: the live test shows its lines while it runs.</li>
+</ul>
+<h3>0.3.17</h3>
+<ul>
+<li>Drives: with two archive drives plugged in, the page says that copying moves to the second drive by
+    itself when the first is full.</li>
+</ul>

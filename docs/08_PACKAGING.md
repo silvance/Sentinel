@@ -14,6 +14,8 @@ area."* Fully Windows-compatible; Linux needs a very simple executable option.
 Sentinel\                      copy this whole folder (e.g. to C:\Program Files\Sentinel)
     Sentinel.exe               <- the one program anyone starts (double-click)
     READ-ME-FIRST.txt          plain-language instructions
+    Sentinel User Guide.pdf    the guide for the people who use it (0.3.23; docs/user-guide/README.md says
+                               how it is made and what keeps it up to date; Help > User guide opens it)
     _internal\                 Python runtime + Sentinel code (PyInstaller one-folder)
     ffmpeg\ffmpeg.exe          bundled FFmpeg / FFprobe, used before anything on PATH
     ffmpeg\ffprobe.exe

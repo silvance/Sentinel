@@ -1764,3 +1764,22 @@ def test_camera_page_tests_picture_and_sound_and_forgets_the_clip(app: QApplicat
     app.processEvents()
     assert not clip.exists() and page.av_play.isHidden()
     w.close()
+
+# ---------------------------------------------------------------------- user guide (0.3.23)
+def test_help_opens_the_user_guide(app: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    opened: list[str] = []
+    monkeypatch.setattr(settings_pages, "open_with_its_program", lambda p: opened.append(str(p)) or True)
+    w = _window(app, tmp_path, admin=False)
+    helps = [a for m in w.menuBar().actions() if m.text().replace("&", "") == "Help" for a in m.menu().actions()]
+    guide = next(a for a in helps if a.text().replace("&", "") == "User guide (PDF)")
+    assert [a.text().replace("&", "") for a in helps if a.text()][0] == "User guide (PDF)"      # first in the menu
+    path = w.user_guide_path()
+    assert path is not None and path.name == "Sentinel User Guide.pdf" and path.is_file()
+    guide.trigger()
+    assert opened == [str(path)]
+    said: list[str] = []
+    monkeypatch.setattr(base.QMessageBox, "information", lambda _p, _t, text: said.append(text))
+    monkeypatch.setattr(w, "user_guide_path", lambda: None)       # an install whose guide was deleted
+    guide.trigger()
+    assert len(opened) == 1 and "Sentinel User Guide.pdf" in said[0] and "the file is not there" in said[0]
+    w.close()
