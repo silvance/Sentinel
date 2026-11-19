@@ -210,6 +210,12 @@ directly under the lens. That costs one recording of `keep_recording_s`, and los
 * Full suite on 0.3.23 (0.3.22 plus the user guide), same machine, **left alone for the whole run**: 1672
   passed, 2 skipped, none failed, the timing test included. So far that fits the failures above being the
   machine in use, not the code; it is one run.
+* Full suite on 0.3.24 (0.3.23 plus the wording of a full-folder install; no recorder code changed), same
+  machine the next morning, left alone except for one file search: 1683 passed, 2 skipped, 1 failed: the same
+  timing test. Alone afterwards it failed 4 times out of 4 on 0.3.24. Then in turn, nothing else running:
+  unchanged 0.3.23 passed 1 of 3, 0.3.24 passed 0 of 3. So the idle machine does **not** make it pass, as the
+  0.3.23 run above had suggested, and the unchanged version fails too. The question stays open as written
+  above; this machine cannot be used to clear that test.
 * `tests/unit/test_motion_light.py` (0.3.22): a clean light switch is one changed frame (missed without the
   option, motion at once with it); an even change of brightness cancelled out; someone moving while the
   brightness changes; cancelling never adds a change; the detector's two counts (all motion / movement in

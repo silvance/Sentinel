@@ -661,8 +661,32 @@ with the Windows services installed. (Since then the laptop was brought to 0.3.1
 
 **The script as changed on 2026-11-19 (0.3.24)** is run by `tests/unit/test_full_folder_install_script.py`
 with a stand-in for each `Sentinel.exe` and without the administrator check: an installed version that knows
-`update install`, one that does not, no `YES`, and a refusal. **Not run:** the changed script against real
-builds with a real swap (it needs an administrator).
+`update install`, one that does not, no `YES`, and a refusal.
+
+**Tried (2026-11-19, second development machine, scratch folder with a space in its path, real builds,
+administrator):** the 0.3.23 build as the installed program with 0.3.19 kept beside it, as on the laptop; the
+0.3.24 laptop folder with its script; settings of its own (`%ProgramData%` pointed into the scratch folder for
+the trial, so this computer's Sentinel was not involved); no recorder running. Started with `--yes`, the script
+set 0.3.19 aside, copied and checked 0.3.24, found that 0.3.23 has no `update install`, said so in its two lines,
+and used `update rollback --yes`. What that command printed ("Going back continues in a new window; this one
+closes now.") stayed in the file. The swap window began with "Going back from Sentinel 0.3.23 to 0.3.24.", which
+is 0.3.23's wording and expected; the swap took 24 s and 0.3.24 passed its check. `update status` then gave
+"Installed: Sentinel 0.3.24 / Previous version kept: 0.3.23 / Last update: installed at …: Sentinel 0.3.24 was
+installed over 0.3.23 from a full program folder. 0.3.23 is kept as the previous version." The reopened window
+showed that message (`shown` was set) and started the recorder and the archive copy. The recording log holds
+`software_rollback_started` ("Going back from Sentinel 0.3.23 to 0.3.24", written by 0.3.23) and
+`software_installed` (written by 0.3.24, with the script's reason). `about --verify` was clean.
+
+One thing in that trial is not explained. On the first attempt the answer was fed from a file
+(`call script < yes.txt`). The script printed its question, read nothing, said "Not confirmed" and changed
+nothing more (the older version stayed set aside and the copy stayed in place, as its message says). The same
+script, cut off after the question, then read the file's line in 18 runs and missed it in 1; no step that takes
+the line was found. Answering at the keyboard was not part of the trial. If the script ever says "Not confirmed"
+after `YES` was typed, nothing has been stopped or swapped: run it again.
+
+**Not run:** the question answered at the keyboard in a real console; an installed version that has
+`update install` (0.3.24 to a later one) with a real swap; a recording in progress at the moment of the swap;
+on the laptop.
 
 A caution from that trial: the window the swap reopens is an ordinary Sentinel window. If the computer has
 Sentinel settings (`C:\ProgramData\Sentinel\config\sentinel.toml`), it starts the recorder and the archive copy
