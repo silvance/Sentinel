@@ -202,6 +202,14 @@ directly under the lens. That costs one recording of `keep_recording_s`, and los
   ... ppm at stream time 10.0 s / 10.5 s"); the same line appears in a motion test whose run is 10 s long.
   **Open:** why the estimate jumps there on that machine and whether it does on the laptop; to be looked at
   with a full run on the first development machine, idle, before the next keyed release.
+* Full suite on 0.3.22, same machine, later that night: 1659 passed, 2 skipped, 2 failed: the timing test
+  above, and `test_archive_drive.py::test_swap_during_active_recording_then_next_drive` ("timed out after 60s
+  waiting for 3 sealed segments"). The second ran in the minutes in which a 340 MB release folder was being
+  copied to the removable drive and checked; alone it then passed 3 times out of 3, and its whole file
+  passed.
+* Full suite on 0.3.23 (0.3.22 plus the user guide), same machine, **left alone for the whole run**: 1672
+  passed, 2 skipped, none failed, the timing test included. So far that fits the failures above being the
+  machine in use, not the code; it is one run.
 * `tests/unit/test_motion_light.py` (0.3.22): a clean light switch is one changed frame (missed without the
   option, motion at once with it); an even change of brightness cancelled out; someone moving while the
   brightness changes; cancelling never adds a change; the detector's two counts (all motion / movement in
