@@ -96,6 +96,8 @@ def test_a_returned_drive_is_recorded_cleared_and_used_again(env) -> None:  # no
     root = Path(drive.root)
     assert len(_videos(root)) == 3 and _states(led) == {"VERIFIED": 6}
     _to_office_and_back(w, drive)
+    watch = root / layout.WATCH_DIR                # 0.3.22: the playlists for people, at the top of the drive
+    assert list(watch.glob("*.m3u")) and (root / layout.START_HERE).is_file()
     add_synthetic_run(led, cfg, 1, SEG)
     assert w.step() == "absent" and w.att is None   # back from the office: not written to before its return
     assert len(_videos(root)) == 3
@@ -108,6 +110,12 @@ def test_a_returned_drive_is_recorded_cleared_and_used_again(env) -> None:  # no
     old_names = {p.name for p in _videos(root)}
     assert len(old_names) == 1 and not list((root / layout.ROOT).rglob("*.framehash.txt"))   # only the new one
     assert (root / "SENTINEL_DRIVE.json").is_file()                   # marker (identity, label) kept
+    # The playlists of the recordings that went to the office went with them: no day file points at nothing.
+    for pl in watch.glob("*.m3u"):
+        for ln in pl.read_text("ascii").splitlines():
+            if ln and not ln.startswith("#"):
+                assert (pl.parent / ln).resolve().is_file(), (pl.name, ln)
+    assert (root / layout.START_HERE).is_file() and (root / layout.WATCH_HOWTO).is_file()   # the notes stay
     assert _states(led) == {"TRANSFERRED": 6, "VERIFIED": 1}
     ev = led.query("SELECT detail FROM events WHERE code='archive_drive_returned'")
     detail = json.loads(ev[0]["detail"])

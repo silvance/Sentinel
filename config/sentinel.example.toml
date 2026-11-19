@@ -156,6 +156,12 @@ analysis_fps = 4                   # second stream only
 # particular dates (days off, holidays). Versions before 0.3.21 refuse these two keys.
 #   no_motion_days = 2
 #   no_motion_count_days = ["weekdays"]   # mon..sun, "weekdays", "weekend", "daily"
+# Lighting (0.3.22; off unless set): a change of at least light_change_percent of the picture at once is the
+# room light being switched and counts as motion at once (whatever min_frames says); an even brightening or
+# darkening of a smaller part (daylight, the camera adjusting) is cancelled out. Versions before 0.3.22
+# refuse these keys.
+#   light_aware = true
+#   light_change_percent = 60             # 20..100
 
 # Optional: the organisation using this recorder. Shown in the window, on diagnostic reports and on
 # review-drive summaries. Leave out (or empty) to name no organisation. One line, at most 100 characters.

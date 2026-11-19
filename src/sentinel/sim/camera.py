@@ -22,6 +22,8 @@ Faults:
     motion=         (constructor) a still grey scene with light sensor noise in which a box moves
                     only during the given (start_s, end_s) windows of stream time; for testing
                     motion-triggered recording. None (default) = the moving test pattern.
+    light=          (constructor, with motion=) the whole still scene is brighter during the given windows,
+                    switched in one step: the room light being switched on and off.
 
 CLI: ``python -m sentinel.sim.camera --port 8554`` then type a fault name and Enter.
 """
@@ -46,7 +48,8 @@ class SimulatedCamera:
     def __init__(self, port: int = 0, host: str = "127.0.0.1", size: str = "640x480", fps: int = 15,
                  bitrate: str = "800k", gop: int | None = None, ffmpeg: str = "ffmpeg",
                  clock_rate: float = 1.0, motion: list[tuple[float, float]] | None = None,
-                 codec: str = "h264", audio: str | None = None) -> None:
+                 codec: str = "h264", audio: str | None = None,
+                 light: list[tuple[float, float]] | None = None) -> None:
         """``clock_rate``: camera clock speed relative to real time (1.01 = camera clock 1 % fast:
         each real second carries 1.01 s of stream time). Frames are still produced and sent in
         real time (``-re``); only their timestamps are scaled (``setpts``). Measured with FFmpeg
@@ -66,6 +69,11 @@ class SimulatedCamera:
         self.size, self.fps, self.bitrate = size, fps, bitrate
         self.clock_rate = clock_rate
         self.motion = motion
+        # The room light: the whole still scene is brighter during these (start_s, end_s) windows of stream
+        # time, switched in one step (needs ``motion``, which may be an empty list).
+        if light and motion is None:
+            raise ValueError("light needs the still scene: give motion=[] as well")
+        self.light = light
         self.gop = gop or fps          # one keyframe per second by default
         self.ffmpeg = ffmpeg
         self._clients: list[socket.socket] = []
@@ -152,10 +160,13 @@ class SimulatedCamera:
             argv.append(f"testsrc2=size={self.size}:rate={self.fps}")
         else:
             windows = "+".join(f"between(t,{a:g},{b:g})" for a, b in self.motion) or "0"
+            lit = "+".join(f"between(t,{a:g},{b:g})" for a, b in self.light or [])
+            lamp = f",eq=brightness='0.35*({lit})':eval=frame" if lit else ""
             # overlay (not drawbox) so the box position is re-evaluated every frame
             argv.append(f"color=c=0x606060:size={self.size}:rate={self.fps}[bg];"
                         f"color=c=white:size=120x160:rate={self.fps}[box];"
-                        f"[bg][box]overlay=x='mod(t*240,W-w)':y=H/3:enable='{windows}',noise=alls=6:allf=t[out0]")
+                        f"[bg][box]overlay=x='mod(t*240,W-w)':y=H/3:enable='{windows}'{lamp},"
+                        "noise=alls=6:allf=t[out0]")
         if self.audio:
             argv += ["-re", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=16000",
                      "-map", "0:v:0", "-map", "1:a:0", "-c:a", self.audio, "-ac", "1", "-b:a", "64k"]

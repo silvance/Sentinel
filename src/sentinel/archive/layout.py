@@ -2,11 +2,14 @@
 
 ::
 
-    Sentinel/
+    START HERE.txt                                         how to watch, in six lines (0.3.22)
+    1 - Watch the recordings/                              the way in for people (0.3.22)
+      How to watch.txt
+      <local YYYY-MM-DD> <Weekday> - <camera>.m3u          plays a local day's originals in time order
+    Sentinel/                                              the recorder's own files
       README_ARCHIVE.txt                                   plain-language description (written once)
       <camera>/<YYYY-MM-DD>/<HHMMSS>Z_<HHMMSS>Z_<seg8>.ts   sealed originals, unchanged (FINALIZED / INTERRUPTED)
       <camera>/Fingerprints/<YYYY-MM-DD>/<same name>.framehash.txt     per-frame SHA-256 sidecar
-      <camera>/Playlists/<local YYYY-MM-DD>.m3u            plays a local day's originals in time order
       <camera>/Quarantine/<YYYY-MM-DD>/...                 CORRUPT originals (kept for examination;
                                                            their sidecars in Quarantine/Fingerprints/)
       <camera>/INDEX/archive_index.json | archive_index.csv | gaps.csv | SHA256SUMS.txt   rolling index
@@ -30,6 +33,13 @@ Design choices (docs/branches/design-archive-drive.md):
   and ``Playlists/`` holds one small ``.m3u`` per *local* day that plays the verified originals on
   the drive back to back (VLC, Windows Media Player), without any extra copy of the footage. Copies
   made before this change keep the path recorded for them (the index lists each file's path).
+* (owner request 2026-11-18, 0.3.22) The playlists are the way in for people, so they are the first thing
+  on the drive: ``1 - Watch the recordings/`` at the top (the "1" sorts it before ``Sentinel``), named by
+  date **and weekday**, with ``START HERE.txt`` beside it. Before, they sat in
+  ``Sentinel/<camera>/Playlists/`` next to the day folders, and people opened the day folders and the
+  hour files one by one. Where the originals are does not change (their paths are recorded in the
+  ledger and the index). The names avoid those of a review drive (``README_FIRST.txt``, ``Recordings``),
+  by which review drives are recognised.
 """
 
 from __future__ import annotations
@@ -59,9 +69,13 @@ def index_files(camera_id: str) -> dict[str, str]:
             "sums": f"{d}/SHA256SUMS.txt", "journal": f"{d}/verified_journal.csv"}
 QUARANTINE = "Quarantine"
 FINGERPRINTS = "Fingerprints"
-PLAYLISTS = "Playlists"
+PLAYLISTS = "Playlists"                  # until 0.3.21: Sentinel/<camera>/Playlists/ (removed when found)
 FRAMEHASH_SUFFIX = ".framehash.txt"
 PLAYLIST_SUFFIX = ".m3u"
+WATCH_DIR = "1 - Watch the recordings"   # at the top of the drive: one playlist per day
+WATCH_HOWTO = f"{WATCH_DIR}/How to watch.txt"
+START_HERE = "START HERE.txt"            # at the top of the drive
+WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
 
 KIND_ORIGINAL, KIND_QUARANTINE, KIND_FRAMEHASH = "original", "quarantine", "framehash"
 MEDIA_KINDS = (KIND_ORIGINAL, KIND_QUARANTINE)
@@ -113,11 +127,28 @@ def framehash_rel_path(seg: Any) -> str:
 
 
 def playlist_dir(camera_id: str) -> str:
+    """Where the playlists are: the folder for people at the top of the drive (one for all cameras; the
+    camera is in each playlist's name)."""
+    return WATCH_DIR
+
+
+def old_playlist_dir(camera_id: str) -> str:
+    """Where they were until 0.3.21."""
     return f"{ROOT}/{safe(camera_id)}/{PLAYLISTS}"
 
 
+def playlist_name_end(camera_id: str) -> str:
+    """What every playlist of this camera ends with (to find them again)."""
+    return f" - {safe(camera_id)}{PLAYLIST_SUFFIX}"
+
+
 def playlist_rel_path(camera_id: str, local_day: str) -> str:
-    return f"{playlist_dir(camera_id)}/{safe(local_day)}{PLAYLIST_SUFFIX}"
+    """``1 - Watch the recordings/2026-11-18 Wednesday - CAM01.m3u`` (``local_day``: YYYY-MM-DD)."""
+    try:
+        weekday = " " + WEEKDAYS[datetime.strptime(local_day, "%Y-%m-%d").weekday()]
+    except ValueError:
+        weekday = ""
+    return f"{WATCH_DIR}/{safe(local_day)}{weekday}{playlist_name_end(camera_id)}"
 
 
 def rel_path_for(seg: Any, kind: str) -> str:

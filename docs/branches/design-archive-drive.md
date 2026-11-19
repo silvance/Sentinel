@@ -329,3 +329,48 @@ the number of files either. Instead:
   with Swap is still not written again until Return to service or Cancel swap. Tests: `test_archive_two_drives`
   (hint, message), `test_gui_app` (button with two drives), `test_drives_review_1112_medium` (shared dock).
   **Not run on the real T7 drives** (docs/09 U.4 still applies). Version 0.3.17.
+
+## The way in for people: playlists at the top of the drive (owner request 2026-11-18, 0.3.22)
+
+The owner looked at an archive drive and found "the individual segments and the playlist just there": the
+playlists were in `Sentinel\<camera>\Playlists\`, three folders down and beside the day folders, so whoever
+opens the drive ends up in a day folder opening hour files one by one. The agent who uses the system will be
+on leave; whoever takes over must find the way without being told.
+
+What the top of an archive drive looks like now (and the office's copy of it, which is the same):
+
+    1 - Watch the recordings\          <- the one folder for people
+        2026-11-18 Wednesday - CAM01.m3u      one per local day: double-click, the day plays in order
+        2026-11-19 Thursday - CAM01.m3u
+        How to watch.txt
+    Sentinel\                          <- the recorder's own files (originals, fingerprints, index); unchanged
+    SENTINEL_DRIVE.json
+    START HERE.txt                     <- six lines: open the folder above, double-click a day, leave "Sentinel" alone
+
+* The "1" makes the folder sort before `Sentinel` in Explorer. The names avoid `README_FIRST.txt` and
+  `Recordings`, by which a review drive is recognised (and an archive drive carrying them refused).
+* Playlist names carry the **weekday** and the camera: people ask for "last Thursday", and one folder serves
+  every camera on the drive.
+* **Where the originals are does not change**, so nothing recorded in the recording log or the index moves,
+  and the office check (docs/10 step 5) is the same. The playlists point at them with relative paths
+  (`../Sentinel/CAM01/2026-11-18/...ts`), so they work from the office's copy as long as the whole drive
+  was copied into one folder, which docs/10 already asks for.
+* The folder and the two notes are written with the first index, also on an empty drive. The notes are plain
+  ASCII with Windows line ends, hold no dates or names, and are rewritten only if their text differs.
+* A drive written by 0.3.21 or earlier: the next index write (attach, hourly, swap) writes the new playlists
+  and **removes the old `.m3u` files** from `Sentinel\<camera>\Playlists\` (and the folder, if empty). Two sets
+  would send people back to the folder beside the day folders. Only `.m3u` files in that one folder are
+  deleted; playlists are not evidence and are not in the checksum list.
+* Return to service deletes this camera's playlists at the top of the drive with the recordings they point
+  at; the folder and the notes stay.
+* `Sentinel\README_ARCHIVE.txt` names the new folder on drives set up from now on (it is written once; on an
+  older drive it still describes the old place, and `START HERE.txt` is what people see first).
+
+Not done: the day folders are not hidden or renamed. Hiding them would make Explorer's "select everything,
+copy" at the office skip the originals; renaming `Sentinel` would change every recorded path.
+
+Tests: `tests/unit/test_archive_two_drives.py` (names and relative paths; the names are not a review drive's;
+the worker writes the folder, the notes and the playlists and rewrites none that is unchanged; playlists left
+by an earlier version are replaced and nothing else in that folder is touched), `test_archive_return.py` (no
+day file points at nothing after a return; the notes stay). **Not tried:** on a real drive in Explorer, or
+opening a playlist in VLC or Windows Media Player from the new folder (docs/09 step 5.6).

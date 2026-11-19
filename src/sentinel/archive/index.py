@@ -51,9 +51,10 @@ README_TEXT = """SENTINEL ARCHIVE DRIVE
 
 This drive holds archive copies of recordings made by Sentinel recording systems.
 
-* Sentinel/<camera>/Playlists/ has one playlist per day, named by the local date. Open one in
-  VLC or Windows Media Player to watch that day's recordings back to back. Playlists only point
-  at the recording files; they are not evidence and are rewritten as recordings are added.
+* To watch: the folder "1 - Watch the recordings" at the top of the drive has one playlist per
+  day, named by the local date and weekday. Open one in VLC or Windows Media Player to watch that
+  day's recordings back to back. Playlists only point at the recording files; they are not
+  evidence and are rewritten as recordings are added.
 * Sentinel/<camera>/<date>/ contains the original recording files, unchanged, named by their
   UTC start and end time (UTC dates and times; the playlists use local time).
 * Sentinel/<camera>/Fingerprints/<date>/ lists a fingerprint for every picture of each recording
@@ -69,6 +70,54 @@ This drive holds archive copies of recordings made by Sentinel recording systems
 
 Do not change, rename or delete anything on this drive. For review, ask for a review drive.
 """
+
+# The way in for people (owner request 2026-11-18): what someone who has never seen the drive reads first.
+# Plain ASCII with Windows line ends; no dates or names in them, so they are written once and stay the same.
+START_HERE_TEXT = """SENTINEL ARCHIVE DRIVE - START HERE
+===================================
+
+To watch the recordings:
+
+  1. Open the folder "1 - Watch the recordings".
+  2. Double-click a day, for example "2026-11-18 Wednesday - CAM01".
+     The whole day plays in order, one hour after the other.
+     If Windows asks which program to use, choose VLC media player.
+
+Leave the folder "Sentinel" alone. It holds the original recording files and the lists that
+prove they are unchanged. There is no need to open them one by one. Do not move, rename or
+delete anything on this drive.
+
+To copy this drive, copy EVERYTHING on it into one new, empty folder. The days then play from
+the copy in the same way.
+"""
+
+HOWTO_TEXT = """HOW TO WATCH THE RECORDINGS
+===========================
+
+Each file in this folder is one day. Double-click a day and the whole day plays in order.
+If Windows asks which program to use, choose VLC media player (Windows Media Player also works).
+
+* The names are the local date and the weekday, then the camera.
+* In the player's list every line is one recording file, with its local start and end time.
+  To go to a time of day, pick the line for that hour and move along it.
+* A day that is not here has no recordings on this drive. Times without a recording inside a day
+  are listed in the folder "Sentinel", under the camera, in INDEX, in the file gaps.csv.
+* The newest hour appears here once its file is finished and has been copied and checked.
+
+These day files only point at the original recordings in the folder "Sentinel" next to this
+folder; they hold no video themselves and are not evidence. They work only while both folders
+are kept side by side, so copy the whole drive, never this folder alone.
+
+Do not move, rename or delete anything on this drive.
+"""
+
+
+def people_files() -> dict[str, bytes]:
+    """{relative path: bytes} of the two notes for people at the top of the drive."""
+    def text(s: str) -> bytes:
+        return s.replace("\n", "\r\n").encode("ascii")
+
+    return {layout.START_HERE: text(START_HERE_TEXT), layout.WATCH_HOWTO: text(HOWTO_TEXT)}
 
 
 def _local(iso: str | None, tz: ZoneInfo) -> str | None:
@@ -201,10 +250,10 @@ def build_index(*, camera_id: str, generation: int, generated_utc: str, ledger_i
 
 def build_playlists(camera_id: str, entries: list[dict[str, Any]], tz: ZoneInfo) -> dict[str, bytes]:
     """{relative path: bytes}: one ``.m3u`` per local day (display time zone) listing that day's verified
-    originals on this drive in time order (owner request 2026-11-11). Quarantined (damaged) recordings
-    and files without a start time are left out. Paths inside are relative to the playlist, with ``/``
-    separators; the text is ASCII. Entries: index entries or ledger rows with path, kind, start_utc,
-    end_utc, duration_s."""
+    originals on this drive in time order (owner request 2026-11-11), in the folder for people at the top
+    of the drive, named by date and weekday (0.3.22). Quarantined (damaged) recordings and files without a
+    start time are left out. Paths inside are relative to the playlist, with ``/`` separators; the text is
+    ASCII. Entries: index entries or ledger rows with path, kind, start_utc, end_utc, duration_s."""
     days: dict[str, list[tuple[float, str, str, float]]] = {}
     seen: set[str] = set()
     for e in entries:

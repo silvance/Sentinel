@@ -16,6 +16,8 @@ Technician / support commands (same executable):
     Sentinel.exe ledger head|verify [--check-files] [--expect-head SEQ:HASH] [--config FILE]
                                                        recording-log chain head / tamper check (administrator)
     Sentinel.exe motion-test [--seconds N]             show what counts as motion (tune [motion])
+    Sentinel.exe av-test [--seconds N]                 record a few seconds; say what picture and sound arrived
+    Sentinel.exe onvif-probe [--port N] [--user NAME]  ask the camera about itself over ONVIF (read-only)
     Sentinel.exe stop [--timeout S] [--config FILE]    graceful stop of the background recorder
     Sentinel.exe status [--json] | check-config | diagnostics [--out DIR] | schedule [--days N]
     Sentinel.exe about [--verify]                      version, paths, bundled tools, build manifest
@@ -433,6 +435,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--days", type=int, default=14)
     p = add("motion-test", "watch the camera and show what counts as motion, to tune [motion] (technician)")
     p.add_argument("--seconds", type=float, default=60.0)
+    p = add("av-test", "record a few seconds from the camera and say what picture and sound arrived (technician)")
+    p.add_argument("--seconds", type=float, default=10.0)
+    p = add("onvif-probe", "ask the camera what it says about itself over ONVIF; changes nothing (technician)")
+    p.add_argument("--host", help="camera address (default: the camera in the configuration)")
+    p.add_argument("--port", type=int, help="ONVIF port (default: tries 80, 8080, 8000, 8899, 2020)")
+    p.add_argument("--user", help="another camera account than the one Sentinel uses; its password is asked for")
+    p.add_argument("--out", help="file to save the report to (default: the Sentinel log folder)")
     p = add("diagnostics", "write a diagnostic report for support")
     p.add_argument("--out")
     sub.add_parser("update", help="apply a version update file, go back, or show update status (administrator)")
@@ -499,6 +508,23 @@ def main(argv: list[str] | None = None) -> int:
         from ..motion import run_motion_test
 
         return run_motion_test(cfg, args.seconds)
+    if args.cmd in ("onvif-probe", "av-test"):
+        cfg_path = _resolve(args.config)
+        if cfg_path is None:
+            print("No configuration file found (run 'setup' first).")
+            return EXIT_CONFIG
+        try:
+            cfg = load_config(cfg_path)
+        except ConfigError as exc:
+            print(f"configuration error: {exc}")
+            return EXIT_CONFIG
+        if args.cmd == "av-test":
+            from ..avtest import run_av_test
+
+            return run_av_test(cfg, args.seconds)
+        from ..onvif import run_probe
+
+        return run_probe(cfg, host=args.host, port=args.port, user=args.user, out_file=args.out)
     extra: list[str] = []
     if args.cmd == "status" and args.json:
         extra.append("--json")

@@ -37,6 +37,14 @@ on days that count, without seeing any motion; at ``no_motion_days`` the recorde
 time (W-003) until motion is seen again. Not counted: days of the week outside
 ``no_motion_count_days``, schedule pauses, and the schedule's particular dates (days off, holidays).
 
+Lighting (``light_aware``, off by default; 0.3.22). A change of at least ``light_change_percent`` of the
+picture at once is the room light being switched (or the camera changing to night vision): someone is
+there, so it is motion **at once**, not after ``min_frames`` (a clean switch is one changed frame). An even
+brightening or darkening of a smaller part (daylight through a window, the camera adjusting its exposure)
+is cancelled out before the frames are compared (:meth:`MotionAnalyzer.even_change_removed`). Whether or
+not it is on, a change of the whole picture never sets the no-motion count back: only movement in part of
+the picture shows that the detector still notices movement (``scene_motion_count``).
+
 Honest limits (also in docs/branches/motion-recording.md): recording starts a few seconds after
 motion begins (detection, then connecting to the main stream and waiting for its next key frame);
 nothing before the trigger is kept. Slow movement, small objects far away, darkness and the
@@ -74,6 +82,10 @@ MAX_NO_MOTION_DAYS = 60.0
 QUIET_STATE = "motion_quiet.json"     # in the data folder: QuietWatch's count, kept across restarts
 QUIET_MAX_STEP_S = 120.0      # a longer gap between two looks (computer asleep, recorder stuck) is not watching
 QUIET_SAVE_EVERY_S = 60.0
+# After a change of the whole picture, the camera adjusts its exposure for a moment: the pictures of that
+# time still belong to the light change (they do not show that the detector notices movement).
+LIGHT_SETTLE_S = 3.0
+GAIN_LIMITS = (0.25, 4.0)     # brightness ratios outside this are not "the same picture, brighter"
 
 
 class MotionConfigError(ValueError):
@@ -95,6 +107,13 @@ class MotionConfig:
     # off, so versions before 0.3.21 (which refuse a key they do not know) can still read the file.
     no_motion_days: float = 0.0        # record all the time once this many counted days passed without motion
     no_motion_count_days: tuple[str, ...] = ("weekdays",)   # mon..sun, "weekdays", "weekend", "daily"
+    # Lighting (0.3.22, off by default; not written to the settings file while off). With it on, a change of
+    # most of the picture at once (the room light switched) is motion at once, whatever min_frames says, and
+    # an even brightening or darkening of a smaller part (daylight, the camera adjusting) is cancelled out.
+    light_aware: bool = False
+    # A change of at least this share of the picture at once is "the light" (also used, whether or not
+    # light_aware is on, to keep such changes from setting the no-motion count back).
+    light_change_percent: float = 60.0
 
 
 def count_day_numbers(value: Any) -> frozenset[int]:
@@ -132,6 +151,9 @@ def validate(m: MotionConfig) -> None:
     if not 0 <= m.no_motion_days <= MAX_NO_MOTION_DAYS:
         raise MotionConfigError(f"[motion] no_motion_days must be between 0 (off) and {MAX_NO_MOTION_DAYS:g}")
     count_day_numbers(m.no_motion_count_days)
+    rng("light_change_percent", 20, 100)
+    if m.light_change_percent <= m.changed_percent:
+        raise MotionConfigError("[motion] light_change_percent must be larger than changed_percent")
     p = m.stream_path
     if p and (any(c.isspace() for c in p) or "@" in p or "://" in p):
         raise MotionConfigError("[motion] stream_path must be only the path of the camera's second stream "
@@ -213,6 +235,14 @@ class MotionAnalyzer:
         # run of identical frames is a picture that really did not change (a frozen stream), scored as
         # such. Main-stream key frames are passed through, never repeated: no allowance there.
         self._max_repeats = max(2, int(2 * float(m.analysis_fps))) if m.stream_path else 0
+        # Lighting. ``last_raw``: share changed before any brightness is cancelled out. ``light``: this frame is
+        # a change of the whole picture, or follows one within LIGHT_SETTLE_S. ``light_started``: it began here.
+        self.last_raw = 0.0
+        self.light = False
+        self.light_started = False
+        self._light_until: float | None = None
+        self._clock = 0.0               # when the caller gives no time: counted from the frames
+        self._frame_s = 1.0 / float(m.analysis_fps) if m.stream_path else 1.0
 
     @property
     def run_length(self) -> int:
@@ -224,7 +254,30 @@ class MotionAnalyzer:
         changed = sum(1 for x, y in zip(a, b) if (x - y if x > y else y - x) > t)
         return 100.0 * changed / max(1, len(a))
 
-    def feed(self, frame: bytes) -> bool:
+    def even_change_removed(self, a: bytes, b: bytes) -> float:
+        """The share that changed once an even brightening or darkening is cancelled out (``light_aware``).
+
+        ``b`` is compared with ``a`` made as bright as ``b`` is on average. A point counts only if it differs
+        both from ``a`` as it was and from the brightened ``a``: cancelling can remove changes, never add one
+        (a window that stays white while the room darkens does not become a change). Something that moves
+        changes its own points far more than it changes the average, so it stays."""
+        mean_a, mean_b = sum(a) / max(1, len(a)), sum(b) / max(1, len(b))
+        if mean_a < 2.0 or mean_b < 2.0:
+            return self.score(a, b)                      # (almost) black: no brightness to compare
+        gain = min(max(mean_b / mean_a, GAIN_LIMITS[0]), GAIN_LIMITS[1])
+        if abs(gain - 1.0) < 0.02:
+            return self.score(a, b)
+        scaled = a.translate(bytes(min(255, int(i * gain + 0.5)) for i in range(256)))
+        t = self.m.pixel_threshold
+        changed = sum(1 for x, s, y in zip(a, scaled, b)
+                      if (x - y if x > y else y - x) > t and (s - y if s > y else y - s) > t)
+        return 100.0 * changed / max(1, len(a))
+
+    def feed(self, frame: bytes, now: float | None = None) -> bool:
+        """``now``: a clock in seconds (the detector's); without it time is counted from the frames."""
+        self._clock = self._clock + self._frame_s if now is None else now
+        self.light_started = False
+        self.light = self._light_until is not None and self._clock <= self._light_until
         # An exact repeat carries no new picture: FFmpeg's fps filter repeats frames when the second
         # stream is slower than analysis_fps. Scoring it as "no change" reset the count every other
         # frame, so motion was never confirmed (review 2026-11-12). It is skipped instead.
@@ -234,13 +287,26 @@ class MotionAnalyzer:
             if self._repeats <= self._max_repeats:
                 self.duplicate = True
                 return False
-            self.last_score, self._run = 0.0, 0
+            self.last_score, self.last_raw, self._run = 0.0, 0.0, 0
             return False
         self._repeats = 0
         prev, self._prev = self._prev, frame
         if prev is None or len(prev) != len(frame):
             return False
-        self.last_score = self.score(prev, frame)
+        raw = self.last_raw = self.score(prev, frame)
+        whole = raw >= self.m.light_change_percent
+        if whole:
+            self.light_started = not self.light
+            self._light_until = self._clock + LIGHT_SETTLE_S
+        self.light = self._light_until is not None and self._clock <= self._light_until
+        if self.m.light_aware and whole:
+            # The room light was switched (or something else changed the whole picture at once): motion now,
+            # not after min_frames. A clean step is one changed frame, and would otherwise be missed.
+            self.last_score = raw
+            self._run = max(self._run + 1, self.m.min_frames)
+            return True
+        self.last_score = (self.even_change_removed(prev, frame)
+                           if self.m.light_aware and raw >= self.m.changed_percent else raw)
         if self.last_score >= self.m.changed_percent:
             self._run += 1
         else:
@@ -249,6 +315,8 @@ class MotionAnalyzer:
 
     def reset(self) -> None:
         self._prev, self._run, self.duplicate, self._repeats = None, 0, False, 0
+        self.light = self.light_started = False
+        self._light_until = None
 
 
 # ---------------------------------------------------------------------- detector (thread + FFmpeg)
@@ -282,6 +350,12 @@ class MotionDetector:
         self.last_error = ""
         # Set by the recorder while the no-motion fail safe is on (QuietWatch): record without motion.
         self.force_record = False
+        # Lighting (0.3.22): changes of the whole picture are counted apart from movement in part of it.
+        self.scene_motion_count = 0                     # confirmed motion that was not a light change
+        self.last_scene_motion_epoch: float | None = None
+        self.light_count = 0                            # changes of the whole picture (each counted once)
+        self.last_light_epoch: float | None = None
+        self.last_trigger = ""                          # what began the latest motion: "movement" or "light"
 
     # -------------------------------------------------------------- state (thread-safe)
     def healthy(self) -> bool:
@@ -320,7 +394,8 @@ class MotionDetector:
                 "seconds_since_motion": None if since is None else round(since, 1),
                 "keep_recording_s": self.m.keep_recording_s, "motion_count": self.motion_count,
                 "last_score_percent": round(self.analyzer.last_score, 2), "restarts": self.restarts,
-                "forced": self.force_record}
+                "forced": self.force_record, "trigger": self.last_trigger, "light_count": self.light_count,
+                "last_light_epoch": self.last_light_epoch, "scene_motion_count": self.scene_motion_count}
 
     # -------------------------------------------------------------- lifecycle
     def start(self) -> MotionDetector:
@@ -388,6 +463,36 @@ class MotionDetector:
                         delay)
             self._stop.wait(delay)
 
+    def _on_frame(self, frame: bytes) -> None:
+        """One analysed picture: motion or not, and whether it is a change of the whole picture."""
+        now_mono, now = self.mono(), self.clock()
+        with self._lock:
+            self.last_frame_mono = now_mono
+        confirmed = self.analyzer.feed(frame, now_mono)
+        self._track(now, confirmed)
+        if self.analyzer.light_started:
+            with self._lock:
+                self.light_count += 1
+                self.last_light_epoch = now
+        if confirmed:
+            light = self.analyzer.light
+            with self._lock:
+                first = self.last_motion_mono is None or now_mono - self.last_motion_mono > self.m.keep_recording_s
+                self.last_motion_mono, self.last_motion_epoch = now_mono, now
+                self.motion_count += 1
+                if first:
+                    self.last_trigger = "light" if light else "movement"
+                if not light:
+                    # Movement in part of the picture: what the no-motion fail safe counts as proof that
+                    # the detector still notices movement. A light change is not.
+                    self.scene_motion_count += 1
+                    self.last_scene_motion_epoch = now
+            if first and self.on_motion is not None:
+                try:
+                    self.on_motion(now, self.analyzer.last_score)
+                except Exception:
+                    log.exception("motion callback failed")
+
     def _run_ffmpeg(self) -> bool:
         """One FFmpeg lifetime. True if any frame arrived."""
         self.analyzer.reset()
@@ -436,21 +541,7 @@ class MotionDetector:
                 if frame is None:
                     break
                 got = True
-                now_mono, now = self.mono(), self.clock()
-                with self._lock:
-                    self.last_frame_mono = now_mono
-                confirmed = self.analyzer.feed(frame)
-                self._track(now, confirmed)
-                if confirmed:
-                    with self._lock:
-                        first = self.last_motion_mono is None or now_mono - self.last_motion_mono > self.m.keep_recording_s
-                        self.last_motion_mono, self.last_motion_epoch = now_mono, now
-                        self.motion_count += 1
-                    if first and self.on_motion is not None:
-                        try:
-                            self.on_motion(now, self.analyzer.last_score)
-                        except Exception:
-                            log.exception("motion callback failed")
+                self._on_frame(frame)
         finally:
             self._close_period()                     # stream ended: the period ends at its last motion
             self._kill()
@@ -647,7 +738,14 @@ def run_motion_test(cfg: Any, seconds: float = 60.0, out: Callable[[str], None] 
     out(f"Watching {'the second stream ' + m.stream_path if m.stream_path else 'key frames of the main stream'} "
         f"for {seconds:.0f} s. Motion = at least {m.changed_percent:g} % of the picture changed by more than "
         f"{m.pixel_threshold} levels, in {m.min_frames} analysed frame(s) in a row. Walk through the scene now.")
-    shown_motion = 0
+    if m.light_aware:
+        out(f"Lighting is on: a change of at least {m.light_change_percent:g} % of the picture at once is the light "
+            "being switched and counts as motion at once (shown as LIGHT); an even change of brightness is "
+            "cancelled out. Switch the room light off and on to try it.")
+    else:
+        out(f"A change of at least {m.light_change_percent:g} % of the picture at once is shown as LIGHT. It is "
+            "motion only if MOTION is shown as well (Settings > Motion > Lighting makes it motion at once).")
+    shown_motion = shown_light = 0
     try:
         for i in range(int(seconds)):
             sleep(1.0)
@@ -657,10 +755,14 @@ def run_motion_test(cfg: Any, seconds: float = 60.0, out: Callable[[str], None] 
                 out(f"{i + 1:4d}s  {state}")
                 continue
             moving = det.motion_count > shown_motion
-            shown_motion = det.motion_count
+            light = det.light_count > shown_light
+            shown_motion, shown_light = det.motion_count, det.light_count
             bar = "#" * min(40, int(snap["last_score_percent"] / max(m.changed_percent, 0.01) * 10))
-            out(f"{i + 1:4d}s  changed {snap['last_score_percent']:6.2f} %  {'MOTION' if moving else '      '}  {bar}")
+            out(f"{i + 1:4d}s  changed {snap['last_score_percent']:6.2f} %  {'MOTION' if moving else '      '}  "
+                f"{'LIGHT  ' if light else ''}{bar}")
     finally:
         det.stop()
-    out(f"Done: motion seen {det.motion_count} time(s). (Ten '#' = exactly the motion threshold.)")
+    out(f"Done: motion seen {det.motion_count} time(s), of which movement in part of the picture "
+        f"{det.scene_motion_count}; the whole picture changed {det.light_count} time(s). "
+        "(Ten '#' = exactly the motion threshold.)")
     return 0 if det.last_frame_mono is not None else 4

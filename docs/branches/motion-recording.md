@@ -112,6 +112,51 @@ fills the drives sooner; the storage and archive alerts (S-, A-, L-) apply as us
 Neither key is written to the settings file while the option is off, so 0.3.20 and earlier (which refuse a
 key they do not know) can still read the file; with it on, both keys have to be removed before going back.
 
+## Lighting, dust and insects (0.3.22, owner request 2026-11-18)
+
+The site: a camera in a ceiling tile, a room with windows and **one light switch**. The owner's rule: the
+light going on or off means someone is there, so it must record; daylight getting brighter or dimmer must
+not, and neither should dust or an insect passing the lens.
+
+Settings › Motion › **Lighting** (off by default):
+
+    [motion]
+    light_aware = true
+    light_change_percent = 60     # only written when it is not 60 (20..100)
+
+* **The light being switched is motion at once.** A change of at least `light_change_percent` of the picture
+  between two analysed frames starts recording immediately, whatever "Frames in a row" says. Without the
+  option a light that changes in one step is ONE changed frame and is missed with "Frames in a row" at 2,
+  unless the camera goes on adjusting its exposure in the next frame (likely on a real camera, never on the
+  simulated one). The recording that starts is logged as `motion_record` with `trigger = "light"`
+  (`"movement"` otherwise).
+* **An even brightening or darkening of less than that share is cancelled out** before the frames are
+  compared (`MotionAnalyzer.even_change_removed`): the earlier frame is made as bright as the later one is
+  on average, and a point counts only if it differs both from the earlier frame as it was and from the
+  brightened one. So cancelling can remove a change, never add one (a window that stays white while the
+  room darkens is not a change). Example: the room 20 % brighter, half the picture above the brightness
+  threshold: 50 % "changed" before, 0 % after.
+* **Whether or not the option is on,** a change of the whole picture, and the three seconds after it while
+  the camera settles, do not set the no-motion count back (previous section): only movement in part of the
+  picture shows that the detector still notices movement. This is what keeps a camera that changes to night
+  vision every evening from looking like one that works.
+* **The live test** (Settings › Motion, or `Sentinel.exe motion-test`) shows `LIGHT` in the second in which
+  the whole picture changed, and ends with how often that happened. Switch the room light off and on while
+  it runs.
+
+**Dust and insects** need no new option; two existing settings do it, tuned with the live test:
+"Share of picture that must change" (a speck or a small insect covers far less of a ceiling camera's
+picture than a person: try 2-3 %), and Advanced › "Frames in a row" (at 4 analysed frames a second, 4 means
+the change must last a second; dust and an insect flying past are gone sooner).
+
+Limits. What this does **not** defeat: an insect on or right at the lens (large, blurred and it stays: the
+same as a person to this detector); light that really moves in part of the picture (a sun patch cut by a
+fast cloud edge, shadows of branches or blinds in the wind, headlights sweeping across the room); only
+ignore zones for those parts of the picture would, and they are not built. Slow changes of daylight were
+never a problem (frames a quarter of a second apart barely differ). With the option on, anything that
+changes most of the picture at once is motion: the camera changing to night vision, someone standing
+directly under the lens. That costs one recording of `keep_recording_s`, and loses nothing.
+
 ## Limits (read before relying on it)
 
 * **Recording starts a few seconds after motion begins.** Detection takes about 0.5–1 s on the
@@ -146,6 +191,26 @@ key they do not know) can still read the file; with it on, both keys have to be 
   (real recorder, simulated camera, a limit of 15 s): still scene, recording starts by the fail safe with
   W-003, the box moves, the fail safe ends, recording stops `keep_recording_s` after the motion.
   **Not tried:** on the real camera; over real days (the tests use seconds); with the Windows services.
+* Full suite on 0.3.21 on the second development machine (2026-11-18, evening): 1621 passed, 2 skipped,
+  1 failed: `test_time_accuracy.py::test_absorbed_freeze_is_still_a_gap_under_drift` ("the absorbed jump
+  leaked into the drift correction"), the test that fails now and then on that machine. That evening it
+  failed most of the time, on the unchanged version as well: run alone and in turn, 0.3.20 passed 3 times
+  out of 10 and 0.3.21 once out of 15 (the last ten of those with the Sentinel installed on that machine
+  stopped, which made no difference). With counts this small the two cannot be told apart, and no code of
+  0.3.21 runs in this test (motion recording is off in it). In every failure seen, the recorder reports its
+  time correction as rate-limited at about 10 s into the run ("measured reception time moved faster than
+  ... ppm at stream time 10.0 s / 10.5 s"); the same line appears in a motion test whose run is 10 s long.
+  **Open:** why the estimate jumps there on that machine and whether it does on the laptop; to be looked at
+  with a full run on the first development machine, idle, before the next keyed release.
+* `tests/unit/test_motion_light.py` (0.3.22): a clean light switch is one changed frame (missed without the
+  option, motion at once with it); an even change of brightness cancelled out; someone moving while the
+  brightness changes; cancelling never adds a change; the detector's two counts (all motion / movement in
+  part of the picture) and the settling time; the live test's `LIGHT`. Window test: the option on the Motion
+  page (nothing written while off). `tests/integration/test_motion_service.py::
+  test_the_room_light_being_switched_starts_a_recording_at_once` (real recorder; the simulated camera's
+  still scene made brighter in one step at 20 s and darker again at 45 s): two recordings, each started by
+  the light. **Not tried:** on the real camera and room; with real daylight; how this camera's exposure
+  behaves when the light is switched.
 * Measured with the simulator (key frames, 1 per second, `min_frames = 2`): detection ≈ 2.7 s after
   the box started moving; `Sentinel.exe motion-test` output: 0.00 % for the still scene, 6–12 % with
   the box.

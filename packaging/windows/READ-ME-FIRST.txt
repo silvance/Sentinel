@@ -20,6 +20,10 @@ support and read them the code.
 
 Do not move, rename or delete anything in this folder.
 
+To watch recordings from an archive drive (or from the office's copy of one):
+open the folder "1 - Watch the recordings" on it and double-click a day.
+The whole day plays in order. Leave the folder "Sentinel" on the drive alone.
+
 
 For the installing technician
 -----------------------------
@@ -37,7 +41,9 @@ For the installing technician
 * The same tasks are available as commands for scripting and support
   (Command Prompt in this folder): Sentinel.exe about [--verify], check-config,
   status, diagnostics, stop, setup [--camera-later], set-camera, schedule,
-  motion-test, drives list|prepare|eject, archive ..., export run|status,
+  motion-test, av-test (ten seconds of picture and sound from the camera),
+  onvif-probe (what the camera says about itself; changes nothing),
+  drives list|prepare|eject, archive ..., export run|status,
   ledger head|verify (recording-log chain head for the custody form at every
   drive swap; Command Prompt as administrator).
 * licences\ contains the third-party licences and SOURCE-OFFER.txt.

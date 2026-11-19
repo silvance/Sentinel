@@ -5,6 +5,7 @@ per local day."""
 from __future__ import annotations
 
 import os
+import stat
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -214,16 +215,40 @@ def test_playlists_follow_the_local_day_in_time_order() -> None:
         _entry(f"{c}/Quarantine/2026-11-12/y.ts", "2026-11-12T03:00:00.000000Z", "", "quarantine"),
     ]
     files = idx.build_playlists("CAM01", entries, tz)
-    # 23:00Z and 01:00Z are the evening of 11 November in New York; 06:00Z is 01:00 on the 12th
-    assert sorted(files) == [f"{c}/Playlists/2026-11-11.m3u", f"{c}/Playlists/2026-11-12.m3u"]
-    text = files[f"{c}/Playlists/2026-11-11.m3u"].decode("ascii")
+    # 23:00Z and 01:00Z are the evening of 11 November in New York; 06:00Z is 01:00 on the 12th.
+    # 0.3.22: in the folder for people at the top of the drive, named by date and weekday.
+    wed, thu = ("1 - Watch the recordings/2026-11-11 Wednesday - CAM01.m3u",
+                "1 - Watch the recordings/2026-11-12 Thursday - CAM01.m3u")
+    assert sorted(files) == [wed, thu]
+    text = files[wed].decode("ascii")
     lines = text.split("\r\n")
     assert lines[0] == "#EXTM3U" and text.endswith("\r\n")
     paths = [ln for ln in lines if ln and not ln.startswith("#")]
-    assert paths == ["../2026-11-11/230000Z_000000Z_aaaaaaaa.ts", "../2026-11-12/010000Z_020000Z_bbbbbbbb.ts"]
+    assert paths == ["../Sentinel/CAM01/2026-11-11/230000Z_000000Z_aaaaaaaa.ts",
+                     "../Sentinel/CAM01/2026-11-12/010000Z_020000Z_bbbbbbbb.ts"]
     assert "#EXTINF:3600,CAM01 2026-11-11 18:00:00-19:00:00 EST" in lines
-    other = files[f"{c}/Playlists/2026-11-12.m3u"].decode("ascii")
+    other = files[thu].decode("ascii")
     assert "060000Z_070000Z_cccccccc.ts" in other and "framehash" not in other and "Quarantine" not in other
+
+
+def test_the_names_for_people_do_not_look_like_a_review_drive() -> None:
+    """A review drive is recognised by README_FIRST.txt, Recordings, Manifests, Originals at its top (and an
+    archive drive with those is refused as one). The way in for people must not use those names."""
+    from sentinel.archive.worker import REVIEW_LAYOUT
+    from sentinel.drives.marker import REVIEW_DIRS
+
+    top = {layout.WATCH_DIR.lower(), layout.START_HERE.lower()}
+    assert not top & {n.lower() for n in REVIEW_LAYOUT} and not top & set(REVIEW_DIRS)
+    assert layout.WATCH_DIR < layout.ROOT                        # sorts before "Sentinel" in the folder list
+    assert layout.playlist_rel_path("CAM 1", "2026-11-18") == "1 - Watch the recordings/2026-11-18 Wednesday - CAM_1.m3u"
+    assert layout.playlist_rel_path("CAM01", "undated") == "1 - Watch the recordings/undated - CAM01.m3u"
+    notes = idx.people_files()
+    assert set(notes) == {"START HERE.txt", "1 - Watch the recordings/How to watch.txt"}
+    for data in notes.values():
+        text = data.decode("ascii")                              # plain ASCII, Windows line ends
+        assert "\r\n" in text and "\n" not in text.replace("\r\n", "")
+    assert b'Open the folder "1 - Watch the recordings"' in notes["START HERE.txt"]
+    assert b'Leave the folder "Sentinel" alone' in notes["START HERE.txt"]
 
 
 def test_worker_writes_playlists_that_point_at_the_verified_copies(env: Env) -> None:
@@ -247,11 +272,42 @@ def test_worker_writes_playlists_that_point_at_the_verified_copies(env: Env) -> 
     # not evidence: the checksums list does not name them
     sums = (Path(a.root) / layout.index_files(env.cfg.camera.id)["sums"]).read_text("utf-8")
     assert ".m3u" not in sums
-    before = {p: p.stat().st_mtime_ns for p in lists}
+    # 0.3.22: they are the first thing on the drive, with the two notes for people; the day folders are not
+    assert pdir == Path(a.root) / "1 - Watch the recordings" and (pdir / "How to watch.txt").is_file()
+    assert (Path(a.root) / "START HERE.txt").read_bytes() == idx.people_files()["START HERE.txt"]
+    assert all(p.name.endswith(f" - {env.cfg.camera.id}.m3u") and p.name[11:].split(" ")[0] in layout.WEEKDAYS
+               for p in lists)
+    assert not (Path(a.root) / layout.old_playlist_dir(env.cfg.camera.id)).exists()
+    assert ".txt" not in sums.replace(".framehash.txt", "")     # the notes are not evidence either
+    before = {p: p.stat().st_mtime_ns for p in [*lists, Path(a.root) / "START HERE.txt", pdir / "How to watch.txt"]}
     w2 = env.worker(Bays(a), CappedIO({}))                      # attach again: unchanged lists are not rewritten
     w2.resume()
     drain(w2)
-    assert {p: p.stat().st_mtime_ns for p in lists} == before
+    assert {p: p.stat().st_mtime_ns for p in before} == before
+
+
+def test_playlists_left_by_an_earlier_version_are_replaced(env: Env) -> None:
+    """A drive written by 0.3.21 or earlier has Sentinel/<camera>/Playlists/<date>.m3u beside the day
+    folders. The next index write puts the playlists at the top of the drive and removes the old set, and
+    nothing else: the recordings, the index and other files in that folder stay."""
+    add_synthetic_run(env.ledger, env.cfg, 3, SEG, sidecars=True)
+    a = make_drive(env.tmp, "A")
+    old = Path(a.root) / layout.old_playlist_dir(env.cfg.camera.id)
+    old.mkdir(parents=True)
+    (old / "2026-11-10.m3u").write_text("#EXTM3U\r\n../2026-11-10/x.ts\r\n", "ascii")
+    (old / "2026-11-11.m3u").write_text("#EXTM3U\r\n", "ascii")
+    os.chmod(old / "2026-11-11.m3u", stat.S_IREAD)              # read-only, as files on the drive often are
+    (old / "notes of an examiner.txt").write_text("keep me", "ascii")
+    w = env.worker(Bays(a), CappedIO({}))
+    drain(w)
+    w.request_swap()
+    assert w.step() == "swapped"
+    assert sorted(p.name for p in old.iterdir()) == ["notes of an examiner.txt"]     # only the old playlists went
+    new = sorted((Path(a.root) / layout.WATCH_DIR).glob("*.m3u"))
+    assert new and all((p.parent / ln).resolve().is_file() for p in new
+                       for ln in p.read_text("ascii").splitlines() if ln and not ln.startswith("#"))
+    originals = [p for p in (Path(a.root) / layout.ROOT).rglob("*.ts")]
+    assert len(originals) == 3
 
 
 @pytest.mark.skipif(os.name != "nt", reason="drive text formatting only")

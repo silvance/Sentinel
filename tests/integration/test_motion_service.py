@@ -109,6 +109,43 @@ def test_no_motion_for_too_long_records_all_the_time_until_motion_is_seen(tmp_pa
     assert saved["format"] == "sentinel-motion-quiet" and saved["active"] is False
 
 
+def test_the_room_light_being_switched_starts_a_recording_at_once(tmp_path: Path) -> None:
+    """Owner request 2026-11-18 (0.3.22): the room has one light switch, so the light going on or off means
+    someone is there. With [motion] light_aware the change of the whole picture is motion at once. Still scene,
+    nothing moves; the light goes on at 20 s and off at 45 s of the camera's stream. Each is one changed
+    picture, which "2 frames in a row" alone does not count as motion."""
+    with SimulatedCamera(fps=15, motion=[], light=[(20, 45)]) as cam:
+        t0 = time.time()
+        h = Harness(tmp_path, cam.url, schedule=MOTION_ALWAYS,
+                    motion={"keep_recording_s": KEEP, "min_frames": 2, "light_aware": True}).start()
+        try:
+            wait_for(lambda: h.status().get("overall") == "WATCHING", 30, what="WATCHING")
+            assert h.runs() == []                                     # still scene, light off: nothing recorded
+            wait_for(lambda: len(h.runs()) == 1, 40, what="recording started by the light going on")
+            on = time.time() - t0
+            assert 20.0 <= on <= 28.0, on
+            wait_for(lambda: h.runs()[0]["end_reason"] == "motion_idle", 40, what="first recording stopped")
+            stopped = time.time() - t0
+            assert 20.0 + KEEP - 1.0 <= stopped <= 20.0 + KEEP + 10.0, stopped
+            wait_for(lambda: len(h.runs()) == 2, 40, what="recording started by the light going off")
+            off = time.time() - t0
+            assert 45.0 <= off <= 53.0, off
+            # the status file follows within a moment
+            st = wait_for(lambda: (s := h.status())["motion"]["light_count"] == 2 and s, 10, what="both light changes")
+            assert st["motion"]["scene_motion_count"] == 0            # the light, not movement in the room
+            wait_for(lambda: h.runs()[1]["end_reason"] == "motion_idle", 40, what="second recording stopped")
+        finally:
+            h.stop()
+    runs = h.runs()
+    assert [r["end_reason"] for r in runs] == ["motion_idle", "motion_idle"]
+    for r in runs:
+        segs = [s for s in h.segments() if s["run_id"] == r["run_id"]]
+        assert segs and {s["state"] for s in segs} == {"FINALIZED"}
+    rec = [json.loads(e["detail"]) for e in h.events("motion_record")]
+    assert [(d["why"], d["trigger"]) for d in rec] == [("motion_detected", "light")] * 2
+    assert not [e for e in h.events() if e["severity"] == "error"]
+
+
 def test_working_hours_record_without_motion(tmp_path: Path) -> None:
     """A 'record' period (working hours) records the still scene; motion rules do not apply."""
     now = time.time()

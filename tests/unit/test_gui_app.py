@@ -1677,3 +1677,90 @@ def test_status_page_shows_the_no_motion_fail_safe(app: QApplication, tmp_path: 
                                                       "the time until motion is seen again (W-003)"}
     assert row(doc)[1].startswith("ON: no motion seen in 2 days of watching")
     assert page_for_code("W-003") == "motion"
+
+# ---------------------------------------------------------------------- lighting (0.3.22)
+def test_motion_page_switches_lighting_on_and_off(app: QApplication, tmp_path: Path,
+                                                  monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(base, "restart_recorder", lambda p, c: "Restarted.")
+    w = _window(app, tmp_path, admin=True)
+    w.navigate("motion")
+    page = w.pages["motion"]
+
+    def raw_motion() -> dict:
+        return tomllib.loads(Path(w.ctx.cfg_path).read_text(encoding="utf-8"))["motion"]
+
+    def save() -> None:
+        page.save()
+        _drain(app, 0.3)
+
+    assert not page.light.isChecked() and not page.light.isHidden()
+    assert page.light_percent.value() == 60 and page.light_percent.isHidden()          # under Advanced
+    save()
+    # off: nothing new is written, so a version before 0.3.22 (which refuses keys it does not know) reads the file
+    assert "light_aware" not in raw_motion() and "light_change_percent" not in raw_motion()
+    page.light.setChecked(True)
+    save()
+    assert raw_motion()["light_aware"] is True and "light_change_percent" not in raw_motion()
+    m = load_config(w.ctx.cfg_path).motion
+    assert m.light_aware and m.light_change_percent == 60.0 and page.light.isChecked()
+    page.advanced.set_open(True)
+    page.light_percent.setValue(45)
+    save()
+    assert raw_motion()["light_change_percent"] == 45.0
+    assert load_config(w.ctx.cfg_path).motion.light_change_percent == 45.0 and page.light_percent.value() == 45
+    page.light.setChecked(False)
+    page.light_percent.setValue(60)
+    save()
+    assert "light_aware" not in raw_motion() and "light_change_percent" not in raw_motion()
+    assert load_config(w.ctx.cfg_path).motion.light_aware is False
+    w.close()
+
+# ---------------------------------------------------------------------- picture-and-sound test (0.3.22)
+def test_camera_page_tests_picture_and_sound_and_forgets_the_clip(app: QApplication, tmp_path: Path,
+                                                                 monkeypatch: pytest.MonkeyPatch) -> None:
+    from sentinel import avtest
+
+    monkeypatch.setattr(avtest.tempfile, "gettempdir", lambda: str(tmp_path / "tmp"))
+    clip = avtest.clip_path()
+    clip.parent.mkdir(parents=True)
+    clip.write_bytes(b"left by an earlier session")
+    calls: list[tuple] = []
+
+    def fake(ffmpeg: str, ffprobe: str, url: str, transport: str, input_format: Any, seconds: float, out: Any,
+             records_sound: Any) -> tuple[int, Path]:
+        calls.append((url, transport, seconds, records_sound))
+        clip.parent.mkdir(parents=True, exist_ok=True)
+        clip.write_bytes(b"clip")
+        for line in ("Asking the camera what it sends...", "Recording 10 seconds for the test (not saved...)",
+                     "Picture: H.264, 1920x1080, 30 pictures a second; 10.0 s received (300 pictures).",
+                     "Sound: the camera sends G.711 A-law, 8000 Hz, 1 channel. In this test: loudest -5 dB, average "
+                     "-27 dB (0 dB is the loudest possible). Play the clip to hear it.",
+                     "Sentinel is NOT set to record sound (Settings > Camera > Record the camera's sound with the video).",
+                     f"Test clip: {clip}", "It is not evidence. It is replaced by the next test..."):
+            out(line)
+        return 0, clip
+
+    monkeypatch.setattr(avtest, "av_test", fake)
+    opened: list[str] = []
+    monkeypatch.setattr(settings_pages, "open_with_its_program", lambda p: opened.append(str(p)) or True)
+    w = _window(app, tmp_path / "w", admin=True)
+    assert not clip.exists()                                  # a clip left behind goes when the window opens
+    w.navigate("camera")
+    page = w.pages["camera"]
+    assert page.av_btn.isEnabled() and page.av_btn.text().strip() == "Test picture and sound"
+    assert page.av_play.isHidden()
+    page.av_test()
+    end = time.monotonic() + 5.0
+    while page.av_play.isHidden() and time.monotonic() < end:
+        _drain(app, 0.05)
+    text = page.av_result.text()
+    assert text.startswith("✔ Picture: H.264, 1920x1080") and "Sound: the camera sends G.711 A-law" in text
+    assert "Sentinel is NOT set to record sound" in text and "Test clip" not in text and "Asking" not in text
+    assert calls == [("rtsp://192.0.2.64:554/Streaming/Channels/101", "tcp", 10.0, False)]
+    assert not page.av_play.isHidden() and page.av_btn.isEnabled() and clip.exists()
+    page.av_play.click()
+    assert opened == [str(clip)]
+    w.navigate("status")                                      # leaving the page: the clip does not stay
+    app.processEvents()
+    assert not clip.exists() and page.av_play.isHidden()
+    w.close()

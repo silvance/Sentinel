@@ -34,6 +34,14 @@ def form(parent: QWidget | None = None) -> QFormLayout:
     return f
 
 
+def open_with_its_program(path: Any) -> bool:
+    """Open a file with whatever program this computer uses for it (a video player for a clip)."""
+    from PySide6.QtCore import QUrl
+    from PySide6.QtGui import QDesktopServices
+
+    return bool(QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))))
+
+
 class SettingsPage(Page):
     """A page whose fields are saved to the configuration, then the recorder is restarted."""
 
@@ -197,6 +205,25 @@ class CameraPage(SettingsPage):
         self.test_result.setWordWrap(True)
         row.addWidget(self.test_result, 1)
         self.body.addLayout(row)
+        # Owner request 2026-11-18: the live view's still pictures say nothing about sound. Ten seconds
+        # straight from the camera, what arrived, and the clip to listen to (sentinel.avtest).
+        av = QHBoxLayout()
+        self.av_btn = self.editor(icon_button("Test picture and sound", "play", ctx.palette.text))
+        self.av_btn.setToolTip("Records about ten seconds straight from the camera, says what picture and sound "
+                               "arrived, and lets you play it. Not saved with the recordings.")
+        self.av_btn.clicked.connect(self.av_test)
+        av.addWidget(self.av_btn)
+        self.av_play = QPushButton("Play the test clip")
+        self.av_play.setVisible(False)
+        self.av_play.clicked.connect(self._av_play)
+        av.addWidget(self.av_play)
+        self.av_result = QLabel()
+        self.av_result.setWordWrap(True)
+        self.av_result.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        av.addWidget(self.av_result, 1)
+        self.body.addLayout(av)
+        self.av_clip: Any = None
+        self._av_forget()                        # a clip left by an earlier session goes now
         from .liveview import LiveView
 
         lbox = QGroupBox("Live view (main stream, from the recorder, with the saved settings)")
@@ -214,10 +241,67 @@ class CameraPage(SettingsPage):
 
     def on_hide(self) -> None:
         self.live.stop()
+        self._av_forget()
+
+    def _av_forget(self) -> None:
+        """The test clip shows the scene, with sound, outside the recordings: it goes when the page is left."""
+        from ... import avtest
+
+        if self.av_clip is not None or avtest.clip_path().exists():
+            avtest.delete_clip()
+        self.av_clip = None
+        self.av_play.setVisible(False)
+
+    def av_test(self) -> None:
+        cfg = self.cfg
+        if cfg is None:
+            return
+        try:
+            url, creds = self._url(), self._creds()
+        except Exception as exc:  # noqa: BLE001
+            self.av_result.setText(str(exc))
+            return
+        from ... import avtest
+        from ...credentials import url_with_credentials
+
+        self._av_forget()
+        self.av_btn.setEnabled(False)
+        self.av_result.setText("Recording about ten seconds from the camera for the test. Make some noise in "
+                               "front of it now…")
+        transport = str(self.transport.currentData())
+        lines: list[str] = []
+        task = Task(lambda: avtest.av_test(cfg.tools.ffmpeg, cfg.tools.ffprobe, url_with_credentials(url, creds),
+                                           transport, cfg.camera.input_format, avtest.DEFAULT_SECONDS, lines.append,
+                                           self.audio.isChecked()), self)
+
+        def done(res: object, err: object) -> None:
+            self.av_btn.setEnabled(self.ctx.admin and not self.pending.isChecked())
+            if err is not None:
+                self.av_result.setText(f"The test could not run: {err}")
+                return
+            code, clip = res  # type: ignore[misc]
+            # what the camera sent, without the two progress lines and the file's place
+            shown = [ln for ln in lines if ln.startswith(("Picture:", "Sound:", "Sentinel is", "The camera", "No test",
+                                                          "The test"))]
+            self.av_result.setText(("✔ " if code == 0 else "✖ ") + "\n".join(shown or lines))
+            self.av_result.setObjectName("ok" if code == 0 else "critical")
+            self.av_result.style().polish(self.av_result)
+            self.av_clip = clip
+            self.av_play.setVisible(clip is not None)
+
+        task.done.connect(done)
+        self._tasks.append(task)
+        task.start()
+
+    def _av_play(self) -> None:
+        if self.av_clip is None:
+            return
+        if not open_with_its_program(self.av_clip):
+            self.av_result.setText(self.av_result.text() + f"\nNo program opened the clip. It is at {self.av_clip}")
 
     def _pending_changed(self, on: bool) -> None:
         for w in (self.host, self.port, self.path, self.transport, self.user, self.password, self.test_btn,
-                  self.audio, self.audio_format):
+                  self.audio, self.audio_format, self.av_btn):
             w.setEnabled(self.ctx.admin and not on)
 
     def load(self) -> None:
@@ -932,8 +1016,20 @@ class MotionPage(SettingsPage):
         self.stream_note = Note()
         f.addRow("", self.stream_note)
         self.stream.textChanged.connect(lambda _t: self._show_detection_address())
+        # Owner request 2026-11-18 (the room has one light switch and windows): the light being switched is
+        # someone in the room; daylight getting brighter or dimmer is not.
+        self.light = self.editor(QCheckBox("Lighting: the room light being switched counts as motion at once; "
+                                           "even changes of brightness are ignored"))
+        f.addRow(self.light)
+        f.addRow("", Note("A change of most of the picture at once is the light being switched: recording starts "
+                          "without waiting for more frames. A smaller, even brightening or darkening (daylight, the "
+                          "camera adjusting) is cancelled out. The live test shows LIGHT when the whole picture "
+                          "changed."))
         # GUI review 2026-11-17: the settings above are the ones a site adjusts; the rest is tuning.
         self.advanced = AdvancedRows(f, "Fine tuning of the detector; the defaults suit most scenes.")
+        self.light_percent = self._spin(20, 100, " %", "A change of at least this share of the picture at once is "
+                                                        "the light being switched")
+        self.advanced.add("Share of picture that means the light", self.light_percent)
         self.threshold = self._spin(5, 200, "", "Brightness change (0–255) that counts as a change")
         self.advanced.add("Brightness change that counts", self.threshold)
         self.frames = self._spin(1, 20, "", "Analysed frames in a row that must show change")
@@ -1020,6 +1116,8 @@ class MotionPage(SettingsPage):
         self.fps.setValue(float(m.analysis_fps))
         self.unhealthy.setValue(int(m.unhealthy_after_s))
         self.merge.setValue(int(m.marker_merge_s))
+        self.light.setChecked(m.light_aware)
+        self.light_percent.setValue(int(m.light_change_percent))
         self.quiet_on.setChecked(m.no_motion_days > 0)
         self.quiet_days.setValue(float(m.no_motion_days) if m.no_motion_days > 0 else 2.0)
         picked = days_from_config(list(m.no_motion_count_days))
@@ -1061,7 +1159,11 @@ class MotionPage(SettingsPage):
             "pixel_threshold": self.threshold.value(), "min_frames": self.frames.value(),
             "analysis_fps": round(self.fps.value(), 1), "unhealthy_after_s": self.unhealthy.value(),
             "marker_merge_s": self.merge.value()}
-        # Written only while it is on: versions before 0.3.21 refuse keys they do not know.
+        # Written only while they are on or changed: earlier versions refuse keys they do not know.
+        if self.light.isChecked():
+            table["light_aware"] = True
+        if self.light_percent.value() != 60:
+            table["light_change_percent"] = float(self.light_percent.value())
         if self.quiet_on.isChecked():
             table["no_motion_days"] = round(self.quiet_days.value(), 1)
             table["no_motion_count_days"] = days_to_config(self.quiet_count.days())

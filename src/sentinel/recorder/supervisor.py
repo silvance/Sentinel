@@ -440,6 +440,8 @@ class RecordingSupervisor:
                                                           "(fail safe)",
                                    "schedule_changed": "Recording schedule changed: recording"}[why],
                                   {"why": why, "waiting_since_utc": iso_utc(wall),
+                                   # "light": the whole picture changed at once (the room light); "movement"
+                                   "trigger": (snap.get("trigger") or None) if why == "motion_detected" else None,
                                    "motion_utc": iso_utc(snap["last_motion_epoch"]) if snap.get("last_motion_epoch")
                                    else None, "changed_percent": snap.get("last_score_percent")})
         except Exception:

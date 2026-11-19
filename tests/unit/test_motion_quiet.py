@@ -211,7 +211,8 @@ def service(tmp_path: Path, schedule: dict, **motion: Any) -> tuple[Any, Any, Ev
     """The recorder's own step (RecorderService._watch_quiet) with a detector that can be told what it saw."""
     conf = make_config(tmp_path, schedule=schedule, motion={"no_motion_days": 0.001, **motion})
     now = SimpleNamespace(wall=epoch("2026-11-16 12:00"), mono=0.0)                # a Monday
-    det = SimpleNamespace(healthy=lambda: True, motion_count=0, last_motion_epoch=None, force_record=False)
+    det = SimpleNamespace(healthy=lambda: True, motion_count=0, last_motion_epoch=None, force_record=False,
+                          scene_motion_count=0, last_scene_motion_epoch=None)
     led = Events()
     svc = SimpleNamespace(cfg=conf, quiet=QuietWatch(conf.motion), motion=det, ledger=led,
                           schedule=RecordingSchedule(conf.schedule),
@@ -239,7 +240,11 @@ def test_the_recorder_switches_to_recording_all_the_time_and_back(tmp_path: Path
     for _ in range(5):
         svc.step()
     assert det.force_record and len(led.rows) == 1                           # said once
-    det.motion_count, det.last_motion_epoch = 1, svc.now.wall + 9.0          # someone walks in
+    det.motion_count, det.last_motion_epoch = 1, svc.now.wall + 5.0          # the light is switched: not counted
+    svc.step()
+    assert det.force_record is True and len(led.rows) == 1
+    det.motion_count, det.scene_motion_count = 2, 1                          # someone walks in
+    det.last_motion_epoch = det.last_scene_motion_epoch = svc.now.wall + 9.0
     svc.step()
     assert det.force_record is False
     assert led.rows[-1][:3] == ("audit", "motion", "motion_quiet_ended") and len(led.rows) == 2

@@ -364,8 +364,10 @@ class RecorderService:
             return
         try:
             wall = self.clock.wall()
+            # Movement in part of the picture only: the light being switched (a change of the whole picture)
+            # records, but does not show that the detector still notices movement (0.3.22).
             change = q.update(self.clock.mono(), wall, watching=m.healthy(), counts=counts_now(s, q.days, wall),
-                              motion_count=m.motion_count, last_motion_epoch=m.last_motion_epoch)
+                              motion_count=m.scene_motion_count, last_motion_epoch=m.last_scene_motion_epoch)
             m.force_record = q.active
             if change is None or self.ledger is None:
                 return

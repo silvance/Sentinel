@@ -41,6 +41,15 @@ and only after the copy has been checked. A Sentinel SSD reformatted elsewhere c
    date, who copied it, and the last line of the check (e.g. `1432 files checked, 0 problems`).
 7. Eject the SSD (Safely Remove Hardware) and give it back to the agent **unchanged**, with the sheet.
 
+## Watching the recordings (0.3.22)
+
+On the SSD, and in the folder it was copied into, the way in is the same: open **`1 - Watch the recordings`**
+and double-click a day (for example `2026-11-18 Wednesday - CAM01`). The whole day plays in order. `START
+HERE.txt` beside it says so in six lines. The day files only point at the original recordings in the folder
+`Sentinel` next to them, which is why the whole SSD is copied into one folder and nothing in it is moved.
+Nobody needs to open the `Sentinel` folder to watch. (SSDs last written by 0.3.21 or earlier have the day
+files in `Sentinel\<camera>\Playlists\` instead.)
+
 ## On the laptop (agent)
 
 1. Plug the returned SSD in. (With the Sabrent dock: Swap and safely remove first and take the drive in use

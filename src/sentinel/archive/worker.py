@@ -1078,6 +1078,11 @@ class ArchiveWorker:
             if cam.is_dir():
                 targets += [p for p in cam.rglob("*") if p.is_file() and (
                     p.suffix == layout.PLAYLIST_SUFFIX or layout.SET_ASIDE_MARK in p.name)]
+            # This camera's playlists in the folder for people at the top of the drive (0.3.22). The folder
+            # and its two notes stay.
+            watch = root / layout.playlist_dir(self.camera_id)
+            if watch.is_dir():
+                targets += [p for p in watch.glob("*" + layout.playlist_name_end(self.camera_id)) if p.is_file()]
         deleted, failed = 0, []
         for p in targets:
             self._heartbeat()
@@ -1672,15 +1677,35 @@ class ArchiveWorker:
         on this drive; it is not evidence, so a failure is logged and never stops archiving. Unchanged
         playlists are not rewritten."""
         try:
-            files = idx.build_playlists(self.camera_id, entries, self.tz)
-            if files:
-                self.io.makedirs(root / layout.playlist_dir(self.camera_id))
+            # The way in for people (0.3.22): the folder at the top of the drive, with its two notes, is there
+            # from the first index on, also while the drive holds no recording yet.
+            files = {**idx.people_files(), **idx.build_playlists(self.camera_id, entries, self.tz)}
+            self.io.makedirs(root / layout.playlist_dir(self.camera_id))
             for rel, data in files.items():
                 if self._read_drive_file(root / rel) == data:
                     continue
                 self.io.replace_file(root / rel, data, verify=lambda p: self._read_hash(p)[0])
+            self._remove_old_playlists(root)
         except Exception as exc:  # noqa: BLE001 - playlists are a convenience
             log.warning("could not write the archive playlists: %s", exc)
+
+    def _remove_old_playlists(self, root: Path) -> None:
+        """Until 0.3.21 the playlists were in Sentinel/<camera>/Playlists/. Two sets would send people back to
+        the folder beside the day folders, so the old ones go once the new ones are written. Only ``.m3u``
+        files in that one folder are deleted: they point at recordings and are not evidence."""
+        old = root / layout.old_playlist_dir(self.camera_id)
+        if not old.is_dir():
+            return
+        for p in old.glob("*" + layout.PLAYLIST_SUFFIX):
+            try:
+                os.chmod(p, stat.S_IWRITE | stat.S_IREAD)
+                p.unlink()
+            except OSError as exc:
+                log.warning("an old playlist could not be removed (%s): %s", type(exc).__name__, p.name)
+        try:
+            old.rmdir()                  # only if it is empty now
+        except OSError:
+            pass
 
     def _anchor_on_drive(self, root: Path, reason: str) -> None:
         """Copy the recording log's fingerprint (chain head) onto the archive drive, append-only, every
