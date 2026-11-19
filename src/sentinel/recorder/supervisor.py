@@ -428,12 +428,16 @@ class RecordingSupervisor:
         snap = m.snapshot() if m is not None else {}
         why = ("motion_detected" if snap.get("seconds_since_motion") is not None
                and snap["seconds_since_motion"] <= self.cfg.motion.keep_recording_s
-               else "detector_not_working" if m is not None and not m.healthy() else "schedule_changed")
+               else "detector_not_working" if m is not None and not m.healthy()
+               else "no_motion_fail_safe" if m is not None and getattr(m, "force_record", False)
+               else "schedule_changed")
         log.info("recording again (%s)", why)
         try:
             self.ledger.add_event("audit", "motion", "motion_record",
                                   {"motion_detected": "Motion detected: recording",
                                    "detector_not_working": "Motion detection not working: recording (fail safe)",
+                                   "no_motion_fail_safe": "No motion seen for a long time: recording all the time "
+                                                          "(fail safe)",
                                    "schedule_changed": "Recording schedule changed: recording"}[why],
                                   {"why": why, "waiting_since_utc": iso_utc(wall),
                                    "motion_utc": iso_utc(snap["last_motion_epoch"]) if snap.get("last_motion_epoch")

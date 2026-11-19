@@ -55,6 +55,7 @@ class Measurements:
     motion_idle: bool = False                   # motion period, waiting for motion (planned; P-003)
     motion_broken: bool = False                 # motion period but the detector gets no pictures (W-001)
     motion_record_failures: int = 0             # recordings after motion that got no video, in a row (W-002)
+    motion_quiet: bool = False                  # no motion for the set number of counted days: records (W-003)
     audio_missing: bool = False                 # sound is switched on but the recording holds none (N-001)
     audio_suspended: bool = False               # sound switched off after recording with it failed (N-002)
 
@@ -117,6 +118,9 @@ def evaluate(m: Measurements, stall_timeout_s: float, segment_seconds: float, co
         # W-001 says "Recording continues": only true while video is recorded. Otherwise the outage
         # alert names the real cause (review 2026-11-12: camera off in a motion period).
         alerts.append(make_alert("W-001", Severity.WARNING))
+    elif m.motion_quiet and flowing:
+        # Same rule as W-001: it says "Recording continues", so only while video is recorded.
+        alerts.append(make_alert("W-003", Severity.WARNING))
     if m.motion_record_failures:
         alerts.append(make_alert("W-002", Severity.CRITICAL, detail={"failed_attempts": m.motion_record_failures}))
     # Sound was asked for and is not in the recording. Both say "video recording continues": only while it does.

@@ -949,6 +949,29 @@ class MotionPage(SettingsPage):
         self.advanced.add("Join markers closer than", self.merge)
         self.body.addWidget(capped(box))
 
+        # Owner request 2026-11-18: a detector that gets pictures but no longer notices movement records
+        # nothing and shows no fault. After a set time without any motion, record all the time instead.
+        quiet = QGroupBox("If no motion is seen for a long time")
+        q = form(quiet)
+        self.quiet_on = self.editor(QCheckBox("Record all the time when no motion has been seen for the time below"))
+        q.addRow(self.quiet_on)
+        self.quiet_days = self.editor(QDoubleSpinBox())
+        self.quiet_days.setRange(0.5, 30)
+        self.quiet_days.setDecimals(1)
+        self.quiet_days.setSingleStep(0.5)
+        self.quiet_days.setSuffix(" days")
+        self.quiet_days.setToolTip("Days of watching without any motion before the recorder records all the time")
+        q.addRow("Time without motion", self.quiet_days)
+        self.quiet_count = self.editor(DaysPicker(set(DAY_KEYS[:5])))
+        q.addRow("Days that count", self.quiet_count)
+        q.addRow("", Note("For a camera that was moved or covered, or settings that no longer notice movement: "
+                          "nothing looks broken, but nothing is recorded. Days off and other particular dates on the "
+                          "Schedule tab are not counted, nor are schedule pauses or the days not picked here. "
+                          "Recording goes back to motion only by itself when motion is seen; until then the screen "
+                          "shows W-003."))
+        self.quiet_on.toggled.connect(self._quiet_enable)
+        self.body.addWidget(capped(quiet))
+
         test = QGroupBox("Live test (walk through the scene while it runs; records nothing)")
         tl = QVBoxLayout(test)
         row = QHBoxLayout()
@@ -997,8 +1020,18 @@ class MotionPage(SettingsPage):
         self.fps.setValue(float(m.analysis_fps))
         self.unhealthy.setValue(int(m.unhealthy_after_s))
         self.merge.setValue(int(m.marker_merge_s))
+        self.quiet_on.setChecked(m.no_motion_days > 0)
+        self.quiet_days.setValue(float(m.no_motion_days) if m.no_motion_days > 0 else 2.0)
+        picked = days_from_config(list(m.no_motion_count_days))
+        for key, b in self.quiet_count.buttons.items():
+            b.setChecked(key in picked)
+        self._quiet_enable(self.quiet_on.isChecked())
         self._show_detection_address()
         self.result.clear()
+
+    def _quiet_enable(self, on: bool) -> None:
+        for w in (self.quiet_days, self.quiet_count):
+            w.setEnabled(bool(on) and self.ctx.admin)
 
     def _show_detection_address(self) -> None:
         """Say which address the detector will read, so a path that is not one shows before it is saved."""
@@ -1022,11 +1055,17 @@ class MotionPage(SettingsPage):
     def tables(self) -> dict[str, dict[str, Any]]:
         from ...motion import stream_path_only
 
-        return {"motion": {"markers": self.markers.isChecked(), "stream_path": stream_path_only(self.stream.text()),
-                           "keep_recording_s": self.keep.value(), "changed_percent": round(self.percent.value(), 2),
-                           "pixel_threshold": self.threshold.value(), "min_frames": self.frames.value(),
-                           "analysis_fps": round(self.fps.value(), 1), "unhealthy_after_s": self.unhealthy.value(),
-                           "marker_merge_s": self.merge.value()}}
+        table: dict[str, Any] = {
+            "markers": self.markers.isChecked(), "stream_path": stream_path_only(self.stream.text()),
+            "keep_recording_s": self.keep.value(), "changed_percent": round(self.percent.value(), 2),
+            "pixel_threshold": self.threshold.value(), "min_frames": self.frames.value(),
+            "analysis_fps": round(self.fps.value(), 1), "unhealthy_after_s": self.unhealthy.value(),
+            "marker_merge_s": self.merge.value()}
+        # Written only while it is on: versions before 0.3.21 refuse keys they do not know.
+        if self.quiet_on.isChecked():
+            table["no_motion_days"] = round(self.quiet_days.value(), 1)
+            table["no_motion_count_days"] = days_to_config(self.quiet_count.days())
+        return {"motion": table}
 
     def _test(self) -> None:
         if self.ctx.cfg_path is None:

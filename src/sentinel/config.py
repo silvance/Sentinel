@@ -475,7 +475,9 @@ def load_config_dict(raw: dict[str, Any], base_dir: Path | None = None, source: 
         raise ConfigError(str(exc)) from None
     # A second stream path saved as an address ("192.168.0.10:554/stream2", accepted up to 0.3.18) means its
     # path: the same value everywhere it is used or shown (field report 2026-11-18).
-    motion = replace(cfg.motion, stream_path=stream_path_only(cfg.motion.stream_path))
+    days = cfg.motion.no_motion_count_days          # a TOML list (or one name); kept as a tuple of names
+    motion = replace(cfg.motion, stream_path=stream_path_only(cfg.motion.stream_path),
+                     no_motion_count_days=(days,) if isinstance(days, str) else tuple(days))
     return replace(cfg, schedule=sched, motion=motion)
 
 

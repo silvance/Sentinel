@@ -70,6 +70,48 @@ until walking through is always MOTION and the empty scene never is). Holidays: 
 * Working-hours (`record`) and `pause` periods behave as before; the detector keeps running in
   them (so a motion period starts with a warm detector).
 
+## No-motion fail safe (0.3.21, owner request 2026-11-18)
+
+The fail safe above covers a detector that gets **no pictures**. It does not cover one that gets pictures
+and no longer notices movement: the camera was moved or covered, the second stream shows a frozen picture,
+the settings are too coarse for the scene. Nothing looks broken, and nothing is recorded outside the
+recording hours.
+
+Settings › Motion › **If no motion is seen for a long time** (off by default):
+
+    [motion]
+    no_motion_days = 2                    # 0 = off; up to 60
+    no_motion_count_days = ["weekdays"]   # mon..sun, "weekdays", "weekend", "daily"
+
+* **The count.** `sentinel.motion.QuietWatch` adds up the time the detector has been getting pictures
+  without confirming any motion. It looks at the detector all the time, in recording hours too, so an
+  ordinary working day sets it back to zero many times. Any confirmed motion sets it to zero.
+* **Not counted:** days of the week outside `no_motion_count_days`; schedule pauses; **the schedule's
+  particular dates** (Schedule › Days off…, holidays: `[[schedule.dates]]`, whatever their action), because
+  nobody is expected to move then; time without pictures (that is W-001); time the recorder was not running.
+* **At the limit** (`no_motion_days` × 24 h of counted watching) the recorder records all the time in motion
+  periods: alert **W-003** "No motion has been seen for a long time, so the recorder records all the time",
+  recording-log entry `motion_quiet_fail_safe` (with the hours watched and the last motion), and the
+  recording that starts is logged as `motion_record` with `why = no_motion_fail_safe`.
+* **It ends by itself** with the next confirmed motion (`motion_quiet_ended`): the detector works after
+  all. A detector that really is blind never sees motion, so recording stays on until someone puts the
+  camera or the settings right.
+* **Status › Schedule and motion › No-motion fail-safe** shows the count ("no motion for 5 h of the 2 days
+  allowed") and whether it is counting now.
+* The count is kept in `motion_quiet.json` in the data folder across restarts of the recorder, and deleted
+  when the option is switched off.
+* Example with the defaults (2 days, Monday to Friday): last motion Friday 17:30; Saturday and Sunday are
+  not counted; with nothing seen on Monday and Tuesday it switches on Tuesday 17:30.
+
+Limits: a public holiday that is not entered as days off counts like any working day, so two of them in a
+row switch it on (recording all the time is the safe side; it costs disk space, about 2.5 times the weekly
+amount with the usual working-hours schedule). A detector that still fires on something that is not the
+scene (the camera's day/night switch once an evening) looks like one that works. Recording all the time
+fills the drives sooner; the storage and archive alerts (S-, A-, L-) apply as usual.
+
+Neither key is written to the settings file while the option is off, so 0.3.20 and earlier (which refuse a
+key they do not know) can still read the file; with it on, both keys have to be removed before going back.
+
 ## Limits (read before relying on it)
 
 * **Recording starts a few seconds after motion begins.** Detection takes about 0.5–1 s on the
@@ -96,6 +138,14 @@ until walking through is always MOTION and the empty scene never is). Holidays: 
   scene and a box that moves at set times): nothing recorded while still; motion starts ONE
   recording; a second motion within the timer extends it; it stops `keep_recording_s` after the
   last motion; files sealed; one `motion_idle` gap; working hours record without motion.
+* `tests/unit/test_motion_quiet.py` (0.3.21): the no-motion count (what counts, the limit, motion setting
+  it back, a long gap between two looks, kept across restarts, an unreadable or unwritable count), the
+  recorder's step with days off and weekends, W-003 only while video is recorded. Window tests: the option
+  on the Motion page (not written while off, refused with no day picked), the Status line.
+  `tests/integration/test_motion_service.py::test_no_motion_for_too_long_records_all_the_time_until_motion_is_seen`
+  (real recorder, simulated camera, a limit of 15 s): still scene, recording starts by the fail safe with
+  W-003, the box moves, the fail safe ends, recording stops `keep_recording_s` after the motion.
+  **Not tried:** on the real camera; over real days (the tests use seconds); with the Windows services.
 * Measured with the simulator (key frames, 1 per second, `min_frames = 2`): detection ≈ 2.7 s after
   the box started moving; `Sentinel.exe motion-test` output: 0.00 % for the still scene, 6–12 % with
   the box.

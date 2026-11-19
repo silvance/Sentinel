@@ -60,7 +60,7 @@ from .ledger_timing import insert_clock_observation
 from .recorder.supervisor import RecordingSupervisor
 from .recorder.timebase import ClockStepDetector, read_clock_pair
 from .status import Measurements, StatusDocument, apply_alerts, evaluate, fatal_status_document, write_status
-from .motion import MotionDetector, detection_url
+from .motion import QUIET_STATE, MotionDetector, QuietWatch, counts_now, detection_url, quiet_duration
 from .schedule import RecordingSchedule, pause_message, render_plan
 from .storage.monitor import DiskUsage, StorageMonitor
 from .timesync import query_os_time_sync, sntp_offset
@@ -168,6 +168,8 @@ class RecorderService:
         self.schedule = RecordingSchedule(cfg.schedule) if cfg.schedule.enabled else None
         # Schedule action "motion": Sentinel's own motion detector (sentinel.motion).
         self.motion: MotionDetector | None = None
+        # [motion] no_motion_days: record all the time once the detector has seen nothing for too long.
+        self.quiet: QuietWatch | None = None
         self.preview: Any = None                 # sentinel.preview.PreviewWorker (live view on demand)
         # Unattended laptop: keep Windows from idle-sleeping, check the power plan (sentinel.power).
         self.keep_awake: KeepAwake | None = None
@@ -267,6 +269,16 @@ class RecorderService:
             log.info("motion detection on (%s; keep recording %.0f s after the last motion)",
                      f"second stream {cfg.motion.stream_path}" if cfg.motion.stream_path else "main stream key frames",
                      cfg.motion.keep_recording_s)
+        quiet_path = cfg.data_path / QUIET_STATE
+        if self.motion is not None and uses_motion and cfg.motion.no_motion_days > 0:
+            self.quiet = QuietWatch(cfg.motion, quiet_path)
+            self.motion.force_record = self.quiet.active
+            log.info("no-motion fail safe on: records all the time after %g counted day(s) without motion "
+                     "(counting %s; %s so far%s)", cfg.motion.no_motion_days,
+                     ", ".join(self.quiet.snapshot()["count_days"]), quiet_duration(self.quiet.quiet_s),
+                     "; ON now" if self.quiet.active else "")
+        else:
+            QuietWatch.forget(quiet_path)        # off: an old count is not used when it is switched on later
         if not cfg.camera.pending:
             # Live view for the window, on demand only (sentinel.preview); never affects recording.
             from .preview import PreviewWorker
@@ -310,6 +322,8 @@ class RecorderService:
                 self.keep_awake.stop()
             if self.motion is not None:
                 self.motion.stop()
+            if self.quiet is not None:
+                self.quiet.save(self.clock.wall())
             if self.preview is not None:
                 self.preview.stop()
             if not drained:
@@ -341,6 +355,35 @@ class RecorderService:
                                    "source": "second stream" if self.cfg.motion.stream_path else "main stream key frames"})
         except LedgerClosed:
             log.info("motion period %s-%s not logged: service stopping", iso_utc(start), iso_utc(end))
+
+    def _watch_quiet(self) -> None:
+        """No-motion fail safe: count the watching time without motion and switch the fail safe on or off
+        (sentinel.motion.QuietWatch). Never stops the recording loop."""
+        q, m, s = self.quiet, self.motion, self.schedule
+        if q is None or m is None or s is None:
+            return
+        try:
+            wall = self.clock.wall()
+            change = q.update(self.clock.mono(), wall, watching=m.healthy(), counts=counts_now(s, q.days, wall),
+                              motion_count=m.motion_count, last_motion_epoch=m.last_motion_epoch)
+            m.force_record = q.active
+            if change is None or self.ledger is None:
+                return
+            snap = q.snapshot()
+            detail = {"no_motion_days": self.cfg.motion.no_motion_days, "count_days": snap["count_days"],
+                      "watched_without_motion_s": snap["quiet_s"], "last_motion_utc": snap["last_motion_utc"]}
+            if change == "started":
+                log.warning("no motion seen in %s of watching: recording all the time until motion is seen",
+                            quiet_duration(q.quiet_s))
+                self.ledger.add_event("warning", "motion", "motion_quiet_fail_safe",
+                                      "No motion seen for the set number of days: recording all the time until "
+                                      "motion is seen again (fail safe)", detail)
+            else:
+                log.info("motion seen again: recording only on motion again")
+                self.ledger.add_event("audit", "motion", "motion_quiet_ended",
+                                      "Motion seen again: the no-motion fail safe is off", detail)
+        except Exception:
+            log.exception("the no-motion fail safe could not be evaluated")
 
     def _motion_broken(self) -> bool:
         """W-001: a motion period is in force but the detector gets no pictures (it then records)."""
@@ -378,6 +421,7 @@ class RecorderService:
         self.platform.notify("WATCHDOG=1")
         now = self.clock.mono()
         self._check_clock(now)
+        self._watch_quiet()
         if now >= self._next_power_check:
             self._next_power_check = now + POWER_CHECK_INTERVAL_S
             self._check_power()
@@ -742,6 +786,7 @@ class RecorderService:
             scheduled_pause=paused, resumed_s=(now - resumed_mono) if resumed_mono is not None else None,
             camera_pending=cfg.camera.pending, motion_idle=motion_idle,
             motion_broken=self._motion_broken(), motion_record_failures=motion_failures,
+            motion_quiet=bool(self.quiet is not None and self.quiet.active),
             audio_missing=audio_missing, audio_suspended=audio_suspended)
         d = evaluate(m, rec.stall_timeout_s, rec.segment_seconds, rec.connect_timeout_s, rec.escalate_after_s)
         if self.schedule is not None:
@@ -777,6 +822,8 @@ class RecorderService:
                           "waiting": motion_idle,
                           "source": f"second stream {cfg.motion.stream_path}" if cfg.motion.stream_path
                           else "main stream key frames"}
+            if self.quiet is not None:
+                doc.motion["quiet"] = self.quiet.snapshot()
         alerts = list(d.alerts)
         if self._power_risks:
             h = make_alert("H-001", Severity.WARNING, detail={"risks": list(self._power_risks)})
@@ -975,6 +1022,14 @@ def _cmd_check(args: argparse.Namespace) -> int:
               "'Sentinel set-camera' on site.")
     if cfg.schedule.enabled:
         print(render_plan(RecordingSchedule(cfg.schedule), time.time(), days=7))
+    if cfg.motion.no_motion_days > 0:
+        days = ", ".join(cfg.motion.no_motion_count_days)
+        if cfg.schedule.enabled and RecordingSchedule(cfg.schedule).uses_motion:
+            print(f"no-motion fail safe: records all the time after {cfg.motion.no_motion_days:g} counted day(s) "
+                  f"without motion (counting {days}; schedule pauses and particular dates are not counted)")
+        else:
+            print("NOTE: [motion] no_motion_days is set, but the schedule has no 'record on motion' period, so "
+                  "it does nothing.")
     for p in problems:
         print(f"PROBLEM: {p}")
     print("configuration OK" if not problems else "configuration has problems")

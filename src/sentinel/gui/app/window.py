@@ -31,7 +31,8 @@ WATCH_LIMIT_S = 180.0          # ... for up to 3 minutes ...
 WATCH_PASSES = 3               # ... until it passes 3 times in a row (not a passing moment while starting)
 
 # Where an alert is dealt with (first letter of the code; some codes individually).
-CODE_PAGES = {"P-001": "schedule", "P-003": "motion", "W-001": "motion", "W-002": "camera", "P-002": "camera",
+CODE_PAGES = {"P-001": "schedule", "P-003": "motion", "W-001": "motion", "W-003": "motion", "W-002": "camera",
+              "P-002": "camera",
               "S-001": "export", "R": "camera",
               "C": "system", "S": "system", "T": "system", "H": "system", "X": "system", "V": "system",
               "A": "drives", "M": "drives", "L": "drives", "E": "export", "Z": "camera", "N": "camera"}

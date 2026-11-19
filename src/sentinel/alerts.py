@@ -136,6 +136,11 @@ CATALOG: dict[str, AlertDef] = {d.code: d for d in [
     # Motion was seen but the recording that should follow failed (review 2026-11-10: this was
     # shown as "Waiting for motion ... No action is needed").
     AlertDef("W-002", "Motion was detected but could not be recorded", SUPPORT, True),
+    # No-motion fail safe ([motion] no_motion_days): the detector gets pictures but has seen no motion for
+    # the set number of counted days, so it may no longer notice movement (0.3.21).
+    AlertDef("W-003", "No motion has been seen for a long time, so the recorder records all the time",
+             "Recording continues, and goes back to recording on motion by itself when motion is seen. Check "
+             "that the camera still shows the scene. " + SUPPORT, False),
     # N-: souNd ([camera] include_audio). Neither stops the video; both mean the recordings have no sound.
     AlertDef("N-001", "Sound is switched on, but the recordings have no sound",
              "Video recording continues. Check the camera's microphone and its sound setting. " + SUPPORT, False),

@@ -150,6 +150,12 @@ changed_percent = 1.0              # share of the picture that must change
 pixel_threshold = 25               # brightness change that counts (0-255)
 min_frames = 2                     # analysed frames in a row
 analysis_fps = 4                   # second stream only
+# No-motion fail safe (0.3.21; off unless set): a detector that gets pictures but has confirmed no motion for
+# this many counted days may no longer notice movement, so the recorder records all the time (W-003) until
+# motion is seen again. Not counted: days outside no_motion_count_days, schedule pauses, and the schedule's
+# particular dates (days off, holidays). Versions before 0.3.21 refuse these two keys.
+#   no_motion_days = 2
+#   no_motion_count_days = ["weekdays"]   # mon..sun, "weekdays", "weekend", "daily"
 
 # Optional: the organisation using this recorder. Shown in the window, on diagnostic reports and on
 # review-drive summaries. Leave out (or empty) to name no organisation. One line, at most 100 characters.

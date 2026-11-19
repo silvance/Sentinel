@@ -58,6 +58,57 @@ def test_records_only_around_motion_and_restarts_the_timer(tmp_path: Path) -> No
     assert not [e for e in h.events() if e["severity"] == "error"]
 
 
+def test_no_motion_for_too_long_records_all_the_time_until_motion_is_seen(tmp_path: Path) -> None:
+    """Owner request 2026-11-18: a detector that gets pictures but sees no motion for the set time may no
+    longer notice movement, so the recorder records all the time (W-003) until motion is seen again.
+    Still scene; the limit is 15 s of watching (0.00018 days), every day counts; a box moves at 50-55 s."""
+    quiet_days = 15.0 / 86400.0
+    with SimulatedCamera(fps=15, motion=[(50, 55)]) as cam:
+        t0 = time.time()
+        h = Harness(tmp_path, cam.url, schedule=MOTION_ALWAYS,
+                    motion={"keep_recording_s": KEEP, "min_frames": 2, "no_motion_days": quiet_days,
+                            "no_motion_count_days": ["daily"]}).start()
+        try:
+            st = wait_for(lambda: (s := h.status()).get("overall") == "WATCHING" and s, 30, what="WATCHING")
+            assert st["motion"]["quiet"]["active"] is False and "allowed" in st["motion"]["quiet"]["text"]
+            assert h.runs() == []                                     # still scene: nothing recorded yet
+            wait_for(lambda: len(h.runs()) == 1, 40, what="recording started by the fail safe")
+            started = time.time() - t0
+            assert 14.0 <= started <= 30.0, started                   # after ~15 s of watching, well before 50 s
+            st = wait_for(lambda: (s := h.status()).get("overall") == "RECORDING" and s, 30, what="RECORDING")
+            assert "W-003" in [a["code"] for a in st["alerts"]] and st["motion"]["quiet"]["active"] is True
+            assert st["motion"]["quiet"]["text"].startswith("ON: no motion seen in")
+            assert time.time() - t0 < 48.0, "the fail safe must be recording before the box moves"
+            # The box moves: the detector works after all. Back to recording on motion only.
+            wait_for(lambda: h.events("motion_quiet_ended"), 40, what="fail safe switched off by motion")
+            ended = time.time() - t0
+            assert 49.0 <= ended <= 62.0, ended
+            wait_for(lambda: h.runs()[0]["end_reason"] == "motion_idle", 40, what="recording stopped after the motion")
+            stopped = time.time() - t0
+            assert 55.0 + KEEP - 1.0 <= stopped <= 55.0 + KEEP + 8.0, stopped
+            st = wait_for(lambda: (s := h.status()).get("overall") == "WATCHING" and s, 20, what="WATCHING again")
+            assert "W-003" not in [a["code"] for a in st["alerts"]] and st["motion"]["quiet"]["active"] is False
+        finally:
+            h.stop()
+    runs = h.runs()
+    assert len(runs) == 1 and runs[0]["end_reason"] == "motion_idle"         # one recording, closed normally
+    segs = [s for s in h.segments() if s["run_id"] == runs[0]["run_id"]]
+    assert segs and {s["state"] for s in segs} == {"FINALIZED"}
+    rec = h.events("motion_record")
+    assert len(rec) == 1 and json.loads(rec[0]["detail"])["why"] == "no_motion_fail_safe"
+    on = h.events("motion_quiet_fail_safe")
+    assert len(on) == 1 and on[0]["severity"] == "warning"
+    detail = json.loads(on[0]["detail"])
+    assert detail["count_days"] == ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+    assert 15.0 <= detail["watched_without_motion_s"] <= 20.0 and detail["last_motion_utc"] is None
+    off = json.loads(h.events("motion_quiet_ended")[0]["detail"])
+    assert t0 + 49.0 <= parse_iso_utc(off["last_motion_utc"]) <= t0 + 60.0
+    assert not [e for e in h.events() if e["severity"] == "error"]
+    # The count is kept for the next start of the recorder.
+    saved = json.loads((h.cfg.data_path / "motion_quiet.json").read_text("utf-8"))
+    assert saved["format"] == "sentinel-motion-quiet" and saved["active"] is False
+
+
 def test_working_hours_record_without_motion(tmp_path: Path) -> None:
     """A 'record' period (working hours) records the still scene; motion rules do not apply."""
     now = time.time()

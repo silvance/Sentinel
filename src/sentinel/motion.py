@@ -30,6 +30,13 @@ Fail safe. If the detector gets no frames for ``unhealthy_after_s`` (camera seco
 unreachable, FFmpeg failing), :meth:`MotionDetector.recording_wanted` says "record": a broken
 detector never stops recording; the status shows W-001.
 
+No-motion fail safe (``no_motion_days``, off by default; 0.3.21). A detector that still gets pictures
+but no longer notices movement (camera moved or covered, a frozen second stream, settings too coarse)
+looks healthy and would record nothing. :class:`QuietWatch` adds up how long the detector has watched,
+on days that count, without seeing any motion; at ``no_motion_days`` the recorder records all the
+time (W-003) until motion is seen again. Not counted: days of the week outside
+``no_motion_count_days``, schedule pauses, and the schedule's particular dates (days off, holidays).
+
 Honest limits (also in docs/branches/motion-recording.md): recording starts a few seconds after
 motion begins (detection, then connecting to the main stream and waiting for its next key frame);
 nothing before the trigger is kept. Slow movement, small objects far away, darkness and the
@@ -39,7 +46,9 @@ camera's day/night switch can be missed or cause false triggers; tune on site wi
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import re
 import subprocess
 import sys
@@ -48,14 +57,23 @@ import time
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
+
+from .schedule import DAY_GROUPS, DAY_NAMES
 
 log = logging.getLogger(__name__)
 
 WIDTH, HEIGHT = 160, 120
 FRAME_BYTES = WIDTH * HEIGHT
 MAX_PERIOD_S = 300.0          # a longer stretch of motion is logged in parts (none is lost in a crash)
+DAY_S = 86400.0
+MAX_NO_MOTION_DAYS = 60.0
+QUIET_STATE = "motion_quiet.json"     # in the data folder: QuietWatch's count, kept across restarts
+QUIET_MAX_STEP_S = 120.0      # a longer gap between two looks (computer asleep, recorder stuck) is not watching
+QUIET_SAVE_EVERY_S = 60.0
 
 
 class MotionConfigError(ValueError):
@@ -73,6 +91,29 @@ class MotionConfig:
     unhealthy_after_s: float = 15.0
     markers: bool = False              # log motion periods for reviewers (deployed configurations: true)
     marker_merge_s: float = 10.0       # motion less than this far apart is one period
+    # No-motion fail safe (QuietWatch). 0 = off. Neither key is written to the settings file while it is
+    # off, so versions before 0.3.21 (which refuse a key they do not know) can still read the file.
+    no_motion_days: float = 0.0        # record all the time once this many counted days passed without motion
+    no_motion_count_days: tuple[str, ...] = ("weekdays",)   # mon..sun, "weekdays", "weekend", "daily"
+
+
+def count_day_numbers(value: Any) -> frozenset[int]:
+    """``no_motion_count_days`` as weekday numbers (0 = Monday). Written like the schedule's ``days``."""
+    items = [value] if isinstance(value, str) else list(value) if isinstance(value, (list, tuple)) else []
+    full = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+    out: set[int] = set()
+    for it in items:
+        key = it.strip().lower() if isinstance(it, str) else None
+        if key in DAY_GROUPS:
+            out.update(DAY_GROUPS[key])
+        elif key in DAY_NAMES or key in full:
+            out.add(DAY_NAMES.index(key[:3]))
+        else:
+            raise MotionConfigError(f"[motion] no_motion_count_days: unknown day {it!r} (use mon, tue, wed, thu, "
+                                    "fri, sat, sun, weekdays, weekend or daily)")
+    if not out:
+        raise MotionConfigError('[motion] no_motion_count_days must name at least one day, for example ["weekdays"]')
+    return frozenset(out)
 
 
 def validate(m: MotionConfig) -> None:
@@ -88,6 +129,9 @@ def validate(m: MotionConfig) -> None:
     rng("analysis_fps", 0.5, 15)
     rng("unhealthy_after_s", 5, 300)
     rng("marker_merge_s", 1, 300)
+    if not 0 <= m.no_motion_days <= MAX_NO_MOTION_DAYS:
+        raise MotionConfigError(f"[motion] no_motion_days must be between 0 (off) and {MAX_NO_MOTION_DAYS:g}")
+    count_day_numbers(m.no_motion_count_days)
     p = m.stream_path
     if p and (any(c.isspace() for c in p) or "@" in p or "://" in p):
         raise MotionConfigError("[motion] stream_path must be only the path of the camera's second stream "
@@ -236,6 +280,8 @@ class MotionDetector:
         self.motion_count = 0
         self.restarts = 0
         self.last_error = ""
+        # Set by the recorder while the no-motion fail safe is on (QuietWatch): record without motion.
+        self.force_record = False
 
     # -------------------------------------------------------------- state (thread-safe)
     def healthy(self) -> bool:
@@ -257,10 +303,13 @@ class MotionDetector:
 
     def recording_wanted(self) -> bool:
         """Record now? Yes within keep_recording_s of the last motion, and whenever the detector is
-        not working (fail safe). In its first seconds (no frame yet, within unhealthy_after_s) it
-        is not yet known; the answer is then no, and turns into yes if no frame arrives in time."""
+        not working (fail safe) or has seen no motion for too long (``force_record``, QuietWatch). In
+        its first seconds (no frame yet, within unhealthy_after_s) it is not yet known; the answer is
+        then no, and turns into yes if no frame arrives in time."""
         since = self.seconds_since_motion()
         if since is not None and since <= self.m.keep_recording_s:
+            return True
+        if self.force_record:
             return True
         return not self.healthy() and not self.warming_up()
 
@@ -270,7 +319,8 @@ class MotionDetector:
                 "last_motion_epoch": self.last_motion_epoch,
                 "seconds_since_motion": None if since is None else round(since, 1),
                 "keep_recording_s": self.m.keep_recording_s, "motion_count": self.motion_count,
-                "last_score_percent": round(self.analyzer.last_score, 2), "restarts": self.restarts}
+                "last_score_percent": round(self.analyzer.last_score, 2), "restarts": self.restarts,
+                "forced": self.force_record}
 
     # -------------------------------------------------------------- lifecycle
     def start(self) -> MotionDetector:
@@ -425,6 +475,151 @@ def _read_exact(stream: Any, n: int) -> bytes | None:
             return None
         buf += chunk
     return bytes(buf)
+
+
+# ---------------------------------------------------------------------- no-motion fail safe
+def counts_now(schedule: Any, days: frozenset[int], epoch: float) -> bool:
+    """Does this moment count towards the no-motion fail safe? Not on a day of the week outside ``days``, not
+    while the schedule pauses, and not inside one of the schedule's particular dates (days off, holidays:
+    nobody is expected to move then). ``schedule`` is a :class:`sentinel.schedule.RecordingSchedule`."""
+    state = schedule.state_at(epoch)
+    if state.mode == "pause" or state.source == "dates":
+        return False
+    return datetime.fromtimestamp(epoch, schedule.tz).weekday() in days
+
+
+def quiet_duration(seconds: float) -> str:
+    """'2 days 3 h', '5 h', '40 min' (status wording)."""
+    s = max(0, int(seconds))
+    d, h, m = s // 86400, (s % 86400) // 3600, (s % 3600) // 60
+    if d:
+        return f"{d} day{'s' if d != 1 else ''}" + (f" {h} h" if h else "")
+    return f"{h} h" + (f" {m} min" if m and h < 10 else "") if h else f"{m} min"
+
+
+def quiet_text(snap: dict[str, Any]) -> str:
+    """One status line for the no-motion fail safe (window and ``Sentinel.exe status``)."""
+    limit = quiet_duration(float(snap.get("limit_s") or 0))
+    quiet = quiet_duration(float(snap.get("quiet_s") or 0))
+    if snap.get("active"):
+        return (f"ON: no motion seen in {quiet} of watching, so recording all the time until motion is seen "
+                "again (W-003)")
+    tail = "" if snap.get("counting") else "; not counting now (day off, pause, or a day that does not count)"
+    return f"no motion for {quiet} of the {limit} allowed{tail}"
+
+
+class QuietWatch:
+    """No-motion fail safe: how long the detector has watched, in time that counts, without seeing motion.
+
+    ``update`` is called from the recording loop every moment or so. It adds the time since the last call
+    when the detector is getting pictures (``watching``) and the moment counts (:func:`counts_now`); any
+    motion the detector confirmed since the last call sets the count back to zero. At ``no_motion_days`` the
+    fail safe switches on (``active``); the next motion switches it off. A blind detector never sees motion,
+    so it stays on until someone puts the camera or the settings right.
+
+    The count is kept in a small file in the data folder, so restarting the recorder (an update, a reboot)
+    does not start it again from zero. Time when the recorder was not running is never counted.
+    What it cannot tell: a detector that still fires on something that is not the scene (the camera's
+    day/night switch) looks like one that works."""
+
+    def __init__(self, m: MotionConfig, state_path: Path | None = None) -> None:
+        self.limit_s = float(m.no_motion_days) * DAY_S
+        self.days = count_day_numbers(m.no_motion_count_days)
+        self.state_path = Path(state_path) if state_path is not None else None
+        self.quiet_s = 0.0
+        self.active = False
+        self.active_since_epoch: float | None = None
+        self.last_motion_epoch: float | None = None
+        self.counting = False                  # the last look was added to the count
+        self._last_mono: float | None = None
+        self._seen = 0                         # the detector's motion_count at the last look
+        self._saved_mono: float | None = None
+        self._dirty = False
+        self._load()
+
+    # -------------------------------------------------------------- the look
+    def update(self, mono: float, wall: float, *, watching: bool, counts: bool, motion_count: int,
+               last_motion_epoch: float | None = None) -> str | None:
+        """Returns "started" when the fail safe switches on, "ended" when motion switches it off."""
+        dt = 0.0 if self._last_mono is None else max(0.0, min(mono - self._last_mono, QUIET_MAX_STEP_S))
+        self._last_mono = mono
+        change = None
+        if motion_count != self._seen:
+            self._seen = motion_count
+            self.last_motion_epoch = last_motion_epoch if last_motion_epoch is not None else wall
+            self._dirty = self._dirty or self.quiet_s > 0 or self.active
+            self.quiet_s, self.counting = 0.0, False
+            if self.active:
+                self.active, self.active_since_epoch, change = False, None, "ended"
+        else:
+            self.counting = bool(watching and counts)
+            if self.counting and dt > 0:
+                self.quiet_s += dt
+                self._dirty = True
+            if not self.active and self.limit_s > 0 and self.quiet_s >= self.limit_s:
+                self.active, self.active_since_epoch, change = True, wall, "started"
+        if change is not None or (self._dirty and (self._saved_mono is None
+                                                   or mono - self._saved_mono >= QUIET_SAVE_EVERY_S)):
+            self._saved_mono = mono
+            self.save(wall)
+        return change
+
+    def snapshot(self) -> dict[str, Any]:
+        from .clock import iso_utc
+
+        snap: dict[str, Any] = {
+            "limit_s": self.limit_s, "quiet_s": round(self.quiet_s, 1), "active": self.active,
+            "counting": self.counting, "count_days": [DAY_NAMES[d] for d in sorted(self.days)],
+            "active_since_utc": iso_utc(self.active_since_epoch) if self.active_since_epoch else None,
+            "last_motion_utc": iso_utc(self.last_motion_epoch) if self.last_motion_epoch else None}
+        snap["text"] = quiet_text(snap)
+        return snap
+
+    # -------------------------------------------------------------- kept across restarts
+    def save(self, wall: float) -> None:
+        if self.state_path is None:
+            return
+        doc = {"format": "sentinel-motion-quiet", "version": 1, "quiet_s": round(self.quiet_s, 1),
+               "active": self.active, "active_since_epoch": self.active_since_epoch,
+               "last_motion_epoch": self.last_motion_epoch, "saved_epoch": wall}
+        try:
+            tmp = self.state_path.with_name(self.state_path.name + ".partial")
+            tmp.write_text(json.dumps(doc), "utf-8")
+            os.replace(tmp, self.state_path)
+            self._dirty = False
+        except OSError as exc:
+            log.warning("the no-motion count could not be saved (%s); it is tried again", type(exc).__name__)
+
+    def _load(self) -> None:
+        if self.state_path is None:
+            return
+        try:
+            doc = json.loads(self.state_path.read_text("utf-8"))
+            if not isinstance(doc, dict) or doc.get("format") != "sentinel-motion-quiet":
+                raise ValueError("not a no-motion count")
+            quiet = float(doc.get("quiet_s") or 0.0)
+            if not 0 <= quiet < 10 * 365 * DAY_S:
+                raise ValueError("count out of range")
+            self.quiet_s = quiet
+            since, last = doc.get("active_since_epoch"), doc.get("last_motion_epoch")
+            # Still on only if it would be on with today's setting (the limit may have been raised).
+            self.active = bool(doc.get("active")) and self.limit_s > 0 and quiet >= self.limit_s
+            self.active_since_epoch = float(since) if self.active and isinstance(since, (int, float)) else None
+            self.last_motion_epoch = float(last) if isinstance(last, (int, float)) else None
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError, TypeError) as exc:
+            # A count that cannot be read starts again from zero: it delays the fail safe, never recording.
+            log.warning("the saved no-motion count could not be read (%s); counting from zero", exc)
+
+    @staticmethod
+    def forget(state_path: Path) -> None:
+        """The fail safe is switched off: a count left from earlier must not be used when it is switched on
+        again later."""
+        try:
+            Path(state_path).unlink()
+        except OSError:
+            pass
 
 
 # ---------------------------------------------------------------------- technician tuning

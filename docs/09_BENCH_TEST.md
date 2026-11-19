@@ -84,6 +84,7 @@ length and reason, and nothing else.
 | 4a.4 | Walk through once, note the clock time; leave. | Recording starts; check the first frame: how many seconds after you entered? Record it. | |
 | 4a.5 | Walk through again before `keep_recording_s` ends. | Same recording continues; stops `keep_recording_s` after your last movement. | |
 | 4a.6 | Unplug the camera for 1 minute during the motion period. | W-001 and/or R-alerts; after reconnecting, back to watching. | |
+| 4a.7 | No-motion fail safe (0.3.21; only if Settings › Motion › "If no motion is seen for a long time" will be used). In the settings file set `no_motion_days = 0.01` (about 15 minutes) and `no_motion_count_days = ["daily"]` under `[motion]`; restart; cover the lens or stay out of view during a motion period. | Status › No-motion fail-safe counts up ("no motion for 9 min of the 14 min allowed"). At the limit: recording starts, W-003. Uncover the lens / walk through: W-003 goes, recording stops `keep_recording_s` later. Set the real values again afterwards (Motion page). | |
 
 ## 5. Archive drive and retention
 

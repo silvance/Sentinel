@@ -1606,3 +1606,74 @@ def test_status_page_says_what_sound_the_recording_holds(app: QApplication, tmp_
     doc["recording"]["audio"].update(stored={"video": True, "codec": None}, text="NOT recorded: the camera sends no sound")
     assert sound_row(doc, include_audio=True)[1] == "NOT recorded: the camera sends no sound"
     assert page_for_code("N-001") == "camera" and page_for_code("N-002") == "camera"
+
+
+# ---------------------------------------------------------------------- no-motion fail safe (0.3.21)
+def test_motion_page_switches_the_no_motion_fail_safe_on_and_off(app: QApplication, tmp_path: Path,
+                                                                 monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(base, "restart_recorder", lambda p, c: "Restarted.")
+    said: list[str] = []
+    monkeypatch.setattr(base.QMessageBox, "warning", lambda _p, _t, text: said.append(text))
+    w = _window(app, tmp_path, admin=True)
+    w.navigate("motion")
+    page = w.pages["motion"]
+
+    def raw_motion() -> dict:
+        return tomllib.loads(Path(w.ctx.cfg_path).read_text(encoding="utf-8"))["motion"]
+
+    def save() -> None:
+        page.save()
+        _drain(app, 0.3)
+
+    assert not page.quiet_on.isChecked() and page.quiet_days.value() == 2.0
+    assert page.quiet_count.days() == {"mon", "tue", "wed", "thu", "fri"}
+    assert not page.quiet_days.isEnabled() and not page.quiet_count.isEnabled()      # nothing to set while it is off
+    save()
+    # off: neither key is written, so a version before 0.3.21 (which refuses keys it does not know) reads the file
+    assert "no_motion_days" not in raw_motion() and "no_motion_count_days" not in raw_motion()
+    page.quiet_on.setChecked(True)
+    assert page.quiet_days.isEnabled() and page.quiet_count.isEnabled()
+    save()
+    assert raw_motion()["no_motion_days"] == 2.0 and raw_motion()["no_motion_count_days"] == ["weekdays"]
+    m = load_config(w.ctx.cfg_path).motion
+    assert m.no_motion_days == 2.0 and m.no_motion_count_days == ("weekdays",)
+    assert page.quiet_on.isChecked()                                                 # shown as saved
+    page.quiet_days.setValue(1.5)
+    page.quiet_count.buttons["sat"].setChecked(True)
+    save()
+    m = load_config(w.ctx.cfg_path).motion
+    assert m.no_motion_days == 1.5 and m.no_motion_count_days == ("mon", "tue", "wed", "thu", "fri", "sat")
+    assert page.quiet_days.value() == 1.5 and "sat" in page.quiet_count.days()
+    for b in page.quiet_count.buttons.values():                                      # no day at all: refused
+        b.setChecked(False)
+    assert said == []
+    save()
+    assert len(said) == 1 and "at least one day" in said[0] and "Nothing was changed" in said[0]
+    assert load_config(w.ctx.cfg_path).motion.no_motion_days == 1.5
+    page.load()
+    page.quiet_on.setChecked(False)
+    save()
+    assert "no_motion_days" not in raw_motion() and "no_motion_count_days" not in raw_motion()
+    assert load_config(w.ctx.cfg_path).motion.no_motion_days == 0.0
+    w.close()
+
+
+def test_status_page_shows_the_no_motion_fail_safe(app: QApplication, tmp_path: Path) -> None:
+    def row(doc: dict) -> tuple[str, str]:
+        d = tmp_path / str(len(list(tmp_path.iterdir())))
+        w = _window(app, d, admin=False, doc=doc)
+        it = w.pages["status"].items["quiet"]
+        out = (it.text(0).strip(), it.text(1))
+        w.close()
+        return out
+
+    doc = status_doc(base_measurements(), time.time(), last_segment_end=time.time())
+    assert row(doc) == ("No-motion fail-safe", "off")
+    doc["motion"] = {"healthy": True, "waiting": True, "mode_now": "motion"}
+    assert row(doc)[1] == "off"                                                      # motion in use, fail safe not
+    doc["motion"]["quiet"] = {"active": False, "text": "no motion for 5 h of the 2 days allowed"}
+    assert row(doc)[1] == "no motion for 5 h of the 2 days allowed"
+    doc["motion"]["quiet"] = {"active": True, "text": "ON: no motion seen in 2 days of watching, so recording all "
+                                                      "the time until motion is seen again (W-003)"}
+    assert row(doc)[1].startswith("ON: no motion seen in 2 days of watching")
+    assert page_for_code("W-003") == "motion"

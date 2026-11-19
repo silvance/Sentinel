@@ -87,7 +87,8 @@ class StatusPage(Page):
               ("Recording", [("last", "Last file saved", "recordings"), ("since", "Current run started", "recordings"),
                              ("sound", "Sound", "camera")]),
               ("Storage and archive", [("storage", "Recording storage", "storage"), ("archive", "Archive drive", "drives")]),
-              ("Schedule and motion", [("schedule", "Schedule", "schedule"), ("motion", "Motion", "motion")]),
+              ("Schedule and motion", [("schedule", "Schedule", "schedule"), ("motion", "Motion", "motion"),
+                                       ("quiet", "No-motion fail-safe", "motion")]),
               ("System", [("clock", "Clock synchronised", "system"), ("service", "Recorder", "system")])]
     STACK_BELOW_PX = 1150      # narrower than this: the live view goes under the details
     HEADER_STACK_BELOW_PX = 1000   # narrower than this: the header's facts go under the state
@@ -487,6 +488,11 @@ class StatusPage(Page):
             state = ("waiting for motion" if mo.get("waiting") else
                      "detector not working (recording all the time)" if broken else "watching")
             self._set("motion", f"{state}; now: {mo.get('mode_now', '—')}", "warning" if broken else "ok")
+        qt = mo.get("quiet") if isinstance(mo.get("quiet"), dict) else None
+        if qt is None:
+            self._set("quiet", "off")
+        else:
+            self._set("quiet", str(qt.get("text") or "—"), "warning" if qt.get("active") else "ok")
         svc = doc.get("service") or {}
         sync = svc.get("clock_synchronized")
         self._set("clock", "yes" if sync is True else "no (T-002)" if sync is False else "unknown",
