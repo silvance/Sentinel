@@ -1038,10 +1038,24 @@ def _cmd_check(args: argparse.Namespace) -> int:
     return EXIT_OK if not problems else EXIT_CONFIG
 
 
+def stopped_text(doc: dict | None) -> str:
+    """For a status document that says the recorder shut down in an orderly way: what happened and when."""
+    try:
+        at = time.strftime(" at %Y-%m-%d %H:%M:%S UTC", time.gmtime(parse_iso_utc(str((doc or {})["generated_utc"]))))
+    except (KeyError, ValueError, OverflowError, OSError):
+        at = ""
+    return f"The recorder was stopped{at}. Nothing is recorded until it is started again."
+
+
 def banner(doc: dict | None, problem: str | None) -> str:
     """Large, unmissable text block for terminals and the support console."""
     alert = (doc or {}).get("alert")
-    if problem:
+    if (doc or {}).get("overall") == "STOPPED":
+        # Field report 2026-11-19: a recorder that was stopped in an orderly way wrote this as its last
+        # document. That is a known state however old the document is, not "RECORDER NOT RESPONDING" (and,
+        # while it was fresh, not "STOPPED / No problems detected" either).
+        title, body = "NOT RECORDING: THE RECORDER IS STOPPED", stopped_text(doc)
+    elif problem:
         title, body = "RECORDER NOT RESPONDING", problem
     elif alert and alert.get("severity", 0) >= Severity.WARNING:
         title = "RECORDING STOPPED" if alert.get("recording_stopped") else "ATTENTION REQUIRED"

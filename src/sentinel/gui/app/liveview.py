@@ -26,6 +26,7 @@ MAX_PICTURE_H = 520      # tallest picture when the panel sizes itself (Status p
 REQUEST_EVERY_S = 5.0
 STALE_S = 6.0            # older than this: the caption says the picture is old
 NO_SERVICE_S = 15.0      # nothing at all after this long: the recorder is not providing a live view
+STOPPED_TEXT = "No live view: the recorder is stopped, so nothing is read from the camera."
 
 
 class LiveView(QWidget):
@@ -71,6 +72,7 @@ class LiveView(QWidget):
         self.message = ""
         self._session: str | None = None     # one viewing session (the service pauses it after 10 minutes)
         self._hidden = False                 # stopped because the picture is not visible
+        self._was_stopped = False            # the last tick found the recorder stopped
         self.picture.mousePressEvent = lambda _e: self._resume_if_paused()
 
     # ---------------------------------------------------------------- control
@@ -133,6 +135,20 @@ class LiveView(QWidget):
             self._session = secrets.token_hex(8)
             self._last_request = 0.0
             self._started = now
+        from ..viewmodel import recorder_stopped
+
+        if recorder_stopped(self.ctx.read):
+            # Field report 2026-11-19: after Stop recorder the black picture read as a lost camera. The
+            # recorder is the only part that talks to the camera, so there is no picture while it is stopped.
+            self._was_stopped = True
+            if self.message != STOPPED_TEXT:
+                self._show_text(STOPPED_TEXT)
+            return
+        if self._was_stopped:                    # started again: count the wait for a picture from now
+            self._was_stopped = False
+            self._started = now
+            self._last_request = 0.0
+            self._show_text("Starting the live view…")
         if now - self._last_request >= REQUEST_EVERY_S:
             self._last_request = now
             try:

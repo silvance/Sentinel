@@ -409,6 +409,30 @@ def test_view_recording_and_startup_grace(tmp_path: Path) -> None:
     assert "RECORDER NOT RESPONDING" in text and not healthy
 
 
+@pytest.mark.parametrize("age_s", [1.0, 600.0])
+def test_a_recorder_that_was_stopped_is_not_called_not_responding(tmp_path: Path, age_s: float) -> None:
+    """Field report 2026-11-19: after a deliberate stop the status read "RECORDER NOT RESPONDING" once its last
+    document was 15 seconds old (and "STOPPED / No problems detected" before that). Also what System › Check
+    service prints in the window."""
+    from sentinel.clock import iso_utc
+    from sentinel.service import banner, stopped_text
+
+    st = tmp_path / "status.json"
+    now = time.time()
+    st.write_text(json.dumps({"overall": "STOPPED", "heartbeat_epoch": now - age_s, "alert": None,
+                              "generated_utc": iso_utc(now - age_s)}))
+    text, healthy = view.ConsoleStatusView(clock=lambda: now).render(st, "Front")
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(now - age_s))
+    assert "NOT RECORDING: THE RECORDER IS STOPPED" in text and f"The recorder was stopped at {stamp}." in text
+    assert "NOT RESPONDING" not in text and "No problems detected" not in text and "X-001" not in text
+    assert not healthy and view.CLOSE_NOTE not in text          # nothing "continues in the background"
+    # An old alert in that last document does not take the banner over, and a missing time is not a crash.
+    old = {"overall": "STOPPED", "alert": {"severity": 3, "recording_stopped": True, "message": "old"}}
+    assert "THE RECORDER IS STOPPED" in banner(old, "X-001 (Last update 600 s ago.)") and "old" not in banner(old, None)
+    assert stopped_text(old) == "The recorder was stopped. Nothing is recorded until it is started again."
+    assert stopped_text({"generated_utc": "not a time"}).startswith("The recorder was stopped. ")
+
+
 def test_a_start_problem_gives_way_to_the_status_once_the_recorder_runs_again(tmp_path: Path) -> None:
     """Review 2026-11-12: 'Error C-003' stayed on screen for good, also after Windows restarted the recorder."""
     st = tmp_path / "status.json"

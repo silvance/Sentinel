@@ -263,3 +263,63 @@ unmodified `main`.
 | QA 3.4 (low): Previous Exports showed raw ledger outcome strings | Fixed: fixed plain-word outcomes for every state (unknown included), drive label from `drives`, only well-formed error codes |
 | Owner: dark mode for discreet review in a dim room | Added: Display control (Light / Dark / Follow Windows), per-user memory, low-glare dark palette, AA contrast tested |
 | Remaining | One live-recorder X-001 flash of at most one refresh right after a >15 s backward clock change (documented in §6); the interface for Prepare Review Drive is still to be built |
+
+## 11. Field report 2026-11-19: a recorder that was stopped is not X-001 (0.3.25)
+
+**Report (owner, at the end user's laptop).** "When I manually click stop recording it seems to fully
+disconnect from the camera I think. It shows the Status as "Recording Stopped" for a few seconds, then
+switches to "System Error"."
+
+**Cause.** Section 2 says a stale heartbeat is X-001, and the window applied that to every recorder that no
+longer writes its status. A recorder that is stopped with System › Stop recorder (or `Sentinel.exe stop`, or a
+clean stop of the service) writes `overall = STOPPED` as its last document and then, rightly, writes nothing
+more. For the first 15 seconds the window showed that document ("Not recording"); after that its heartbeat
+was too old and the window showed X-001: "System error", "the recorder is not responding", camera "unknown".
+Before that the Status page showed the camera as "disconnected", which is what the report read as losing the
+camera. Reproduced on the development PC with a real recorder: "Not recording" at 1, 5, 10 and 14 s after the
+stop, "System error" at 17 s. `tests/unit/test_gui_viewmodel.py` asserted this X-001 until 0.3.25
+(`test_stopped_service_then_stale_reads_shut_down`); that test now asserts the opposite.
+
+**Rule since 0.3.25.** `overall = STOPPED` is written only when the recorder ends without an error
+(`RecorderService.run`: "a crash is reported as an error, never as a clean stop"), and it stays in place until
+a recorder starts and replaces it. So it is a known state however old it is: `read_status_robust` returns it
+as `ReadKind.STOPPED` (also when its heartbeat lies in the future after the clock was set back), and
+`recorder_stopped(read)` is the one test every part of the window uses. A recorder that crashed, hung or was
+killed never writes STOPPED and is X-001 exactly as before. `sentinel.status.read_status`, which the
+self-check uses, is unchanged: a stopped recorder still does not pass as "answering".
+
+**What the window shows while the recorder is stopped** (the same from the first second on):
+
+| Where | Shows |
+|---|---|
+| Large words, left panel, status bar | "Not recording" (red, as before: an evidence recorder that is off is never green) |
+| Under the large words | "The recorder was stopped at 16:08. Nothing is recorded until it is started again.", then the usual "No recording since ... so far." |
+| Under that | **Start recording** (new). Not shown while a new version is being put in place, where recording restarts by itself |
+| Alerts | "No alerts are reported while the recorder is stopped." The alerts in the last document were measured before the stop and are not shown as current |
+| Camera (header and Details) | "not in use (recorder stopped)" instead of "disconnected" |
+| Archive, clock, motion, sound | "not reported (recorder stopped)" and similar: the recorder is what measures them |
+| Recorder (Details) | "stopped (16:08)" instead of "running, version ..." (first 15 s) or "not responding" (afterwards) |
+| Status bar | "Recorder stopped" and "Recorder stopped 16:08:07" instead of "Recorder status not updating (X-001)" |
+| Live view | "No live view: the recorder is stopped, so nothing is read from the camera." The recorder is the only part that connects to the camera, so stopping it does end the camera connection; that is by design and unchanged |
+
+**Start recording** calls `base.start_recorder`: it never stops a recorder (if one runs it says so), starts it
+through the same control the launcher uses (the Windows service when that is installed, else the background
+process) and starts the archive copy if that is not running. It is offered in a read-only window too, since
+opening Sentinel starts the recorder for the same person anyway; where Windows refuses (a standard user and
+the Windows service), the message says to unlock first. It shares the restart's one-at-a-time slot, so the
+window does not close while it runs and a restart asked for meanwhile runs afterwards.
+
+Status commands (`Sentinel.exe status`, the console view, System › Check service) print "NOT RECORDING: THE
+RECORDER IS STOPPED" with the UTC time, instead of "RECORDER NOT RESPONDING" (old document) or "STOPPED / No
+problems detected" (fresh one, docs/branches/design-single-executable.md, limitation 6).
+
+**Tried (2026-11-19, development PC).** Real background recorder on the simulated camera, real window,
+`Sentinel stop`, 18 s wait, Start recording, "Recording normally" again: `tests/integration/test_gui_stop_start.py`.
+The window was also drawn with Windows' own drawing and looked at (wide and 990 px wide). Full suite on that
+PC: 1702 passed, 2 skipped, 1 failed, the timing test that fails there on unchanged versions too
+(docs/branches/motion-recording.md). **Not tried:** on
+the laptop; with the real camera; with the Windows service installed (the control is the tested
+`ServiceControl`, but a real StartService from the window was not run); pressing the button by hand.
+
+**Not changed, and worth a decision.** The recording log holds the stop (`graceful_stop`, `service_stop`) but
+not who asked for it or from where; a stop from the window is not told apart from Windows shutting down.

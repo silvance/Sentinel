@@ -119,6 +119,41 @@ def test_live_view_panel_requests_and_shows_frames(tmp_path: Path) -> None:
     app.processEvents()
 
 
+def test_live_view_says_why_there_is_no_picture_while_the_recorder_is_stopped(tmp_path: Path) -> None:
+    """Field report 2026-11-19: after Stop recorder the empty picture read as a camera that had gone away."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    pytest.importorskip("PySide6")
+    from sentinel.gui.__main__ import prepare_qt_environment
+
+    prepare_qt_environment()
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication([])
+    from sentinel.gui.app.base import Ctx
+    from sentinel.gui.app.liveview import STOPPED_TEXT, LiveView
+    from sentinel.gui.theme import pick_palette
+    from sentinel.gui.viewmodel import ReadKind, StatusRead
+
+    cfg = make_config(tmp_path)
+    t = {"now": 1_800_000_000.0}
+    ctx = Ctx(cfg=cfg, cfg_path=None, admin=False, palette=pick_palette("light"))
+    ctx.read = StatusRead({"overall": "STOPPED"}, None, ReadKind.STOPPED, 600.0)
+    lv = LiveView(ctx, clock=lambda: t["now"])
+    lv.resize(480, 320)
+    lv.show()
+    lv.start()
+    assert lv.message == STOPPED_TEXT and "recorder is stopped" in lv.picture.text()
+    assert not preview.request_path(cfg).exists()             # nothing is asked of a recorder that is not there
+    t["now"] += 60
+    lv._tick()
+    assert lv.message == STOPPED_TEXT                         # and not "not running or is still starting"
+    ctx.read = StatusRead({"overall": "STARTING"}, None, ReadKind.OK, 0.5)      # Start recording was pressed
+    lv._tick()
+    assert "Starting the live view" in lv.message             # the wait for a picture counts from now
+    assert preview.request_is_fresh(preview.request_path(cfg), time.time())
+    lv.stop()
+
+
 def test_no_camera_yet_says_so(tmp_path: Path) -> None:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     pytest.importorskip("PySide6")

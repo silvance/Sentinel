@@ -22,7 +22,7 @@ from sentinel.gui.ledger_view import (SpanKind, build_timeline, load_exports, lo
                                       recording_since, snapshot)
 from sentinel.gui.report import save_diagnostic_report
 from sentinel.gui.viewmodel import (HeartbeatWatch, ReadKind, StatusRead, Tone, build_dashboard,
-                                    read_status_robust)
+                                    read_status_robust, recorder_stopped, stopped_at, stopped_words)
 from sentinel.models import OverallStatus, StorageLevel
 from sentinel.status import StatusDocument, apply_alerts, write_status
 
@@ -244,11 +244,80 @@ def test_missing_and_unreadable_status_are_x001(tmp_path: Path) -> None:
     assert r.problem and str(tmp_path) not in v.detail and str(tmp_path) not in v.banner.message
 
 
-def test_stopped_service_then_stale_reads_shut_down(tmp_path: Path) -> None:
+@pytest.mark.parametrize("age_s", [0.5, 14.0, 16.0, 60.0, 3 * 86400.0, -3600.0])
+def test_a_recorder_that_was_stopped_is_never_a_system_error(tmp_path: Path, age_s: float) -> None:
+    """Field report 2026-11-19: fifteen seconds after Stop recorder the window changed from "Not recording" to
+    "System error" (X-001, "recorder not responding"). A recorder that shut down in an orderly way says so in
+    its last document; that is a known state however old the document is (also after the clock was set back).
+    Until that day this test asserted the X-001."""
     p = tmp_path / "status.json"
-    write_doc(p, status_doc(base_measurements(stopping=True), time.time(), heartbeat_age_s=60.0))
-    v = build_dashboard(read_status_robust(p), tz=TZ)
-    assert v.banner and v.banner.code == "X-001" and "shut down" in v.detail
+    now = time.time()
+    doc = status_doc(base_measurements(stopping=True), now, heartbeat_age_s=age_s,
+                     open_gap={"since_utc": iso_utc(now - age_s - 1), "reason": "recorder_stopped"})
+    doc["alerts"] = [make_alert("H-001", Severity.WARNING).to_dict()]      # measured before it stopped
+    doc["alert"], doc["banner"] = doc["alerts"][0], True
+    write_doc(p, doc)
+    r = read_status_robust(p, max_age_s=15.0)
+    assert r.kind is ReadKind.STOPPED and r.problem is None and recorder_stopped(r)
+    v = build_dashboard(r, tz=TZ, now=now)
+    assert (v.headline, v.tone) == ("Not recording", Tone.CRITICAL)       # not green, and not "System error"
+    assert v.stopped and not v.stale and not v.live
+    assert v.banner is None and v.notice is None and v.other_alerts == ()  # nothing old shown as current
+    assert v.supporting.startswith("The recorder was stopped") and "until it is started again" in v.supporting
+    assert v.updated.startswith("Recorder stopped")
+    assert v.camera.value == "Not in use" and "stopped" in v.camera.detail
+    if age_s > 0:
+        assert v.detail.startswith("No recording since ") and "so far" in v.detail
+
+
+def test_only_an_orderly_stop_counts_as_stopped(tmp_path: Path) -> None:
+    """A recorder that crashed or was killed never writes STOPPED: its last document goes stale and is X-001."""
+    p = tmp_path / "status.json"
+    write_doc(p, status_doc(base_measurements(), time.time(), heartbeat_age_s=60.0))
+    r = read_status_robust(p, max_age_s=15.0)
+    assert r.kind is ReadKind.STALE and not recorder_stopped(r)
+    v = build_dashboard(r, tz=TZ)
+    assert v.headline == "System error" and v.banner is not None and v.banner.code == "X-001" and not v.stopped
+    assert not recorder_stopped(None) and not recorder_stopped(StatusRead(None, "missing", ReadKind.MISSING, None))
+    # A STOPPED document somebody marked stale by hand is not taken for a clean stop either.
+    stopped_doc = status_doc(base_measurements(stopping=True), NOW)
+    assert not recorder_stopped(StatusRead(stopped_doc, "x", ReadKind.STALE, 99.0))
+    assert recorder_stopped(fresh(stopped_doc))            # read as fresh: the same known state
+
+
+def test_stopped_words_say_the_day_when_it_was_not_today() -> None:
+    day = 86400.0
+    at = NOW - 600
+    words = stopped_words(status_doc(base_measurements(stopping=True), NOW, heartbeat_age_s=600.0), TZ, NOW)
+    assert words == (f"The recorder was stopped at {tf.hm(at, TZ)}. Nothing is recorded until it is started again.")
+    yesterday = stopped_words(status_doc(base_measurements(stopping=True), NOW, heartbeat_age_s=day), TZ, NOW)
+    assert f"was stopped yesterday at {tf.hm(NOW - day, TZ)}." in yesterday
+    older = stopped_words(status_doc(base_measurements(stopping=True), NOW, heartbeat_age_s=5 * day), TZ, NOW)
+    assert f"was stopped on {tf.day_prefix(NOW - 5 * day, TZ, NOW).strip()} at " in older
+    assert "at Yesterday" not in yesterday and "  " not in older
+    # A document without a usable time still gives a sentence.
+    assert stopped_words({"overall": "STOPPED"}, TZ, NOW).startswith("The recorder was stopped. ")
+    assert stopped_at({"overall": "STOPPED", "heartbeat_epoch": 12.5}) == 12.5
+
+
+def test_the_test_camera_warning_survives_a_stop() -> None:
+    doc = status_doc(base_measurements(stopping=True, simulated=True), NOW, heartbeat_age_s=900.0)
+    z = make_alert("Z-001", Severity.WARNING).to_dict()
+    doc["alerts"], doc["alert"] = [z], z
+    v = build_dashboard(StatusRead(doc, None, ReadKind.STOPPED, 900.0), tz=TZ, now=NOW)
+    assert v.stopped and v.test_camera is not None and v.test_camera.code == "Z-001" and v.banner is None
+    v2 = build_dashboard(StatusRead(status_doc(base_measurements(stopping=True), NOW), None, ReadKind.STOPPED, 1.0),
+                         tz=TZ, now=NOW, config_test_camera=True)
+    assert v2.test_camera is not None
+
+
+def test_a_stopped_recorder_is_not_turned_stale_by_the_heartbeat_watch() -> None:
+    t = [0.0]
+    watch = HeartbeatWatch(15.0, mono=lambda: t[0])
+    r = StatusRead(status_doc(base_measurements(stopping=True), NOW), None, ReadKind.STOPPED, 1.0)
+    assert watch.observe(r).kind is ReadKind.STOPPED
+    t[0] = 3600.0
+    assert watch.observe(r).kind is ReadKind.STOPPED
 
 
 def test_status_replaced_while_reading_never_flashes_x001(tmp_path: Path) -> None:

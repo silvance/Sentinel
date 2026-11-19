@@ -77,7 +77,7 @@ class ConsoleStatusView:
             healthy = doc is not None and not problem and doc.get("overall") in HEALTHY
         stamp = datetime.fromtimestamp(self.clock()).strftime("%H:%M:%S")
         lines = [text, "", f"Camera: {camera_name or 'Camera'}    Checked at {stamp}"]
-        if doc is not None and not problem:
+        if doc is not None and not problem and doc.get("overall") != "STOPPED":   # nothing continues then
             lines.append(CLOSE_NOTE)
         return "\n".join(lines), healthy
 

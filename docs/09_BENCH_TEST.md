@@ -64,6 +64,7 @@ length and reason, and nothing else.
 | 3.6 | Close the lid (on mains power) for 10 minutes. | Recording continues (install set "lid: do nothing"). | No gap. | |
 | 3.7 | Change the power plan so the laptop sleeps after 15 minutes, wait for the next check (≤10 min). | H-001 "This computer is set to go to sleep…". | Restore the setting; H-001 clears. | |
 | 3.8 | Fill the recording disk to below the warning level with a large dummy file (then delete it). | S-001 at warning; S-002 "Recording stopped" at critical. | Recording resumes after deleting the file. | |
+| 3.9 | System › Service › **Stop recorder…**, confirm. Leave it for two minutes and look at Status twice. Then press **Start recording** on the Status page. (This one does not recover by itself: it is the stop a person asks for.) | "Not recording", "The recorder was stopped at HH:MM. Nothing is recorded until it is started again.", camera "not in use (recorder stopped)", and the same two minutes later (not "System error", field report 2026-11-19). | "Starting recording", then "Recording normally" within about a minute; one gap as long as it was left stopped, reason "recording service was shut down". | |
 
 ## 4. Recording schedule (only if schedules will be used)
 

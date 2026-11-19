@@ -42,6 +42,7 @@ class ReadKind(StrEnum):
     MISSING = "missing"          # no status file at all
     UNREADABLE = "unreadable"    # file exists but could not be parsed (after retries)
     STALE = "stale"              # heartbeat too old
+    STOPPED = "stopped"          # the recorder shut down in an orderly way; this is the last thing it wrote
 
 
 @dataclass(frozen=True)
@@ -51,6 +52,29 @@ class StatusRead:
     kind: ReadKind
     age_s: float | None          # heartbeat age when a document was read (negative: heartbeat in the future)
     frozen_s: float | None = None  # set when the heartbeat stopped changing (monotonic clock)
+
+
+def recorder_stopped(read: StatusRead | None) -> bool:
+    """The recorder was shut down in an orderly way and has not started again.
+
+    The recorder writes ``overall = STOPPED`` as its very last document, and only when it ends without an
+    error (``RecorderService.run``: a crash is "reported as an error, never as a clean stop"). That document
+    then stays as it is until a recorder starts and replaces it. So it is a known state, however old the
+    document gets, and not a recorder that stopped answering (field report 2026-11-19: fifteen seconds after
+    Stop recorder the window changed from "Not recording" to "System error")."""
+    return (read is not None and read.doc is not None and read.kind in (ReadKind.OK, ReadKind.STOPPED)
+            and read.doc.get("overall") == str(OverallStatus.STOPPED))
+
+
+def stopped_at(doc: dict[str, Any] | None) -> float | None:
+    """When the recorder wrote its last document (epoch seconds), or None when the document does not say."""
+    at = _epoch((doc or {}).get("generated_utc"))
+    if at is not None:
+        return at
+    try:
+        return float((doc or {}).get("heartbeat_epoch"))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
 
 
 def read_status_robust(path: Path, max_age_s: float = 15.0, attempts: int = 5,
@@ -66,6 +90,9 @@ def read_status_robust(path: Path, max_age_s: float = 15.0, attempts: int = 5,
     here ``|age| > max_age_s`` is stale too. (A live recorder rewrites its heartbeat every ~2 s,
     so after such a clock change this can show X-001 for at most one refresh.) A heartbeat that
     stops changing is caught independently of any wall clock by :class:`HeartbeatWatch`.
+
+    A document that says the recorder shut down in an orderly way is never stale: see
+    :func:`recorder_stopped`. It is returned as :attr:`ReadKind.STOPPED` whatever its age.
     """
     doc: dict[str, Any] | None = None
     problem: str | None = None
@@ -84,6 +111,8 @@ def read_status_robust(path: Path, max_age_s: float = 15.0, attempts: int = 5,
         age = time.time() - float(doc.get("heartbeat_epoch", 0))
     except (TypeError, ValueError):
         age = None
+    if doc.get("overall") == str(OverallStatus.STOPPED):
+        return StatusRead(doc, None, ReadKind.STOPPED, age)
     if problem:
         return StatusRead(doc, problem, ReadKind.STALE, age)
     if age is None:
@@ -169,6 +198,7 @@ class DashboardView:
     live: bool                           # fresh status that says footage is being recorded now
     raw_overall: str | None = None
     detail: str = ""                     # measured context, e.g. "No recording since 22:56 (03:56 UTC) — 7 min."
+    stopped: bool = False                # the recorder was shut down in an orderly way (recorder_stopped)
 
 
 # --------------------------------------------------------------------------- mappings
@@ -265,9 +295,25 @@ def _stale_detail(read: StatusRead, tz: ZoneInfo, now: float) -> str:
         return f"The recorder's status has not changed for {tf.duration(read.frozen_s)}."
     if hb_f > now:
         return "The recorder's status shows a time later than this computer's clock, so it cannot be trusted."
-    if doc.get("overall") == str(OverallStatus.STOPPED):
-        return f"The recording service was shut down at {tf.when(hb_f, tz, now)}."
     return f"Last status update {tf.duration(now - hb_f)} ago, at {tf.when(hb_f, tz, now)}."
+
+
+def stopped_words(doc: dict[str, Any] | None, tz: ZoneInfo, now: float) -> str:
+    """One sentence for a recorder that was shut down in an orderly way: what happened and when."""
+    at = stopped_at(doc)
+    when = ""
+    if at is not None:
+        day = tf.day_prefix(at, tz, now).strip()             # "", "Yesterday" or "3 Nov"
+        when = (" yesterday" if day == "Yesterday" else f" on {day}" if day else "") + f" at {tf.hm(at, tz)}"
+    return f"The recorder was stopped{when}. Nothing is recorded until it is started again."
+
+
+def _gap_detail(doc: dict[str, Any], tz: ZoneInfo, now: float) -> str:
+    gap_since = _epoch((doc.get("open_gap") or {}).get("since_utc"))
+    if not gap_since:
+        return ""
+    return (f"No recording since {tf.when(gap_since, tz, now)} ({tf.hm_utc(gap_since)}) "
+            f"— {tf.duration(now - gap_since)} so far.")
 
 
 def _camera_tile(doc: dict[str, Any] | None, stale: bool, top: AlertView | None, last_saved: float | None,
@@ -354,6 +400,26 @@ def build_dashboard(read: StatusRead, *, tz: ZoneInfo, now: float | None = None,
     if test_cam is None and config_test_camera:
         test_cam = z001_view()
 
+    if recorder_stopped(read):
+        # One look from the first second to the hundredth day (field report 2026-11-19). Nothing in the
+        # document is measured any more, so its alerts are not shown as current and the tiles say so.
+        assert doc is not None
+        saved = last_saved_epoch if last_saved_epoch is not None else _epoch((doc.get("last_segment") or {})
+                                                                             .get("end_utc"))
+        saved_text = (f"Last recording saved {tf.when(saved, tz, now, seconds=True)} "
+                      f"({tf.hm_utc(saved, seconds=True)})") if saved else "No recording saved yet"
+        at = stopped_at(doc)
+        headline, tone = HEADLINES[str(OverallStatus.STOPPED)]   # never green, and never "System error"
+        return DashboardView(headline=headline, supporting=stopped_words(doc, tz, now), tone=tone, banner=None,
+                             banner_takes_over=False, notice=None, other_alerts=(), test_camera=test_cam,
+                             stale=False, stopped=True,
+                             camera=TileView("Camera", "Not in use", Tone.NEUTRAL, "The recorder is stopped.",
+                                             saved_text),
+                             storage=_storage_tile(doc, True), drive=drive_tile(export_available),
+                             updated=(f"Recorder stopped {tf.when(at, tz, now, seconds=True)}" if at is not None
+                                      else "Recorder stopped"),
+                             live=False, raw_overall=str(OverallStatus.STOPPED), detail=_gap_detail(doc, tz, now))
+
     if stale:
         banner = x001_view()
         cam = _camera_tile(doc, True, banner, last_saved_epoch, tz, now)
@@ -392,8 +458,6 @@ def build_dashboard(read: StatusRead, *, tz: ZoneInfo, now: float | None = None,
             "Recording continues, but storage is running low.")
     elif overall == str(OverallStatus.STARTING):
         supporting = "Connecting to the camera. This usually takes less than a minute."
-    elif overall == str(OverallStatus.STOPPED):
-        supporting = "The recording service has been shut down. Contact technical support if this was not planned."
     elif overall not in HEADLINES:
         supporting = "The recorder reported a state this screen does not recognise. Contact technical support."
     if notice is not None:
@@ -401,11 +465,7 @@ def build_dashboard(read: StatusRead, *, tz: ZoneInfo, now: float | None = None,
     elif state_alert is not None:
         supporting = state_alert.message
 
-    detail = ""
-    gap_since = _epoch((doc.get("open_gap") or {}).get("since_utc"))
-    if gap_since and overall not in RECORDING_STATES:
-        detail = (f"No recording since {tf.when(gap_since, tz, now)} ({tf.hm_utc(gap_since)}) "
-                  f"— {tf.duration(now - gap_since)} so far.")
+    detail = _gap_detail(doc, tz, now) if overall not in RECORDING_STATES else ""
 
     gen = _epoch(doc.get("generated_utc"))
     updated = f"Updated {tf.hm(gen, tz, seconds=True)}" if gen else "Updated"

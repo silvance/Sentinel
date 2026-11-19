@@ -1046,6 +1046,149 @@ def test_a_status_that_stopped_updating_shows_nothing_old_as_current(app, tmp_pa
     w.close()
 
 
+def _stopped_doc(age_s: float = 600.0) -> dict:
+    now = time.time()
+    doc = status_doc(base_measurements(stopping=True), now, heartbeat_age_s=age_s, last_segment_end=now - age_s - 5)
+    doc["alerts"] = [make_alert("H-001", Severity.WARNING).to_dict()]     # measured before it stopped
+    return doc
+
+
+@pytest.mark.parametrize("age_s", [1.0, 600.0])
+def test_a_stopped_recorder_is_shown_as_stopped_and_not_as_a_system_error(app, tmp_path: Path,  # noqa: ANN001
+                                                                          age_s: float) -> None:
+    """Field report 2026-11-19: fifteen seconds after System › Stop recorder the window said "System error", the
+    alert list said X-001 and the camera read "disconnected". The same words now from the first second on."""
+    w = _window(app, tmp_path, admin=True, doc=_stopped_doc(age_s))
+    w.refresh()
+    assert w.view is not None and w.view.headline == "Not recording" and w.view.stopped
+    assert "Not recording" in w.state_label.text() and "System error" not in w.state_label.text()
+    assert w.sb_alerts.text() == "Recorder stopped" and w.sb_updated.text().startswith("Recorder stopped")
+    page = w.pages["status"]
+    page.on_status(w.ctx.read)
+    assert page.headline.text() == "Not recording"
+    assert page.supporting.text().startswith("The recorder was stopped at ")
+    rows = [(page.alerts.topLevelItem(i).text(0), page.alerts.topLevelItem(i).text(1))
+            for i in range(page.alerts.topLevelItemCount())]
+    assert rows == [("", "No alerts are reported while the recorder is stopped.")]     # no X-001, no old H-001
+    assert page.facts["camera"].text() == "not in use (recorder stopped)"
+    assert page.items["link"].text(1) == "not in use (recorder stopped)"
+    assert "disconnected" not in page.facts["camera"].text()
+    assert page.items["service"].text(1).startswith("stopped")
+    assert page.facts["updated"].text().startswith("Recorder stopped") and "X-001" not in page.facts["updated"].text()
+    assert "stopped" in page.facts["archive"].text()
+    assert not page.start_box.isHidden() and page.start_btn.isEnabled()
+    assert page.start_btn.text().strip() == "Start recording"
+    w.close()
+
+
+def test_start_recording_is_offered_only_while_the_recorder_is_stopped(app, tmp_path: Path) -> None:  # noqa: ANN001
+    w = _window(app, tmp_path, admin=False)                      # recording normally
+    page = w.pages["status"]
+    assert page.start_box.isHidden()
+    write_doc(w.ctx.cfg.status_path, status_doc(base_measurements(), time.time(), heartbeat_age_s=600.0))
+    w.refresh()                                                  # not answering (X-001): Start is not the remedy
+    assert page.start_box.isHidden() and "X-001" in w.sb_alerts.text()
+    write_doc(w.ctx.cfg.status_path, _stopped_doc())
+    w.refresh()
+    assert not page.start_box.isHidden()                         # also in a read-only window
+    # While a new version is being put in place recording restarts by itself: no button to press.
+    w._update_in_progress = lambda: "Installing Sentinel 9.9.9"
+    w.refresh()
+    assert page.start_box.isHidden() and "recording restarts by itself" in w.state_label.text()
+    w._update_in_progress = lambda: None
+    write_doc(w.ctx.cfg.status_path, status_doc(base_measurements(), time.time()))
+    w.refresh()
+    assert page.start_box.isHidden() and w.view.headline == "Recording normally"
+    w.close()
+
+
+def test_start_recording_starts_the_recorder_and_says_so_when_it_cannot(app, tmp_path: Path,  # noqa: ANN001
+                                                                        monkeypatch) -> None:  # noqa: ANN001
+    calls: list[tuple] = []
+    answers = [base.STARTED, "The recorder could not be started (C-003). See System › Service."]
+    monkeypatch.setattr(base, "start_recorder", lambda p, c, admin: calls.append((p, admin)) or answers.pop(0))
+    shown: list[str] = []
+    monkeypatch.setattr(QMessageBox_, "warning", lambda _s, _t, text, *a, **k: shown.append(text))
+    w = _window(app, tmp_path, admin=True, doc=_stopped_doc())
+    page = w.pages["status"]
+    page.start_btn.click()
+    assert w.busy_work() == ["restarting the recorder"] or calls   # one at a time, with the restart
+    _drain(app, 0.5)
+    assert calls == [(w.ctx.cfg_path, True)] and shown == []
+    assert w.statusBar().currentMessage() == base.STARTED
+    assert page.start_btn.isEnabled() and page.start_btn.text().strip() == "Start recording"
+    page.start_btn.click()
+    _drain(app, 0.5)
+    assert len(calls) == 2 and shown == ["The recorder could not be started (C-003). See System › Service."]
+    w.close()
+
+
+def test_the_window_does_not_close_while_the_recorder_starts(app, tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    import threading
+
+    release = threading.Event()
+    monkeypatch.setattr(base, "start_recorder", lambda p, c, admin: release.wait(5) and base.STARTED)
+    monkeypatch.setattr(base, "restart_recorder", lambda p, c: "The recorder was restarted with the saved settings.")
+    monkeypatch.setattr(QMessageBox_, "information", lambda *a, **k: None)
+    w = _window(app, tmp_path, admin=True, doc=_stopped_doc())
+    said: list[str] = []
+    w.start_recorder(said.append)
+    assert w.recorder_busy()
+    w.refresh()
+    assert not w.pages["status"].start_btn.isEnabled() and "Starting" in w.pages["status"].start_btn.text()
+    w.start_recorder(said.append)                          # pressed twice: no second start beside the first
+    w.restart_recorder(said.append)                        # a restart asked for meanwhile runs afterwards
+    w.close()
+    assert w.isVisible()                                   # refused: closing now could leave it stopped
+    release.set()
+    _drain(app, 0.8)
+    assert said[0] == base.STARTED and said[-1].startswith("The recorder was restarted") and len(said) == 3
+    assert not w.recorder_busy()
+    w.close()
+    assert not w.isVisible()
+
+
+def _control(calls: list[str], *, running: bool, ok: bool = True):  # noqa: ANN202
+    class Ctl:
+        def is_running(self) -> bool:
+            return running
+
+        def stop(self, _t: float) -> bool:
+            calls.append("stop")
+            return True
+
+        def start(self):  # noqa: ANN202
+            calls.append("start")
+            return type("R", (), {"ok": ok, "code": None if ok else "C-003"})()
+
+        def start_archive(self) -> None:
+            calls.append("archive")
+
+    return Ctl()
+
+
+def test_start_never_stops_a_recorder_and_starts_the_archive_copy_too(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    import sentinel.launcher.control as control_mod
+
+    path = _setup(tmp_path)
+    cfg = load_config(path)
+    calls: list[str] = []
+    monkeypatch.setattr(control_mod, "select_control", lambda *_a: _control(calls, running=True))
+    assert base.start_recorder(path, cfg) == base.RUNNING_ALREADY and calls == []       # nothing was touched
+    monkeypatch.setattr(control_mod, "select_control", lambda *_a: _control(calls, running=False))
+    assert base.start_recorder(path, cfg) == base.STARTED and calls == ["start", "archive"]
+    calls.clear()
+    monkeypatch.setattr(control_mod, "select_control", lambda *_a: _control(calls, running=False, ok=False))
+    as_admin = base.start_recorder(path, cfg, True)
+    assert as_admin == "The recorder could not be started (C-003). See System › Service."
+    read_only = base.start_recorder(path, cfg, False)
+    assert read_only.startswith("The recorder could not be started (C-003). ") and "Unlock settings" in read_only
+    assert calls == ["start", "start"]                                                   # no archive copy either
+    path.write_text("[camera\nbroken", encoding="utf-8")
+    monkeypatch.setattr(control_mod, "select_control", lambda *_a: pytest.fail("the recorder was touched"))
+    assert base.start_recorder(path, cfg).startswith("The recorder was not started: the settings file cannot be used")
+
+
 def test_restart_refuses_a_settings_file_that_does_not_load(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
     """Review 2026-11-12: Restart recorder stopped a working recorder to start it with a broken file (C-001)."""
     path = _setup(tmp_path)

@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (QBoxLayout, QComboBox, QFormLayout, QFrame, QGrid
 
 from .. import textfmt as tf
 from ..ledger_view import SpanKind, load_admin, load_timeline, pretty_json
-from ..viewmodel import ReadKind, StatusRead, Tone
+from ..viewmodel import ReadKind, StatusRead, Tone, recorder_stopped, stopped_at
 from .base import (CommandPanel, ElidedLabel, OutputLog, Page, ReadOnlyBar, capped, disclosure_button, fill,
                    icon_button, muted, selected_data, table)
 from .procs import Command, sentinel_argv, service_argv
@@ -92,6 +92,9 @@ class StatusPage(Page):
               ("System", [("clock", "Clock synchronised", "system"), ("service", "Recorder", "system")])]
     STACK_BELOW_PX = 1150      # narrower than this: the live view goes under the details
     HEADER_STACK_BELOW_PX = 1000   # narrower than this: the header's facts go under the state
+    START_TEXT = "Start recording"
+    STOPPED_UNKNOWN = "not reported (recorder stopped)"
+    STALE_UNKNOWN = "unknown (status not updating)"
 
     def __init__(self, ctx, parent=None) -> None:  # noqa: ANN001
         super().__init__(ctx, parent)
@@ -140,6 +143,18 @@ class StatusPage(Page):
         self.supporting.setMinimumWidth(300)     # "Since 13:59 today · No action needed." on one line
         self.supporting.setMaximumWidth(380)
         state.addWidget(self.supporting)
+        # Shown only while the recorder is stopped (field report 2026-11-19): the way back to recording is
+        # under the words that say it is stopped, not two pages away on System.
+        self.start_btn = icon_button(self.START_TEXT, "play", ctx.palette.text)
+        self.start_btn.setToolTip("Start the recorder again. Recording continues when this window is closed.")
+        self.start_btn.clicked.connect(self._start)
+        self.start_box = QWidget()               # hidden as a whole, so it takes no room while recording
+        sb = QHBoxLayout(self.start_box)
+        sb.setContentsMargins(0, 6, 0, 0)
+        sb.addWidget(self.start_btn)
+        sb.addStretch(1)
+        self.start_box.setVisible(False)
+        state.addWidget(self.start_box)
         state_row.addLayout(state)
         state_row.addStretch(1)
         hl.addLayout(state_row)
@@ -333,12 +348,20 @@ class StatusPage(Page):
         self.headline.setStyleSheet(f"color: {p.tone(v.tone)};" if v.tone is not Tone.OK else "")
         self.supporting.setText(" ".join(x for x in (v.supporting, v.detail) if x))
         doc = read.doc or {}
+        stopped = recorder_stopped(read)
+        # Not while a new version is being put in place: recording restarts by itself then.
+        updating = bool(getattr(win, "_update_in_progress", lambda: None)())
+        busy = bool(getattr(win, "recorder_busy", lambda: False)())
+        self.start_box.setVisible(stopped and not updating)
+        self.start_btn.setEnabled(not busy)
+        self.start_btn.setText(" Starting…" if busy else f" {self.START_TEXT}")
         rows: list[tuple[str, str, str, dict]] = []
-        if read.kind is not ReadKind.OK:
+        if read.kind is not ReadKind.OK and not stopped:
             rows.append(("X-001", "critical", "The recorder's status is not updating. The recorder may have "
                                               "stopped or this computer may be overloaded.", {}))
         # Review 2026-11-12: alerts in a document that is no longer updated are not current; X-001 says so.
-        for a in (doc.get("alerts") or []) if read.kind is ReadKind.OK else []:
+        # The same holds for a recorder that was stopped: nothing measures them any more (2026-11-19).
+        for a in (doc.get("alerts") or []) if read.kind is ReadKind.OK and not stopped else []:
             if isinstance(a, dict):
                 sev = a.get("severity")
                 tone = "critical" if sev == 3 else "warning" if sev == 2 else "info"
@@ -358,8 +381,10 @@ class StatusPage(Page):
             self.alerts.addTopLevelItem(it)
             it.setExpanded(code in expanded)
         if not rows:
-            it = QTreeWidgetItem(["", "No alerts."])
-            it.setIcon(0, glyph("ok", p.ok, 16))
+            # A green tick and "No alerts." beside "Not recording" would read as all clear.
+            it = QTreeWidgetItem(["", "No alerts are reported while the recorder is stopped." if stopped
+                                  else "No alerts."])
+            it.setIcon(0, glyph("info", p.text3, 16) if stopped else glyph("ok", p.ok, 16))
             it.setFlags(Qt.ItemFlag.ItemIsEnabled)
             self.alerts.addTopLevelItem(it)
         self.alerts_title.setText(f"Alerts ({len(rows)})" if rows else "Alerts")
@@ -375,11 +400,16 @@ class StatusPage(Page):
         tz = self.ctx.tz
         cfg = self.ctx.cfg
         link = str(doc.get("camera_link") or "")
-        stale = read.kind is not ReadKind.OK
+        stopped = recorder_stopped(read)
+        stale = read.kind is not ReadKind.OK or stopped
+        unknown = self.STOPPED_UNKNOWN if stopped else self.STALE_UNKNOWN
         if cfg is not None and cfg.camera.pending:
             self._fact("camera", "not added yet", "warning")
+        elif stopped:
+            # "disconnected" blamed the camera; the recorder is simply not reading from it (2026-11-19).
+            self._fact("camera", "not in use (recorder stopped)")
         elif stale:
-            self._fact("camera", "unknown (status not updating)")
+            self._fact("camera", unknown)
         else:
             self._fact("camera", link.replace("_", " ") or "—", "ok" if link == "connected" else "warning")
         since = getattr(self.window(), "recording_since_epoch", None) or _ep((doc.get("recording") or {})
@@ -400,7 +430,7 @@ class StatusPage(Page):
         self._fact("storage", text, {"warning": "warning", "critical": "critical"}.get(st.get("level"), ""))
         arc = doc.get("archive") or {}
         if stale:
-            self._fact("archive", "unknown (status not updating)")
+            self._fact("archive", unknown)
         elif not arc:
             self._fact("archive", "not enabled")
         elif not arc.get("running"):
@@ -425,8 +455,8 @@ class StatusPage(Page):
         last = (doc.get("last_segment") or {}).get("end_utc")
         le = _ep(last)
         self._fact("verified", f"{tf.when(le, tz, now, seconds=True)} (SHA-256 sealed)" if le else "none yet")
-        self._fact("updated", v.updated if read.kind is ReadKind.OK else "not updating (X-001)",
-                   "" if read.kind is ReadKind.OK else "critical")
+        self._fact("updated", v.updated if read.kind is ReadKind.OK or stopped else "not updating (X-001)",
+                   "" if read.kind is ReadKind.OK or stopped else "critical")
 
     def _facts(self, doc: dict[str, Any], read: StatusRead) -> None:
         cfg, tz, now = self.ctx.cfg, self.ctx.tz, (self.ctx.clock or __import__("time").time)()
@@ -437,8 +467,11 @@ class StatusPage(Page):
             self._set("camera", f"{cfg.camera.name} — not added yet" if cfg.camera.pending else
                       f"{cfg.camera.name} — {host}:{port}/{path}" if host else f"{cfg.camera.name} — {cfg.camera.id}",
                       "warning" if cfg.camera.pending else "")
-        stale = read.kind is not ReadKind.OK
-        link = "unknown (status not updating)" if stale else str(doc.get("camera_link") or "—")
+        stopped = recorder_stopped(read)
+        stale = read.kind is not ReadKind.OK or stopped
+        unknown = self.STOPPED_UNKNOWN if stopped else self.STALE_UNKNOWN
+        link = ("not in use (recorder stopped)" if stopped else unknown if stale
+                else str(doc.get("camera_link") or "—"))
         self._set("link", link.replace("_", " "), "ok" if link == "connected" else "warning" if link != "—" and
                   not stale else "")
         last = doc.get("last_segment") or {}
@@ -451,6 +484,8 @@ class StatusPage(Page):
         snd = rec.get("audio") if isinstance(rec.get("audio"), dict) else None
         if cfg is None or not cfg.camera.include_audio:
             self._set("sound", "not recorded (switched off)")
+        elif stopped:
+            self._set("sound", "switched on (nothing is recorded while the recorder is stopped)")
         elif stale or snd is None:
             self._set("sound", "switched on; no report from the recorder yet")
         else:
@@ -467,7 +502,7 @@ class StatusPage(Page):
         self._set("storage", txt, {"ok": "ok", "warning": "warning", "critical": "critical"}.get(st.get("level"), ""))
         arc = doc.get("archive") or {}
         if stale:
-            self._set("archive", "unknown (status not updating)")
+            self._set("archive", "not reported (recorder stopped); see Drives" if stopped else unknown)
         else:
             from .drive_pages import archive_message
 
@@ -483,6 +518,8 @@ class StatusPage(Page):
         mo = doc.get("motion") or {}
         if not mo:
             self._set("motion", "not in use")
+        elif stopped:
+            self._set("motion", "not watching while the recorder is stopped")
         else:
             broken = mo.get("healthy") is False
             state = ("waiting for motion" if mo.get("waiting") else
@@ -495,14 +532,36 @@ class StatusPage(Page):
             self._set("quiet", str(qt.get("text") or "—"), "warning" if qt.get("active") else "ok")
         svc = doc.get("service") or {}
         sync = svc.get("clock_synchronized")
-        self._set("clock", "yes" if sync is True else "no (T-002)" if sync is False else "unknown",
-                  "ok" if sync is True else "warning" if sync is False else "")
+        if stopped:                              # the recorder is what checks it
+            self._set("clock", "not checked while the recorder is stopped")
+        else:
+            self._set("clock", "yes" if sync is True else "no (T-002)" if sync is False else "unknown",
+                      "ok" if sync is True else "warning" if sync is False else "")
         up = svc.get("uptime_s")
-        if read.kind is ReadKind.OK:
+        if stopped:
+            at = stopped_at(doc)
+            self._set("service", "stopped" + (f" ({tf.when(at, tz, now)})" if at is not None else ""), "critical")
+        elif read.kind is ReadKind.OK:
             self._set("service", f"running, version {svc.get('version', '?')}"
                       + (f", up {tf.duration(up)}" if isinstance(up, (int, float)) else ""), "ok")
         else:
             self._set("service", "not responding", "critical")
+
+    # ---- start a stopped recorder
+    def _start(self) -> None:
+        from .base import RUNNING_ALREADY, STARTED
+
+        self.start_btn.setEnabled(False)
+        self.start_btn.setText(" Starting…")
+
+        def done(text: str) -> None:
+            self.start_btn.setText(f" {self.START_TEXT}")
+            self.start_btn.setEnabled(True)
+            # A restart asked for at the same moment answers for both; its good news is good news here too.
+            if not text.startswith((STARTED, RUNNING_ALREADY, "The recorder was restarted")):
+                self.problem(text)
+
+        self.ctx.start(on_done=done)
 
 
 def _tree(headers: list[str]) -> QTreeWidget:
@@ -941,7 +1000,8 @@ class SystemPage(Page):
         from PySide6.QtWidgets import QMessageBox
 
         if QMessageBox.question(self, "Sentinel", "Stop the recorder? Nothing is recorded until it is started "
-                                "again (Restart recorder, or restarting this computer).") == \
+                                "again (Start recording on the Status page, Restart recorder here, or "
+                                "restarting this computer).") == \
                 QMessageBox.StandardButton.Yes:
             self._run(sentinel_argv("stop", "--config", self._cfgp()), "Stop recorder")
 

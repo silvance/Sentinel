@@ -33,6 +33,7 @@ class Ctx:
     config_changed: Callable[[AppConfig], None] = lambda _c: None
     clock: Callable[[], float] | None = None
     restart: Callable[..., None] = lambda on_done=None: None   # AppWindow.restart_recorder
+    start: Callable[..., None] = lambda on_done=None: None     # AppWindow.start_recorder
     after_change: Callable[[], None] = lambda: None             # AppWindow.watch_after_change
 
 
@@ -480,6 +481,37 @@ def selected_data(t: QTableWidget) -> Any:
         return None
     item = t.item(rows[0].row(), 0)
     return item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+
+
+STARTED = "The recorder was started."
+RUNNING_ALREADY = "The recorder is running already."
+
+
+def start_recorder(cfg_path: Path, cfg: AppConfig, admin: bool = True) -> str:
+    """Start a recorder that is stopped (worker thread). Never stops one: Status › Start recording, after
+    someone used System › Stop recorder (field report 2026-11-19: the only ways back were the System
+    page's Restart recorder or restarting the computer). A sentence for the person; it starts with
+    :data:`STARTED` or :data:`RUNNING_ALREADY` when recording is on its way."""
+    from ...config import ConfigError, load_config
+    from ...launcher.control import select_control
+
+    try:
+        cfg = load_config(cfg_path)
+    except (ConfigError, OSError) as exc:
+        return (f"The recorder was not started: the settings file cannot be used ({exc}). Correct the file, or "
+                "go back to working settings in System › Check and history.")
+    control = select_control(cfg_path, cfg)
+    if control.is_running():
+        return RUNNING_ALREADY
+    result = control.start()
+    if not getattr(result, "ok", False):
+        return (f"The recorder could not be started ({getattr(result, 'code', '?')}). "
+                + ("See System › Service." if admin else
+                   "This may need an administrator: press Unlock settings…, then Start recording again."))
+    fn = getattr(control, "start_archive", None)       # no-op when the archive copy already runs
+    if callable(fn):
+        fn()
+    return STARTED
 
 
 def restart_recorder(cfg_path: Path, cfg: AppConfig) -> str:

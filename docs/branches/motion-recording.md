@@ -216,6 +216,10 @@ directly under the lens. That costs one recording of `keep_recording_s`, and los
   unchanged 0.3.23 passed 1 of 3, 0.3.24 passed 0 of 3. So the idle machine does **not** make it pass, as the
   0.3.23 run above had suggested, and the unchanged version fails too. The question stays open as written
   above; this machine cannot be used to clear that test.
+* Full suite on 0.3.25 (0.3.24 plus how the window shows a recorder that was stopped; no recorder code
+  changed), same machine that evening, left alone for the whole run: 1702 passed, 2 skipped, 1 failed: the
+  same timing test again ("the absorbed jump leaked into the drift correction"). Not run again in turn with
+  0.3.24 this time; the comparison of that morning stands.
 * `tests/unit/test_motion_light.py` (0.3.22): a clean light switch is one changed frame (missed without the
   option, motion at once with it); an even change of brightness cancelled out; someone moving while the
   brightness changes; cancelling never adds a change; the detector's two counts (all motion / movement in

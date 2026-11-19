@@ -19,7 +19,8 @@ from .. import textfmt as tf
 from ..ledger_view import recording_since, snapshot
 from ..prefs import load_appearance, load_pref, save_appearance, save_pref
 from ..theme import pick_palette
-from ..viewmodel import DashboardView, ReadKind, StatusRead, Tone, build_dashboard, read_status_robust
+from ..viewmodel import (DashboardView, ReadKind, StatusRead, Tone, build_dashboard, read_status_robust,
+                         recorder_stopped)
 from . import style
 from .base import Ctx, Page
 from .elevation import is_admin, relaunch_elevated
@@ -146,7 +147,8 @@ class AppWindow(QMainWindow):
         self.ctx = Ctx(cfg=cfg, cfg_path=Path(cfg_path) if cfg_path else None, admin=admin,
                        palette=pick_palette(self.appearance), tz=tz, navigate=self.navigate,
                        unlock=self.unlock, config_changed=self._config_changed, clock=clock,
-                       restart=self.restart_recorder, after_change=self.watch_after_change)
+                       restart=self.restart_recorder, start=self.start_recorder,
+                       after_change=self.watch_after_change)
         self.view: DashboardView | None = None
         self.pages: dict[str, Page] = {}
         self._tasks: list[Task] = []
@@ -543,7 +545,9 @@ class AppWindow(QMainWindow):
         self.sb_archive.setIcon(glyph("drives", p.text2, 16))
         doc = read.doc or {}
         alerts = [a for a in (doc.get("alerts") or []) if isinstance(a, dict)]
-        if read.kind is not ReadKind.OK:
+        if recorder_stopped(read):                   # known, and not X-001 (field report 2026-11-19)
+            self.sb_alerts.setText("Recorder stopped")
+        elif read.kind is not ReadKind.OK:
             self.sb_alerts.setText("Recorder status not updating (X-001)")
         elif alerts:
             codes = ", ".join(str(a.get("code")) for a in alerts[:4]) + ("…" if len(alerts) > 4 else "")
@@ -724,6 +728,46 @@ class AppWindow(QMainWindow):
                 return
             text = str(err) if err is not None else str(msg)
             self.statusBar().showMessage(text, 15000)
+            callbacks, self._restart_callbacks = self._restart_callbacks, []
+            for c in callbacks:
+                c(text)
+
+        task.done.connect(done)
+        self._restart_task = task
+        task.start()
+
+    def recorder_busy(self) -> bool:
+        """A start or restart of the recorder is under way."""
+        return self._restart_task is not None and self._restart_task.running()
+
+    def start_recorder(self, on_done: Callable[[str], None] | None = None) -> None:
+        """Start a recorder that is stopped (Status › Start recording). It never stops one, and it shares
+        the restart's one-at-a-time slot, so closing the window waits for it and a restart asked for
+        meanwhile runs afterwards."""
+        cfg, path = self.ctx.cfg, self.ctx.cfg_path
+        if cfg is None or path is None:
+            return
+        if self.recorder_busy():                       # a restart is already bringing it back
+            if on_done is not None:
+                self._restart_callbacks.append(on_done)
+            return
+        from . import base
+
+        admin = self.ctx.admin
+        self.statusBar().showMessage("Starting the recorder…")
+        task = Task(lambda: base.start_recorder(path, cfg, admin), self)
+
+        def done(msg: object, err: object) -> None:
+            text = str(err) if err is not None else str(msg)
+            self.statusBar().showMessage(text, 15000)
+            self.refresh()
+            if on_done is not None:
+                on_done(text)
+            if self._restart_again:                    # a restart was asked for while this ran
+                self._restart_again = False
+                self._restart_task = None
+                self.restart_recorder()
+                return
             callbacks, self._restart_callbacks = self._restart_callbacks, []
             for c in callbacks:
                 c(text)

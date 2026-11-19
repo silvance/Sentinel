@@ -42,8 +42,10 @@ words at the top tell you what the recorder is doing:</p>
     itself.</td><td>If it stays for more than a few minutes, call.</td></tr>
 <tr><td><b class="ui">Storage warning</b></td><td>It is recording, but the computer is running out of
     space.</td><td>Call today.</td></tr>
-<tr><td><b class="ui">Recording stopped</b><br><b class="ui">Not recording</b><br><b class="ui">System error</b></td>
-    <td>It is not recording.</td><td>Call now. Have the code ready (part 5).</td></tr>
+<tr><td><b class="ui">Not recording</b></td><td>The recorder was stopped on purpose. The line under the words
+    says when.</td><td>Press <b class="ui">Start recording</b>, then call.</td></tr>
+<tr><td><b class="ui">Recording stopped</b><br><b class="ui">System error</b></td>
+    <td>It is not recording, and something is wrong.</td><td>Call now. Have the code ready (part 5).</td></tr>
 </table>
 <p>Under the large words, <b class="ui">Alerts</b> lists anything that needs attention, each with a code.
 The rest of the page shows the camera, the last file saved, the storage and the archive drive.</p>
@@ -164,7 +166,10 @@ administrator's password.</p>
     <b class="ui">Return to service…</b> empties a drive that came back from the office, and only after the
     office has copied it and checked the copy.</td></tr>
 <tr><td>System</td><td>The recorder service, updates, the settings history, and the check of the recording
-    log against a drive.</td></tr>
+    log against a drive. <b class="ui">Stop recorder…</b> stops recording on purpose: the current recording
+    is finished and saved first, and nothing is read from the camera until the recorder is started again, so
+    the Status page shows <b class="ui">Not recording</b> and no live view. To record again, press
+    <b class="ui">Start recording</b> on the Status page or <b class="ui">Restart recorder</b> here.</td></tr>
 <tr><td>Help</td><td><b class="ui">User guide (PDF)</b> opens this guide.</td></tr>
 </table>
 <p class="small">The file READ-ME-FIRST.txt beside the program lists the commands for technical support.</p>
@@ -176,6 +181,16 @@ versions.</p>
 
 <h2 style="page-break-before: always">8. What changed</h2>
 <p>Changes that matter to the people who use the recorder, newest first.</p>
+<h3>0.3.25</h3>
+<ul>
+<li>After the recorder has been stopped on purpose (<b class="ui">Stop recorder…</b> on the System page), the
+    Status page keeps saying <b class="ui">Not recording</b> and says when it was stopped. It used to change to
+    <b class="ui">System error</b> after a few seconds and show the camera as disconnected, although nothing
+    was wrong.</li>
+<li>New button <b class="ui">Start recording</b> on the Status page, under the words
+    <b class="ui">Not recording</b>. It starts the recorder again. It is only there while the recorder is
+    stopped.</li>
+</ul>
 <h3>0.3.24</h3>
 <ul>
 <li>When a new version is put on the recorder from a folder, the screens and the message afterwards now say that
