@@ -429,7 +429,8 @@ not built.
 
 A new recording log sets the notes aside with the rest of the earlier log.
 
-**Tried (2026-11-20, development PC), sections 12 to 14.** Full suite before sections 13 and 14 were added:
+**Tried (2026-11-20, development PC), sections 12 to 14.** Full suite on the final code: 1734 passed, 2 skipped
+(30 min 48 s; the timing test that often fails on that PC passed). Before sections 13 and 14 were added:
 1724 passed, 2 skipped. The built 0.3.27 (commit c10c2a0), its own recorder recording from the simulated camera
 (10 s files), its own copier with no drive, administrator rights: `new-recording-log --yes --confirm "NEW LOG"`
 took 2.9 s; the earlier log was set aside whole (5 recordings, chain intact, last entry `recording_log_closed`),
