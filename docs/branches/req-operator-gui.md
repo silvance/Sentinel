@@ -428,3 +428,17 @@ the page says the note was NOT stored and keeps the text in the form; a request-
 not built.
 
 A new recording log sets the notes aside with the rest of the earlier log.
+
+**Tried (2026-11-20, development PC), sections 12 to 14.** Full suite before sections 13 and 14 were added:
+1724 passed, 2 skipped. The built 0.3.27 (commit c10c2a0), its own recorder recording from the simulated camera
+(10 s files), its own copier with no drive, administrator rights: `new-recording-log --yes --confirm "NEW LOG"`
+took 2.9 s; the earlier log was set aside whole (5 recordings, chain intact, last entry `recording_log_closed`),
+its 10 files were deleted, the new log began with `recording_log_started` naming the earlier log's folder and
+chain head, the recorder started again by itself and recorded 5 files, and the only alert was Z-001.
+`START-A-NEW-RECORDING-LOG.cmd` was run three ways: without administrator rights (says so), as administrator
+with nobody typing ("Not confirmed. Nothing was changed.", nothing changed), and against a 0.3.26 program
+(told to install first). Notes in the built window, read-only mode, through Windows UI Automation: five fields
+set, Save note pressed, "Saved. The note is in the list below.", the note listed and in the log.
+**Not tried:** emptying a real archive drive (the unit tests use a folder; a marked volume on that PC would
+have been taken by the Sentinel installed there); the laptop; NEW LOG typed at a keyboard; the Windows
+service; Safely remove against a real drive and Windows' own removal.
