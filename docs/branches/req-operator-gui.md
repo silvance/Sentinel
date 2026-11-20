@@ -405,8 +405,10 @@ Decisions and why:
   an open that shares nothing (Windows) and by leftover `-wal`/`-shm` files.
 * **Typed confirmation** (`NEW LOG`) after a listing of what will be set aside and removed; `--dry-run` shows
   the listing only. No button in the window: it is done once, by the administrator.
-* **The script uses `--no-start`** and tells the person to open Sentinel: the recorder is then started as it is
-  every day, not from the administrator's command prompt.
+* **Recording is never left stopped.** The command starts the recorder and the copier again itself, as an
+  update does, also when it refuses because the log is open elsewhere. Once the log is set aside, a failure in
+  one of the later parts (a drive that cannot be emptied) is written into the new log's first entry instead of
+  stopping the rest.
 
 A drive that is not plugged in keeps its test recordings; the listing says so before the confirmation.
 Tests: `tests/unit/test_new_recording_log.py` (the real log, copier and a folder as drive).

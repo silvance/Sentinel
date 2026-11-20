@@ -52,20 +52,20 @@ echo.
 pause
 echo.
 
-"%APP%\Sentinel.exe" new-recording-log --no-start
+"%APP%\Sentinel.exe" new-recording-log
 set "RC=%ERRORLEVEL%"
 echo.
 if "%RC%"=="0" goto done
 if "%RC%"=="4" goto done_with_notes
 echo  NOT DONE (see the lines above). Nothing was removed unless the lines above say so.
-echo  Open Sentinel again from its usual icon: opening it starts recording.
+echo  Open Sentinel from its usual icon and check that it is recording.
 goto end
 
 :done_with_notes
-echo  The new recording log was started, but see the lines above: something could not be deleted.
+echo  See the lines above: something did not go as expected.
 :done
-echo  NEXT: open Sentinel from its usual icon. Opening it starts recording and archive copying.
-echo  Then check: Status has no alert about missing recordings; Recordings is empty;
+echo  NEXT: open Sentinel from its usual icon.
+echo  Check: Status has no alert about missing recordings; Recordings is empty;
 echo  Drives shows the archive drive as "In use".
 goto end
 

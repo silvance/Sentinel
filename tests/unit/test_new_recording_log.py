@@ -199,10 +199,11 @@ def test_a_log_that_is_open_elsewhere_is_not_replaced_and_nothing_is_deleted(sit
     other = Ledger(site.db, readonly=True)                 # the open window
     try:
         other.query("SELECT COUNT(*) FROM segments")
-        with pytest.raises(newlog.NewLogRefused, match="Close every Sentinel window"):
+        with pytest.raises(newlog.NewLogRefused, match="Close every Sentinel window.*recording was started again"):
             site.new_log()
     finally:
         other.close()
+    assert site.control.calls == ["stop", "start"] and site.control.running     # never left stopped
     assert site.spool_files() == spool and site.drive_files() == drive
     assert not (site.cfg.data_path / newlog.SET_ASIDE_DIR).exists()
     led = Ledger(site.db, readonly=True)
@@ -236,6 +237,22 @@ def test_a_file_that_cannot_be_deleted_is_named_and_does_not_stop_the_rest(site:
     assert res.not_removed == [str(victim)] and site.spool_files() == [victim]
     first = site.events(site.db, "recording_log_started")[0]
     assert first["removed_from_this_computer"]["not_removed"] == [str(victim)]
+
+
+def test_a_drive_that_cannot_be_emptied_does_not_keep_the_new_log_from_starting(site: Site, monkeypatch) -> None:
+    """Once the earlier log is set aside, the new one must get its first entry whatever happens to a drive."""
+    real = newlog._remove
+
+    def remove(path: Path) -> list[str]:
+        if str(path).startswith(str(site.drive.root)):
+            raise RuntimeError("the drive went away")
+        return real(path)
+
+    monkeypatch.setattr(newlog, "_remove", remove)
+    res = site.new_log()
+    assert res.set_aside and site.spool_files() == [] and res.started is True
+    first = site.events(site.db, "recording_log_started")[0]
+    assert "the drive went away" in first["archive_drives_emptied"][0]["not_removed"][0]
 
 
 def _main(site: Site, monkeypatch, capsys, **kw: Any) -> tuple[int, str]:

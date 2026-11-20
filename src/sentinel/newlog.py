@@ -402,10 +402,13 @@ def run(cfg_path: Path, cfg: AppConfig, *, who: str, reason: str, empty_drives: 
                         led.close()
                 except Exception:  # noqa: BLE001 - the refusal below is what matters
                     pass
+                _release(held)
+                if was_running:                 # never leave the recorder stopped because of a refusal
+                    restart()
                 raise NewLogRefused(
                     f"The recording log could not be set aside ({exc}). Close every Sentinel window and run this "
                     "again. No recording was deleted and no drive was emptied; the recording log is still the "
-                    "one in use.") from exc
+                    "one in use" + (", and recording was started again." if was_running else ".")) from exc
             set_aside = str(dest)
             for name in (*STATE_FILES, *STATE_DIRS):
                 src = data / name
@@ -425,17 +428,25 @@ def run(cfg_path: Path, cfg: AppConfig, *, who: str, reason: str, empty_drives: 
             for name in (*STATE_FILES, STATE_DIRS[0]):
                 _remove(data / name)
 
+        # From here on the earlier log is set aside. Whatever goes wrong below must not keep the new log from
+        # getting its first entry, so each part is tried by itself and what failed is written into that entry.
         say("Deleting the recordings on this computer...")
         not_removed: list[str] = []
-        if cfg.spool_path.is_dir():
-            for child in sorted(cfg.spool_path.iterdir()):
-                not_removed += _remove(child)
+        try:
+            if cfg.spool_path.is_dir():
+                for child in sorted(cfg.spool_path.iterdir()):
+                    not_removed += _remove(child)
+        except Exception as exc:  # noqa: BLE001 - see above
+            left.append(f"recordings on this computer: {type(exc).__name__}: {exc}")
         for d in plan.drives:
             say(f"Emptying archive drive {d.label}...")
-            for name in DRIVE_ENTRIES:
-                p = Path(d.root) / name
-                if p.exists() or p.is_symlink():
-                    d.not_removed += _remove(p)
+            try:
+                for name in DRIVE_ENTRIES:
+                    p = Path(d.root) / name
+                    if p.exists() or p.is_symlink():
+                        d.not_removed += _remove(p)
+            except Exception as exc:  # noqa: BLE001 - see above
+                d.not_removed.append(f"{d.label}: {type(exc).__name__}: {exc}")
         # What the window would show from these is about the log that was set aside. The recorder writes both
         # again when it starts.
         for stale in (cfg.status_path, cfg.ledger_snapshot_path):
@@ -632,6 +643,13 @@ def main(cfg_path: Path | None, *, who: str | None = None, reason: str | None = 
     except NewLogRefused as exc:
         print(f"\nNOT DONE. {exc}")
         return EXIT_REFUSED
+    except Exception as exc:  # noqa: BLE001 - the person must be told where things stand, not shown a traceback
+        aside = cfg.data_path / SET_ASIDE_DIR
+        print(f"\nSTOPPED by an unexpected problem: {type(exc).__name__}: {exc}")
+        if aside.is_dir():
+            print(f"  A recording log that was set aside is kept in {aside}")
+        print("  Open Sentinel: opening it starts recording. Then send a diagnostic report to technical support.")
+        return EXIT_FAILED
     print()
     print("DONE: a new recording log was started.")
     if res.set_aside:
