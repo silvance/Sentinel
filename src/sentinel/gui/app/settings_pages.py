@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (QAbstractSpinBox, QCheckBox, QComboBox, QDateEdit
                                QToolButton, QVBoxLayout, QWidget)
 
 from ...config import AppConfig
+from .. import textfmt as tf
 from .base import AdvancedRows, CommandPanel, Note, OutputLog, Page, ReadOnlyBar, capped, icon_button, muted
 from .configedit import ConfigEditError, check_text, replace_sections, save_sections
 from .procs import Task, sentinel_argv
@@ -1203,14 +1204,26 @@ class StoragePage(SettingsPage):
         self.ret_on = self.editor(QCheckBox("When space runs low, delete recordings already copied to an archive "
                                             "drive that has been taken out"))
         r.addRow(self.ret_on)
+        # Owner decision 2026-11-20 (0.3.26): the level was not on this page, and "Free up to 10 GB" below read
+        # as if deleting waited until 10 GB were left. It waited for the storage warning level; the level is now
+        # a field of its own, in the GB the rest of the window shows.
+        self.floor = self._dspin(1, 100_000, " GB", "Recordings are deleted from this computer only while less than "
+                                 "this is free: the oldest first, and only as many as needed")
+        self.floor.valueChanged.connect(lambda _v: self._floor_facts())
+        r.addRow("Start deleting when free space is below", self.floor)
+        self.floor_note = Note()
+        r.addRow("", self.floor_note)
+        self._floor_loaded = 0.0
+        self._floor_default = True
         self.keep = self._dspin(1, 24 * 365, " hours", "Never delete recordings newer than this")
         r.addRow("Always keep the newest", self.keep)
         self.swap_days = self._dspin(1, 60, " days", "Warn (L-001) if space will run out before the next swap")
         r.addRow("Days between drive swaps", self.swap_days)
         # GUI review 2026-11-17: set once by a technician, if ever.
         self.ret_advanced = AdvancedRows(r)
-        self.margin = self._dspin(1, 10_000, " GB", "Free only this much above the low-space level")
-        self.ret_advanced.add("Free up to", self.margin)
+        self.margin = self._dspin(1, 10_000, " GB", "Deleting stops again once this much more than the level above "
+                                  "is free")
+        self.ret_advanced.add("Each time, free", self.margin)
         self.body.addWidget(capped(ret))
         drv = QGroupBox("Erasing and setting up drives")
         d = form(drv)
@@ -1243,6 +1256,13 @@ class StoragePage(SettingsPage):
         self.arc_on.setChecked(cfg.archive.enabled)
         self.backlog.setValue(cfg.archive.backlog_alert_hours)
         self.ret_on.setChecked(cfg.retention.enabled)
+        from ...retention.manager import floor_bytes_for
+
+        total, _free = self._recording_drive()
+        self._floor_default = cfg.retention.floor_free_gb < 0
+        self._floor_loaded = round(floor_bytes_for(cfg, total) / 1e9, 1)
+        self.floor.setValue(self._floor_loaded)
+        self._floor_facts()
         self.keep.setValue(cfg.retention.keep_recent_hours)
         self.swap_days.setValue(cfg.retention.expected_swap_days)
         self.margin.setValue(cfg.retention.margin_gb)
@@ -1251,6 +1271,60 @@ class StoragePage(SettingsPage):
         self.min_size.setValue(cfg.drives.min_size_gb)
         self.result.clear()
 
+    # ---- the level at which archived recordings start to be deleted
+    def _recording_drive(self) -> tuple[int | None, int | None]:
+        """(size, free space) of the drive the recordings are on, or (None, None) when it cannot be read."""
+        import shutil
+
+        cfg = self.cfg
+        if cfg is None:
+            return None, None
+        try:
+            du = shutil.disk_usage(cfg.spool_path)
+        except OSError:
+            return None, None
+        return int(du.total), int(du.free)
+
+    def _floor_changed(self) -> bool:
+        return abs(round(self.floor.value(), 1) - self._floor_loaded) > 0.05
+
+    def _floor_facts(self) -> None:
+        """Under the field: how big the recording drive is, and how long the entered room lasts at the rate
+        the recorder measures now, so the number is not chosen blind."""
+        total, free = self._recording_drive()
+        parts = []
+        if total is not None and free is not None:
+            parts.append(f"The recording drive holds {tf.size(total)}; {tf.size(free)} are free now.")
+        read = self.ctx.read
+        rate = ((read.doc or {}).get("storage") or {}).get("rate_bytes_per_s") if read is not None else None
+        if isinstance(rate, (int, float)) and rate > 0:
+            parts.append(f"At the present recording rate, {self.floor.value():g} GB is room for "
+                         f"{tf.approx_remaining(self.floor.value() * 1e9 / rate)}.")
+        if self._floor_default and not self._floor_changed():
+            parts.append("This is the built-in level for a drive of this size; nothing is set in the settings file.")
+        self.floor_note.setText(" ".join(parts))
+
+    def validate(self) -> AppConfig | None:
+        cfg = self.cfg
+        if cfg is not None and self.ret_on.isChecked() and self._floor_changed():
+            from ...storage.monitor import GB
+
+            level = self.floor.value() * 1e9
+            warning = cfg.storage.warning_free_gb * GB
+            total, _free = self._recording_drive()
+            if level <= warning:
+                self.problem(f"Start deleting when free space is below: {self.floor.value():g} GB is not above this "
+                             f"computer's storage warning level ({tf.size(warning)}). Status would show a storage "
+                             "warning before anything is deleted. Enter a larger number.\n\nNothing was changed.")
+                return None
+            if total is not None and level >= total:
+                self.problem(f"Start deleting when free space is below: {self.floor.value():g} GB is as much as the "
+                             f"whole recording drive holds ({tf.size(total)}). That much can never be free, so every "
+                             "archived recording would be deleted as soon as its drive is taken out. Enter a smaller "
+                             "number.\n\nNothing was changed.")
+                return None
+        return super().validate()
+
     def tables(self) -> dict[str, dict[str, Any]]:
         raw = self.raw()
         archive = dict(raw.get("archive", {}))
@@ -1258,6 +1332,13 @@ class StoragePage(SettingsPage):
         retention = dict(raw.get("retention", {}))
         retention.update(enabled=self.ret_on.isChecked(), keep_recent_hours=round(self.keep.value(), 1),
                          expected_swap_days=round(self.swap_days.value(), 1), margin_gb=round(self.margin.value(), 1))
+        if self._floor_changed():
+            # The file keeps this level in the unit of its other storage levels (1024^3 bytes); the window shows
+            # sizes in GB of 10^9 bytes everywhere, and so does this field. An untouched field writes nothing,
+            # so a level that was never set stays the built-in one.
+            from ...storage.monitor import GB
+
+            retention["floor_free_gb"] = round(self.floor.value() * 1e9 / GB, 2)
         drives = dict(raw.get("drives", {}))
         drives.update(erase_enabled=self.erase_on.isChecked(), serial_confirm_chars=self.serial_chars.value(),
                       min_size_gb=round(self.min_size.value(), 1))

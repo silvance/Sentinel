@@ -925,6 +925,14 @@ class RecorderService:
         st = self.retention.status()
         st["text"] = oldest_kept_text(st["oldest_kept_utc"], self.cfg.recording.display_timezone)
         doc.retention = st
+        # How long recording can go on counts what may still be removed (0.3.26): a computer that holds its
+        # free space at the start level otherwise reads "about 3 days left" for ever, with a week more in hand.
+        reclaimable = st.get("reclaimable_bytes")
+        rate = getattr(sample, "rate_bytes_per_s", None)
+        until = getattr(sample, "seconds_until_critical", None)
+        if rcfg.enabled and reclaimable and rate and until is not None and isinstance(doc.storage, dict):
+            doc.storage["reclaimable_bytes"] = int(reclaimable)
+            doc.storage["seconds_until_attention"] = until + reclaimable / rate
         out = []
         horizon = rcfg.expected_swap_days * 86400
         if (not rcfg.enabled and sample is not None and sample.seconds_until_critical is not None

@@ -98,7 +98,10 @@ swap_max_wait_s = 120              # on "Swap", finish the file in flight only i
 # been removed from the computer. Set enabled = false to keep every recording here.
 [retention]
 enabled = true
-floor_free_gb = -1                 # -1 = use [storage] warning_free_gb
+floor_free_gb = -1                 # removal starts when less than this is free. -1 = the built-in level:
+                                   # 150 GB as the window shows sizes, at most 40 % of the recording drive,
+                                   # at least 10 above [storage] warning_free_gb. A number here is in the
+                                   # unit of [storage] (1024^3 bytes); Settings > Storage shows and sets it.
 margin_gb = 10                     # free up to floor + margin, never more
 min_verified_copies = 1
 require_removed_drive = true

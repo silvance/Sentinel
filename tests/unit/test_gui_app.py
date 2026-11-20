@@ -522,6 +522,110 @@ def test_storage_page_saves_erase_policy(app: QApplication, tmp_path: Path, monk
     w.close()
 
 
+def _laptop_drive(monkeypatch: pytest.MonkeyPatch, total: float = 512e9, free: float = 480e9) -> None:
+    monkeypatch.setattr(settings_pages.StoragePage, "_recording_drive", lambda self: (int(total), int(free)))
+
+
+def test_storage_page_shows_and_sets_where_deleting_starts(app: QApplication, tmp_path: Path,
+                                                           monkeypatch: pytest.MonkeyPatch) -> None:
+    """Owner decision 2026-11-20 (0.3.26): archived recordings are deleted from the computer when less than
+    150 GB is free, not when the storage warning level is reached. The level was not on the page; "Free up to
+    10 GB" was, and read as if deleting waited until 10 GB were left."""
+    from sentinel.retention.manager import floor_bytes_for
+    from sentinel.storage.monitor import GB
+
+    monkeypatch.setattr(base, "restart_recorder", lambda p, c: "Restarted.")
+    _laptop_drive(monkeypatch)
+    doc = status_doc(base_measurements(), time.time())
+    doc["storage"]["rate_bytes_per_s"] = 500_000.0                    # 4 Mbit/s
+    w = _window(app, tmp_path, admin=True, doc=doc)
+    w.refresh()
+    page = w.pages["storage"]
+    page.load()
+    assert page.floor.value() == 150.0 and page.floor.suffix() == " GB" and not page.floor.isHidden()
+    note = page.floor_note.text()
+    assert "The recording drive holds 512 GB; 480 GB are free now." in note
+    assert "150 GB is room for about 3 days" in note and "built-in level" in note
+    assert page.margin.isHidden()                                      # the amount freed each time stays under Advanced
+
+    # Saving something else leaves the level unset in the file: it stays the built-in one.
+    page.swap_days.setValue(4)
+    page.save()
+    _drain(app, 0.3)
+    saved = tomllib.loads(Path(w.ctx.cfg_path).read_text("utf-8"))["retention"]
+    assert "floor_free_gb" not in saved and saved["expected_swap_days"] == 4.0
+    assert page.floor.value() == 150.0
+
+    # A level that is entered is written in the file's own unit and comes back as it was typed.
+    page.floor.setValue(200)
+    assert "200 GB is room for about 5 days" in page.floor_note.text() and "built-in" not in page.floor_note.text()
+    page.save()
+    _drain(app, 0.3)
+    cfg = load_config(w.ctx.cfg_path)
+    assert cfg.retention.floor_free_gb == pytest.approx(200e9 / GB, abs=0.01)
+    assert floor_bytes_for(cfg, 512 * 10**9) == pytest.approx(200e9, rel=1e-4)
+    assert page.floor.value() == 200.0 and "built-in" not in page.floor_note.text()
+    w.close()
+
+
+def test_storage_page_refuses_a_level_that_cannot_work(app: QApplication, tmp_path: Path,
+                                                       monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(base, "restart_recorder", lambda p, c: pytest.fail("the recorder was restarted"))
+    _laptop_drive(monkeypatch)
+    said: list[str] = []
+    monkeypatch.setattr(QMessageBox_, "warning", lambda _s, _t, text, *a, **k: said.append(text))
+    w = _window(app, tmp_path, admin=True)
+    page = w.pages["storage"]
+    page.load()
+    before = Path(w.ctx.cfg_path).read_text("utf-8")
+    page.floor.setValue(40)                                            # under the storage warning level (50 GiB)
+    page.save()
+    assert len(said) == 1 and "not above this computer's storage warning level (53.7 GB)" in said[0]
+    page.floor.setValue(600)                                           # more than the whole drive holds
+    page.save()
+    assert len(said) == 2 and "as much as the whole recording drive holds (512 GB)" in said[1]
+    assert "as soon as its drive is taken out" in said[1]
+    assert all("Nothing was changed." in s for s in said)
+    assert Path(w.ctx.cfg_path).read_text("utf-8") == before
+    # With deleting switched off the number is not used, so it is not judged either.
+    page.ret_on.setChecked(False)
+    monkeypatch.setattr(base, "restart_recorder", lambda p, c: "Restarted.")
+    page.save()
+    _drain(app, 0.3)
+    assert len(said) == 2 and load_config(w.ctx.cfg_path).retention.enabled is False
+    w.close()
+
+
+def test_status_details_say_what_is_kept_and_why_the_time_left_is_longer(app: QApplication, tmp_path: Path) -> None:
+    """A computer that holds its free space at 150 GB shows "161 GB free"; the days left count what can still be
+    removed, and Details says so (0.3.26)."""
+    now = time.time()
+    doc = status_doc(base_measurements(), now, free_gb=161.0, seconds_until_attention=10.4 * 86400)
+    doc["storage"]["reclaimable_bytes"] = 300 * 10**9
+    doc["retention"] = {"enabled": True, "floor_bytes": 150 * 10**9, "target_bytes": 160 * 10**9,
+                        "oldest_kept_utc": "2026-11-12T06:00:00Z", "reclaimable_bytes": 300 * 10**9,
+                        "text": "Oldest footage kept on this computer: 2026-11-12", "last_pass": None}
+    w = _window(app, tmp_path, admin=False, doc=doc)
+    w.refresh()
+    page = w.pages["status"]
+    assert page.facts["storage"].text() == "161 GB free · about 10 days left"
+    assert page.items["storage"].text(1) == ("161 GB free, about 10 days of recording left (counting 300 GB of archived "
+                                             "recordings that are deleted as space is needed)")
+    assert page.items["kept"].text(1) == ("recordings since 2026-11-12; archived recordings are deleted when less "
+                                          "than 150 GB is free")
+    # Deleting switched off, nothing reported, and a recorder that was stopped.
+    from sentinel.gui.app.status_pages import kept_text
+
+    assert kept_text({"enabled": False}) == "every recording (nothing is deleted from this computer)"
+    assert kept_text({}) == "—" and kept_text(None) == "—"
+    assert kept_text({"enabled": True, "text": "Oldest footage kept on this computer: none", "floor_bytes": 150e9}) \
+        == "archived recordings are deleted when less than 150 GB is free"
+    write_doc(w.ctx.cfg.status_path, _stopped_doc())
+    w.refresh()
+    assert page.items["kept"].text(1) == "not reported (recorder stopped)"
+    w.close()
+
+
 def test_operator_can_request_an_archive_swap(app: QApplication, tmp_path: Path) -> None:
     """Swapping the archive drive is an operator task: it works without administrator rights."""
     w = _window(app, tmp_path, admin=False)

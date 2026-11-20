@@ -166,7 +166,9 @@ class RetentionConfig:
     """Admin-enabled deletion of ARCHIVED local originals when internal storage runs low (sentinel.retention).
     OFF by default: the project owner must decide to enable it (docs/branches/design-local-retention.md)."""
     enabled: bool = False
-    floor_free_gb: float = -1.0               # act when free space drops below this; < 0 = storage.warning_free_gb
+    floor_free_gb: float = -1.0               # act when free space drops below this (unit as [storage]: 1024^3
+    #                                           bytes); < 0 = built-in level (retention.manager.default_floor_bytes:
+    #                                           150 GB, less on a small drive, always above the warning level)
     margin_gb: float = 10.0                   # ...and free only up to floor + margin, never more
     min_verified_copies: int = 1              # VERIFIED archive copies (not LOST) required before deleting
     require_removed_drive: bool = True        # count only copies on drives that have left the machine

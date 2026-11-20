@@ -162,6 +162,12 @@ administrator's password.</p>
     how much of the picture changed and whether that counts as motion. Lighting: the room light being
     switched counts as motion at once. <b class="ui">If no motion is seen for a long time</b>: record all
     the time after the set number of days without motion; days off are not counted.</td></tr>
+<tr><td>Settings, Storage</td><td>The computer keeps its own copy of the recordings as long as it has room.
+    <b class="ui">Start deleting when free space is below</b> (150 GB unless changed) is where it starts to make
+    room: it deletes the oldest recordings first, only as many as needed, and only recordings that are
+    already on an archive drive which has been taken out. On the Status page, <b class="ui">Details</b> shows
+    this under <b class="ui">Kept on this computer</b>, and the days of recording left count what can still
+    be deleted.</td></tr>
 <tr><td>Drives</td><td><b class="ui">Erase and set up…</b> prepares a new archive drive and gives it its name.
     <b class="ui">Return to service…</b> empties a drive that came back from the office, and only after the
     office has copied it and checked the copy.</td></tr>
@@ -181,6 +187,14 @@ versions.</p>
 
 <h2 style="page-break-before: always">8. What changed</h2>
 <p>Changes that matter to the people who use the recorder, newest first.</p>
+<h3>0.3.26</h3>
+<ul>
+<li>The computer makes room earlier: recordings already on an archive drive that has been taken out are
+    deleted when less than 150 GB is free, not only when the storage warning is reached (Settings, Storage).
+    Which recordings are deleted has not changed.</li>
+<li>Status: the days of recording left count what can still be deleted, and <b class="ui">Details</b> has a
+    new line <b class="ui">Kept on this computer</b>.</li>
+</ul>
 <h3>0.3.25</h3>
 <ul>
 <li>After the recorder has been stopped on purpose (<b class="ui">Stop recorder…</b> on the System page), the

@@ -220,6 +220,10 @@ directly under the lens. That costs one recording of `keep_recording_s`, and los
   changed), same machine that evening, left alone for the whole run: 1702 passed, 2 skipped, 1 failed: the
   same timing test again ("the absorbed jump leaked into the drift correction"). Not run again in turn with
   0.3.24 this time; the comparison of that morning stands.
+* Full suite on 0.3.26 (0.3.25 plus the level at which archived recordings are removed; the recorder's own
+  timing code unchanged), same machine the next morning, left alone but for two small file copies: 1715
+  passed, 2 skipped, none failed. The timing test passed in that run. It is the second clean run on this
+  machine (the other was 0.3.23) among several with that one failure, so it says nothing new about the test.
 * `tests/unit/test_motion_light.py` (0.3.22): a clean light switch is one changed frame (missed without the
   option, motion at once with it); an even change of brightness cancelled out; someone moving while the
   brightness changes; cancelling never adds a change; the detector's two counts (all motion / movement in

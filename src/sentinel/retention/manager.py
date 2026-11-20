@@ -4,8 +4,9 @@ internal storage runs low (owner decision pending; ``[retention] enabled = false
 Rule (all must hold for a segment to be removed from this computer):
 
 * retention is enabled by an administrator, and free space on the recording storage is below the
-  floor (default: the storage warning threshold); removal stops as soon as free space is back to
-  floor + margin — never more than needed;
+  floor (the level set in ``[retention] floor_free_gb``; when none is set, :func:`default_floor_bytes`:
+  150 GB, less on a small drive, always above the storage warning level); removal stops as soon as free
+  space is back to floor + margin — never more than needed;
 * the segment is FINALIZED or INTERRUPTED (never CORRUPT, never unsealed), sealed at least
   ``keep_recent_hours`` ago (never the current / recent footage), not already removed;
 * it has at least ``min_verified_copies`` VERIFIED archive copies of the original (LOST copies do not
@@ -42,6 +43,47 @@ from ..storage.monitor import GB, DiskUsage
 
 log = logging.getLogger(__name__)
 
+# Where removal starts when ``[retention] floor_free_gb`` is not set (owner decision 2026-11-20, 0.3.26).
+# Until then it was the storage warning level itself, so a computer that had filled up lived on that line:
+# every 10 GB of recording its status showed "Storage warning" until the next pass, and "about a day of
+# space left" all the time. The level is now well above the warning: "150 GB" as the window shows sizes
+# (decimal), but never more than this share of the recording drive, so a small drive keeps most of its room
+# for the second copy, and never less than this much above the warning level.
+DEFAULT_FLOOR_BYTES = 150 * 10**9
+DEFAULT_FLOOR_SHARE = 0.40           # a drive of 375 GB or more gets the full 150 GB
+DEFAULT_FLOOR_ABOVE_WARNING_GB = 10.0
+RECLAIM_EVERY_PASSES = 5        # the "what could be removed" figure is refreshed this often (and after removals)
+
+
+def default_floor_bytes(cfg: AppConfig, total_bytes: int | None) -> int:
+    """The start level for a configuration that does not set one. ``total_bytes``: the size of the
+    recording drive, or None when it cannot be read (then only the distance to the warning level counts)."""
+    lowest = int((cfg.storage.warning_free_gb + DEFAULT_FLOOR_ABOVE_WARNING_GB) * GB)
+    if not total_bytes or total_bytes <= 0:
+        return lowest
+    return max(lowest, min(DEFAULT_FLOOR_BYTES, int(total_bytes * DEFAULT_FLOOR_SHARE)))
+
+
+def floor_bytes_for(cfg: AppConfig, total_bytes: int | None) -> int:
+    """Free space below which archived recordings are removed: the configured level, else the default."""
+    if cfg.retention.floor_free_gb >= 0:
+        return int(cfg.retention.floor_free_gb * GB)
+    return default_floor_bytes(cfg, total_bytes)
+
+
+class _Reader:
+    """Lets the eligibility test run outside a transaction: every statement is one locked read."""
+
+    def __init__(self, ledger: Ledger) -> None:
+        self.ledger = ledger
+
+    def execute(self, sql: str, params: Any = ()) -> _Reader:
+        self._rows = self.ledger.query(sql, params)
+        return self
+
+    def fetchall(self) -> list[Any]:
+        return self._rows
+
 
 @dataclass
 class RetentionReport:
@@ -72,10 +114,12 @@ class RetentionManager:
         self._disk_usage = disk_usage or (lambda p: DiskUsage(*shutil.disk_usage(p)))
         self.now = now
         self.interval_s = interval_s
-        floor_gb = self.rcfg.floor_free_gb if self.rcfg.floor_free_gb >= 0 else cfg.storage.warning_free_gb
-        self.floor_bytes = int(floor_gb * GB)
-        self.target_bytes = self.floor_bytes + int(self.rcfg.margin_gb * GB)
+        self.floor_bytes = self.target_bytes = 0
+        self._levels_final = False
+        self._set_levels()
         self.last: RetentionReport | None = None
+        self.reclaimable_bytes: int | None = None     # what could be removed now; None = not counted yet
+        self._passes_since_count = RECLAIM_EVERY_PASSES
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -103,9 +147,55 @@ class RetentionManager:
                 self.last = RetentionReport(iso_utc(self.now()), self.rcfg.enabled, error=f"{type(exc).__name__}: {exc}")
             self._stop.wait(self.interval_s)
 
+    # ------------------------------------------------------------------ levels
+    def _set_levels(self) -> None:
+        """The start level and the level removal stops at. A level that is not set in the configuration
+        depends on the size of the recording drive; until that can be read (the folder may not exist yet at
+        the very first start) the lower, size-independent level is used and the size is asked again."""
+        total: int | None
+        try:
+            total = int(self._disk_usage(self.spool).total)
+        except OSError:
+            total = None
+        self.floor_bytes = floor_bytes_for(self.cfg, total)
+        self.target_bytes = self.floor_bytes + int(self.rcfg.margin_gb * GB)
+        self._levels_final = total is not None or self.rcfg.floor_free_gb >= 0
+
     # ------------------------------------------------------------------ queries
     def _free(self) -> int:
         return int(self._disk_usage(self.spool).free)
+
+    def count_reclaimable(self) -> int:
+        """Bytes of recordings the rule would allow removing right now. Nothing is changed. The status adds
+        this to the free space when it says how long recording can go on: a computer that keeps its free
+        space at the start level by removing archived recordings has far more room than its free space."""
+        if not self.rcfg.enabled:                  # the rule's first condition: nothing may be removed at all
+            return 0
+        eligible_drives = self.removed_drives() if self.rcfg.require_removed_drive else None
+        now = self.now()
+        reader = _Reader(self.ledger)
+        total, last_rowid = 0, 0
+        while True:
+            batch = self.ledger.query("SELECT s.*, s.rowid AS rid FROM segments s WHERE s.camera_id=? AND s.rowid>? "
+                                      "AND s.local_deleted_utc IS NULL AND s.state IN ('FINALIZED','INTERRUPTED') "
+                                      "ORDER BY s.rowid LIMIT 500", (self.cfg.camera.id, last_rowid))
+            if not batch:
+                return total
+            for seg in batch:
+                last_rowid = seg["rid"]
+                if self._eligible(reader, seg, eligible_drives, now)[0]:
+                    total += int(seg["size_bytes"] or 0)
+
+    def _refresh_reclaimable(self, force: bool = False) -> None:
+        self._passes_since_count += 1
+        if not force and self._passes_since_count < RECLAIM_EVERY_PASSES:
+            return
+        self._passes_since_count = 0
+        try:
+            self.reclaimable_bytes = self.count_reclaimable()
+        except Exception:  # an estimate for the status; never a reason to stop the pass
+            log.exception("retention: could not count what could be removed")
+            self.reclaimable_bytes = None
 
     def removed_drives(self) -> set[str]:
         """Archive drives that have been seen and are now gone (no open presence session)."""
@@ -149,6 +239,8 @@ class RetentionManager:
 
     # ------------------------------------------------------------------ the pass
     def run_once(self) -> RetentionReport:
+        if not self._levels_final:
+            self._set_levels()
         rep = RetentionReport(iso_utc(self.now()), self.rcfg.enabled, floor_bytes=self.floor_bytes,
                               target_bytes=self.target_bytes)
         rep.completed_interrupted = self._finish_interrupted(rep)
@@ -157,6 +249,7 @@ class RetentionManager:
             return rep
         free = rep.free_before = rep.free_after = self._free()
         if free >= self.floor_bytes:
+            self._refresh_reclaimable()
             self.last = rep
             return rep
         eligible_drives = self.removed_drives() if self.rcfg.require_removed_drive else None
@@ -179,6 +272,7 @@ class RetentionManager:
         rep.blocked = free < self.floor_bytes
         if rep.blocked:
             log.warning("retention: below the floor and nothing more can be removed (%s)", rep.skipped)
+        self._refresh_reclaimable(force=True)      # what is left to remove changed, or there is nothing left
         self.last = rep
         return rep
 
@@ -287,7 +381,8 @@ class RetentionManager:
     def status(self) -> dict[str, Any]:
         oldest = self.oldest_kept()
         return {"enabled": self.rcfg.enabled, "floor_bytes": self.floor_bytes, "target_bytes": self.target_bytes,
-                "oldest_kept_utc": oldest, "last_pass": asdict(self.last) if self.last else None}
+                "oldest_kept_utc": oldest, "reclaimable_bytes": self.reclaimable_bytes if self.rcfg.enabled else None,
+                "last_pass": asdict(self.last) if self.last else None}
 
 
 def oldest_kept_text(oldest_utc: str | None, tz_name: str) -> str:

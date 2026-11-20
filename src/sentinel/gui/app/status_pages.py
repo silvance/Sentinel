@@ -71,6 +71,22 @@ def alert_details(a: dict[str, Any], tone: str, tz: Any, now: float) -> list[tup
     return out
 
 
+def kept_text(ret: Any) -> str:
+    """What the recorder says about recordings staying on this computer (Details, 0.3.26): since when it
+    still has them, and the free space below which archived ones are deleted."""
+    if not isinstance(ret, dict) or not ret:
+        return "—"
+    if not ret.get("enabled"):
+        return "every recording (nothing is deleted from this computer)"
+    text = str(ret.get("text") or "")            # "Oldest footage kept on this computer: 2026-11-02" (local date)
+    oldest = text.rsplit(": ", 1)[-1] if ": " in text else ""
+    oldest = "" if oldest == "none" else oldest
+    floor = ret.get("floor_bytes")
+    level = (f"archived recordings are deleted when less than {tf.size(floor)} is free"
+             if isinstance(floor, (int, float)) and floor > 0 else "archived recordings are deleted when space runs low")
+    return (f"recordings since {oldest}; " if oldest else "") + level
+
+
 class StatusPage(Page):
     """Operational overview (layout refinement 2026-11-10): a compact status header, then two columns
     sized by their content: alerts and details on the left, the live view on the right. Nothing is
@@ -86,7 +102,9 @@ class StatusPage(Page):
     GROUPS = [("Camera", [("camera", "Camera", "camera"), ("link", "Connection", "camera")]),
               ("Recording", [("last", "Last file saved", "recordings"), ("since", "Current run started", "recordings"),
                              ("sound", "Sound", "camera")]),
-              ("Storage and archive", [("storage", "Recording storage", "storage"), ("archive", "Archive drive", "drives")]),
+              ("Storage and archive", [("storage", "Recording storage", "storage"),
+                                       ("kept", "Kept on this computer", "storage"),
+                                       ("archive", "Archive drive", "drives")]),
               ("Schedule and motion", [("schedule", "Schedule", "schedule"), ("motion", "Motion", "motion"),
                                        ("quiet", "No-motion fail-safe", "motion")]),
               ("System", [("clock", "Clock synchronised", "system"), ("service", "Recorder", "system")])]
@@ -499,7 +517,12 @@ class StatusPage(Page):
         txt = f"{tf.size(free)} free" if isinstance(free, (int, float)) else "—"
         if isinstance(secs, (int, float)):
             txt += f", {tf.approx_remaining(secs)} of recording left"
+            reclaim = st.get("reclaimable_bytes")
+            if isinstance(reclaim, (int, float)) and reclaim > 0:
+                # 0.3.26: the time left counts them, which the free space alone would not explain.
+                txt += f" (counting {tf.size(reclaim)} of archived recordings that are deleted as space is needed)"
         self._set("storage", txt, {"ok": "ok", "warning": "warning", "critical": "critical"}.get(st.get("level"), ""))
+        self._set("kept", unknown if stale else kept_text(doc.get("retention")))
         arc = doc.get("archive") or {}
         if stale:
             self._set("archive", "not reported (recorder stopped); see Drives" if stopped else unknown)

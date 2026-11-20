@@ -365,6 +365,9 @@ def _storage_tile(doc: dict[str, Any] | None, stale: bool) -> TileView:
         detail = "Full — no space left for new recordings."
     elif isinstance(secs, (int, float)):
         detail = f"Space for {tf.approx_remaining(secs)} of recording."
+        if isinstance(st.get("reclaimable_bytes"), (int, float)) and st["reclaimable_bytes"] > 0:
+            # 0.3.26: the recorder counts what it may still remove; the free space alone would not explain it.
+            detail = detail[:-1] + ", counting archived recordings that are deleted as space is needed."
     elif (doc or {}).get("overall") not in RECORDING_STATES:
         detail = "Recording time left is measured once recording starts."
     else:

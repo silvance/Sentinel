@@ -48,7 +48,8 @@ class SpoolDisk:
 
 
 class Env:
-    def __init__(self, tmp: Path, retention: dict[str, Any] | None = None, **archive: Any) -> None:
+    def __init__(self, tmp: Path, retention: dict[str, Any] | None = None, storage: dict[str, Any] | None = None,
+                 **archive: Any) -> None:
         self.tmp = tmp
         r = {"enabled": True, "floor_free_gb": 3 * SIZE / GB, "margin_gb": 0.0, "keep_recent_hours": 0.0}
         r.update(retention or {})
@@ -56,7 +57,7 @@ class Env:
              "chunk_mib": 1, "fsync_every_mib": 2, "max_rate_mb_s": 1000.0,
              "resume_policy": "this_drive"}   # integration: explicit (the default became "any_drive")
         a.update(archive)
-        self.cfg = make_config(tmp, archive=a, retention=r)
+        self.cfg = make_config(tmp, archive=a, retention=r, storage=storage or {})
         self.ledger = Ledger(self.cfg.data_path / "sentinel.db")
         self.disk: SpoolDisk | None = None
 
