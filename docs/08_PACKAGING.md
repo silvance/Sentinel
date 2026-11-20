@@ -684,9 +684,26 @@ script, cut off after the question, then read the file's line in 18 runs and mis
 the line was found. Answering at the keyboard was not part of the trial. If the script ever says "Not confirmed"
 after `YES` was typed, nothing has been stopped or swapped: run it again.
 
-**Not run:** the question answered at the keyboard in a real console; an installed version that has
-`update install` (0.3.24 to a later one) with a real swap; a recording in progress at the moment of the swap;
-on the laptop.
+**Tried (2026-11-20, same machine and method): an installed version that has `update install`, with a recording
+in progress.** The 0.3.24 build as the installed program with 0.3.23 kept beside it; the 0.3.25 laptop folder
+(its script is the 0.3.24 one with the version number changed); settings as setup writes them for a deployed
+recorder (archive copy and retention on), with the simulated camera and 10-second recording files. 0.3.24 was
+recording and the archive copy was running when the script was started with `--yes`. The script set 0.3.23
+aside, copied and checked 0.3.25 and ran `update install --yes`; its window shows that command's own two lines
+("Stopping the recorder (the current recording file is closed and saved first)..." and "The install continues
+in a new window; this one closes now.") and nothing about going back. The swap window's lines: "Installing
+Sentinel 0.3.25 over 0.3.24.", "Recording has been stopped for the update; it restarts by itself. ...",
+"Closing 2 other Sentinel program(s): ...", "Checking Sentinel 0.3.25...", "Done." (10 s). The script took 46 s
+and ended with exit code 0. The recording log: 8 files recorded by 0.3.24, all sealed, the last ending
+12:11:06 UTC; one gap of 13.3 s (`graceful_stop`); 4 files by 0.3.25 from 12:11:19 UTC, all sealed; events
+`software_install_started` ("Installing Sentinel 0.3.25 over 0.3.24 from a full program folder") and
+`software_installed`. `update status`: "Installed: Sentinel 0.3.25 / Previous version kept: 0.3.24 / Last
+update: installed ...". The reopened window, read through UI Automation, showed "Sentinel 0.3.25 was installed
+over 0.3.24 from a full program folder. 0.3.24 is kept as the previous version." and "Recording normally".
+`about --verify` was clean, and the archive copy was running again. Nowhere did anything say "going back".
+
+**Not run:** the question answered at the keyboard in a real console; with the Windows services installed
+(both trials ran the recorder as the background process); with the real camera; on the laptop.
 
 A caution from that trial: the window the swap reopens is an ordinary Sentinel window. If the computer has
 Sentinel settings (`C:\ProgramData\Sentinel\config\sentinel.toml`), it starts the recorder and the archive copy
