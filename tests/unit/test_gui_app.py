@@ -96,8 +96,10 @@ def _drain(app: QApplication, seconds: float = 0.2) -> None:
 def test_every_section_opens(app: QApplication, tmp_path: Path) -> None:
     w = _window(app, tmp_path, admin=True)
     names = w.section_names()
-    assert names == ["Status", "Recordings", "Drives", "Export", "Settings", "System"]   # simplified 2026-11-13
-    for key in ("recordings", "general", "camera", "schedule", "motion", "storage", "export", "system", "status"):
+    # simplified 2026-11-13; Notes added 2026-11-20 (0.3.27)
+    assert names == ["Status", "Recordings", "Drives", "Notes", "Export", "Settings", "System"]
+    for key in ("recordings", "general", "camera", "schedule", "motion", "storage", "export", "notes", "system",
+                "status"):
         w.navigate(key)
         app.processEvents()
         assert w.current_page().key == key
@@ -418,7 +420,7 @@ def test_setup_in_the_window_without_a_camera(app: QApplication, tmp_path: Path,
     assert configured == [_layout(tmp_path).config_file]
     cfg = load_config(configured[0])
     assert cfg.camera.pending and cfg.camera.name == "Gate"
-    assert len(w.section_names()) == 6 and w.ctx.cfg is not None                    # the full window now
+    assert len(w.section_names()) == 7 and w.ctx.cfg is not None                    # the full window now
     w.close()
 
 
@@ -1583,7 +1585,7 @@ def test_return_to_service_is_not_offered_for_a_drive_the_copier_is_using(
         page.on_status(SimpleNamespace(doc={"archive": dict(arc, drives=[dict(d) for d in arc["drives"]])}))
 
     use("in_use")
-    assert page.return_btn.isHidden() and not page.rename_btn.isHidden() and not page.eject_btn.isHidden()
+    assert page.return_btn.isHidden() and not page.rename_btn.isHidden()
     assert "using it now" in page.hint.text()
     for word in ("standby", "full"):
         use(word)
@@ -1593,6 +1595,123 @@ def test_return_to_service_is_not_offered_for_a_drive_the_copier_is_using(
     use("in_use")
     page.on_status(SimpleNamespace(doc={"archive": {"running": False}}))
     assert not page.return_btn.isHidden()                     # copier stopped: not known, offered as before
+    w.close()
+
+
+def test_a_note_is_saved_into_the_recording_log_and_listed(app: QApplication, tmp_path: Path,
+                                                           monkeypatch: pytest.MonkeyPatch) -> None:
+    """Owner's request 2026-11-20: a Notes tab where the people at the recorder write down who, what, when, where
+    and why when something went wrong, "so there's a stored reason for things". No administrator rights."""
+    import json
+
+    from sentinel.db import Ledger
+    from sentinel.gui.app import notes_page
+
+    w = _window(app, tmp_path, admin=False)                # the agents' window
+    page = w.pages["notes"]
+    db = w.ctx.cfg.data_path / "sentinel.db"
+    Ledger(db).close()                                     # the recorder's log exists
+    w.navigate("notes")
+    app.processEvents()
+    assert page.table.rowCount() == 1 and page.table.item(0, 0).text() == "No notes have been saved."
+    assert not page.save_btn.isEnabled()                   # nothing to save yet
+    page.inputs["who"].setText("  A. Agent  ")
+    assert not page.save_btn.isEnabled()
+    page.inputs["what"].setPlainText("SSD_2 was unplugged before the page said it was safe to remove.")
+    assert page.save_btn.isEnabled()                       # who and what are enough; the rest may stay empty
+    page.inputs["when"].setText("20 Nov 2026, about 09:30")
+    page.inputs["where"].setText("At the recorder")
+    page.inputs["why"].setPlainText("Took the wrong drive.")
+    page.save_btn.click()
+    assert page.saved_label.text().startswith("Saved.") and page.inputs["what"].toPlainText() == ""
+    assert page.table.rowCount() == 1
+    assert [page.table.item(0, c).text() for c in range(1, 6)] == [
+        "A. Agent", "SSD_2 was unplugged before the page said it was safe to remove.", "20 Nov 2026, about 09:30",
+        "At the recorder", "Took the wrong drive."]
+    led = Ledger(db, readonly=True)
+    try:
+        rows = led.query("SELECT severity, category, code, message, detail FROM events WHERE code='operator_note'")
+        assert len(rows) == 1 and tuple(rows[0])[:4] == ("audit", "notes", "operator_note", "Note by A. Agent")
+        assert json.loads(rows[0][4])["why"] == "Took the wrong drive."
+        assert led.chain_head() is not None                # an entry of the log like any other: in its chain
+    finally:
+        led.close()
+    # A second note goes above the first; nothing saved can be edited from the page.
+    page.inputs["who"].setText("B. Agent")
+    page.inputs["what"].setPlainText("Correction: it was SSD_1.")
+    page.save_btn.click()
+    assert page.table.rowCount() == 2 and page.table.item(0, 1).text() == "B. Agent"
+    assert not page.table.editTriggers()                   # no editing in the list
+    # A log that cannot be written: the person is told the note is NOT stored, and their words stay in the form.
+    said: list[str] = []
+    monkeypatch.setattr(page, "problem", said.append)
+
+    def refuse(_db, _answers):  # noqa: ANN001, ANN202
+        raise PermissionError(13, "Access is denied")
+    monkeypatch.setattr(notes_page, "save_note", refuse)
+    page.inputs["who"].setText("C. Agent")
+    page.inputs["what"].setPlainText("Something else.")
+    page.save_btn.click()
+    assert said and "NOT stored" in said[0] and page.inputs["what"].toPlainText() == "Something else."
+    assert page.table.rowCount() == 2
+    w.close()
+
+
+def test_safely_remove_is_not_offered_for_a_drive_the_copier_is_using(
+        app: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Owner's report 2026-11-20, from the laptop: with SSD_1 in use, the drive list offered Safely remove…
+    under it. The command always refuses that (error M-007, "press Swap and safely remove instead"), so the
+    button could not work there. It is offered again once the copier has let go of the drive."""
+    from types import SimpleNamespace
+
+    w = _window(app, tmp_path, admin=True)
+    page = w.pages["drives"]
+    monkeypatch.setattr(page.list, "refresh", lambda: None)
+    runs: list[list[str]] = []
+    monkeypatch.setattr(page.log, "run", lambda argv, *a, **k: runs.append(argv))
+    page.list.drives = [{"disk_id": "1", "class": "READY", "role": "archive", "label": "SSD_1", "drive_uuid": "u1",
+                         "fingerprint": "f1", "size_bytes": 2 * 10**12, "mount_paths": ["F:\\"],
+                         "message": "Archive drive ready."},
+                        {"disk_id": "2", "class": "UNSUITABLE", "reasons": ["too_small"], "size_bytes": 31 * 10**9,
+                         "mount_paths": ["G:\\", "H:\\"], "message": "This drive cannot be used."}]
+    page._show_drives()
+    page.table.selectRow(0)
+    assert not page.eject_btn.isHidden()                      # what the copier does with it is not known yet
+    # The laptop's screen: one drive in use, some recordings not copied (the copier needs attention).
+    arc = {"running": True, "state": "ATTENTION", "heartbeat_epoch": time.time(),
+           "message": "Some recordings could not be copied to the archive drive. Not yet archived: 15 h.",
+           "drives": [{"drive_id": "drive_uuid:u1", "label": "SSD_1", "use": "in_use", "free_bytes": 2 * 10**12}]}
+
+    def use(word: str, **more: object) -> None:
+        page.on_status(SimpleNamespace(doc={"archive": dict(
+            arc, drives=[dict(arc["drives"][0], use=word)], **more)}))
+
+    use("in_use")
+    assert page.eject_btn.isHidden() and not page.swap_btn.isHidden()
+    assert page.hint.text() == ("Archive drive ready. Archive copying is using it now. To take it out, press Swap "
+                                "and safely remove.")
+    for word in ("standby", "full"):
+        use(word)
+        assert page.eject_btn.isHidden(), word
+    # Any other drive keeps the button.
+    page.table.selectRow(1)
+    assert not page.eject_btn.isHidden()
+    page.table.selectRow(0)
+    # Prepared by a swap: Safely remove… works for it, like the button the page shows for exactly that drive.
+    use("take_out", state="REMOVE_MANUALLY", removal={"drive_id": "drive_uuid:u1", "label": "SSD_1", "safe": False})
+    assert not page.eject_btn.isHidden() and not page.remove_btn.isHidden()
+    # Taken out with a swap and plugged in again: the copier does not use it, and the button takes it out again.
+    use("awaiting_return", state="ABSENT", awaiting_return=[{"drive_id": "drive_uuid:u1", "label": "SSD_1"}])
+    assert not page.eject_btn.isHidden()
+    assert page.hint.text().endswith("Sentinel is not copying to it. Safely remove… takes it out again.")
+    monkeypatch.setattr(drive_pages.QMessageBox, "question", lambda *a, **k: drive_pages.QMessageBox.StandardButton.Yes)
+    page.eject_btn.click()
+    assert runs and "eject" in runs[0] and runs[0][runs[0].index("--disk") + 1] == "1" and "f1" in runs[0]
+    # Copying stopped: nothing is known about the drive, and the command itself decides, as before.
+    use("in_use")
+    assert page.eject_btn.isHidden()
+    page.on_status(SimpleNamespace(doc={"archive": {"running": False}}))
+    assert not page.eject_btn.isHidden()
     w.close()
 
 

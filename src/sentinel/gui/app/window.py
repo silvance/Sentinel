@@ -179,14 +179,17 @@ class AppWindow(QMainWindow):
 
             return [SetupPage]
         from .drive_pages import DrivesPage, ExportPage
+        from .notes_page import NotesPage
         from .settings_pages import CameraPage, GeneralPage, MotionPage, SchedulePage, StoragePage
         from .status_pages import RecordingsPage, StatusPage, SystemPage
 
         return [StatusPage, RecordingsPage, GeneralPage, CameraPage, SchedulePage, MotionPage, StoragePage,
-                DrivesPage, ExportPage, SystemPage]
+                DrivesPage, NotesPage, ExportPage, SystemPage]
 
     # GUI simplification 2026-11-13: six sections, the daily ones first; the settings pages are tabs of Settings.
-    NAV = ("status", "recordings", "drives", "export", "settings", "system", "setup")
+    # 0.3.27 (owner's request 2026-11-20): Notes, for the people at the recorder, after the pages they use daily.
+    NAV = ("status", "recordings", "drives", "notes", "export", "settings", "system", "setup")
+    NAV_ICONS = {"setup": "system", "notes": "edit"}
     SETTINGS_TABS = ("general", "camera", "schedule", "motion", "storage")
 
     def _build(self) -> None:
@@ -274,7 +277,7 @@ class AppWindow(QMainWindow):
             else:
                 continue
             self.stack.addWidget(widget)
-            item = QListWidgetItem(glyph(k if k != "setup" else "system", p.text, 18), title)
+            item = QListWidgetItem(glyph(self.NAV_ICONS.get(k, k), p.text, 18), title)
             item.setData(Qt.ItemDataRole.UserRole, k)
             self.nav.addItem(item)
             self._rows[self.nav.count() - 1] = k

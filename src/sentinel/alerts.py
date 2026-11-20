@@ -90,8 +90,10 @@ CATALOG: dict[str, AlertDef] = {d.code: d for d in [
              "Do not use this drive. " + SUPPORT, False),
     AlertDef("M-006", "The drive changed before it could be erased",
              "Nothing was erased. Check the drive and try again.", False),
+    # 0.3.27: the action used to say "Close any open files on it and try again", which is right for one cause
+    # only (Windows refused because something on the drive is open) and stood above every other one.
     AlertDef("M-007", "The drive could not be safely removed",
-             "Do not unplug the drive yet. Close any open files on it and try again. "
+             "Do not unplug the drive yet. The rest of the message says why and what to do. "
              "If this continues, contact technical support.", False),
     AlertDef("M-008", "Drive checks are unavailable", SUPPORT, False),
     AlertDef("M-009", "This drive holds Sentinel recordings and will not be erased",

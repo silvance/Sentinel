@@ -665,7 +665,11 @@ class DrivesPage(Page):
             self.designate_btn: d is not None and cls == "READY" and role != "archive",
             self.return_btn: d is not None and cls == "READY" and role == "archive" and use not in ACTIVE_USES,
             self.rename_btn: d is not None and cls == "READY",
-            self.eject_btn: d is not None and bool(_letters(d)) and not is_noise(d),
+            # 0.3.27 (owner's report 2026-11-20): Safely remove… was offered for the archive drive in use, where the
+            # command always refuses it (error M-007: "press Swap and safely remove instead"). Two buttons with
+            # nearly the same name, one of which cannot work: it is not offered while the copier uses the drive
+            # or keeps it ready. The hint below names the button that takes the drive out.
+            self.eject_btn: d is not None and bool(_letters(d)) and not is_noise(d) and use not in ACTIVE_USES,
         }
         for b, on in show.items():
             b.setVisible(on)
@@ -675,9 +679,14 @@ class DrivesPage(Page):
         elif not any(show.values()):
             self.hint.setText(str(d.get("message") or "Nothing can be done with this drive here."))
         else:
-            now = {"in_use": " Archive copying is using it now.",
+            now = {"in_use": " Archive copying is using it now. To take it out, press Swap and safely remove.",
                    "standby": " Standing by: copying moves to it when the drive in use is full.",
-                   "full": " It is full: press Swap and safely remove before taking it out."}.get(use or "", "")
+                   "full": " It is full: press Swap and safely remove before taking it out.",
+                   }.get(use or "", "")
+            if use == "awaiting_return" and self.ctx.admin:
+                # 0.3.27: Safely remove… now takes such a drive out again (it used to refuse and point at Swap,
+                # which prepares nothing for a drive that is not in use).
+                now = " Sentinel is not copying to it. Safely remove… takes it out again."
             self.hint.setText(str(d.get("message") or "") + now)
 
     def _selected(self) -> dict[str, Any] | None:

@@ -23,7 +23,8 @@
 </ol>
 <p><b>If the screen shows a problem:</b> do not switch anything off and do not unplug anything. Read the
 message, write down its code (for example R-003) and the time, and call the person who looks after the
-system. See part 5.</p>
+system. See part 5. <b>If something went wrong or was done differently,</b> write it down on the
+<b class="ui">Notes</b> page.</p>
 </td></tr></table>
 
 <h2>1. Is it recording?</h2>
@@ -98,6 +99,9 @@ has to be pressed for that, and recording is not interrupted.</p>
 <li><b>A drive came back from the office.</b> Plug it in. Its line reads <b class="ui">Back from the office:
     return it to service before it is used again</b>. That step (<b class="ui">Return to service…</b>) is for
     the person who looks after the system, after the office has copied the drive and checked the copy.</li>
+<li><b>The screen shows code M-007</b> (the drive could not be safely removed). Do not unplug the drive. Read
+    the line under the code: it says why, and what to do. To take out an archive drive that Sentinel is using,
+    the button is always <b class="ui">Swap and safely remove</b>.</li>
 <li><b>No drive is plugged in for a while.</b> Recording continues; the recordings wait on the computer and
     are copied when a drive is put in.</li>
 </ul>
@@ -143,6 +147,14 @@ Contact technical support and provide diagnostic report.</p>
 <b class="ui">Recovering automatically</b> need nothing from you; <b class="ui">Attention needed</b> means
 recording continues but someone should look; <b class="ui">Action required</b> and
 <b class="ui">Recording stopped</b> mean call now.</p>
+<h3>Writing a note</h3>
+<p>If something went wrong or was done differently, write it down, so that there is a reason on record:</p>
+<ol>
+<li>Open <b class="ui">Notes</b>.</li>
+<li>Fill in <b>Who</b> (your name), <b>What</b> happened, <b>When</b>, <b>Where</b> and <b>Why</b>.</li>
+<li>Press <b class="ui">Save note</b>. The note appears under <b class="ui">Saved notes</b> with the time it
+    was saved. It cannot be changed or deleted; to correct it, save another note.</li>
+</ol>
 
 <h2 style="page-break-before: always">6. For the person who looks after the system</h2>
 <p>Everything is done in the Sentinel window. Settings can only be changed after
@@ -176,8 +188,25 @@ administrator's password.</p>
     is finished and saved first, and nothing is read from the camera until the recorder is started again, so
     the Status page shows <b class="ui">Not recording</b> and no live view. To record again, press
     <b class="ui">Start recording</b> on the Status page or <b class="ui">Restart recorder</b> here.</td></tr>
+<tr><td>Notes</td><td>What the people at the recorder wrote down. The notes are also in the diagnostic
+    report.</td></tr>
 <tr><td>Help</td><td><b class="ui">User guide (PDF)</b> opens this guide.</td></tr>
 </table>
+<h3>After testing, before the real recordings start</h3>
+<p><b>Never delete recordings by hand</b>, not from the computer and not from an archive drive. Sentinel
+keeps a log of every recording and reports each missing one (codes V-001, A-006, A-008), with no way to clear
+it. To remove test recordings there is one step, done once:</p>
+<ol>
+<li>Close the Sentinel window. Plug in every archive drive.</li>
+<li>Right-click <b>START-A-NEW-RECORDING-LOG.cmd</b> (in the folder the program came in), choose
+    "Run as administrator". It shows what will be set aside and removed.</li>
+<li>Type NEW LOG and your name when it asks.</li>
+<li>Open Sentinel again. Opening it starts recording.</li>
+</ol>
+<p>The step sets the recording log aside (it is kept, never deleted), deletes the recordings on the computer,
+empties the archive drives that are plugged in (they keep their names) and starts a new, empty log whose first
+entry records the step. Settings are not changed. Without the file, the same is done by the command
+"Sentinel.exe new-recording-log" in a Command Prompt opened as administrator.</p>
 <p class="small">The file READ-ME-FIRST.txt beside the program lists the commands for technical support.</p>
 
 <h2 style="page-break-before: always">7. Messages and their codes</h2>
@@ -187,6 +216,23 @@ versions.</p>
 
 <h2 style="page-break-before: always">8. What changed</h2>
 <p>Changes that matter to the people who use the recorder, newest first.</p>
+<h3>0.3.27</h3>
+<ul>
+<li>New page <b class="ui">Notes</b>: write down who, what, when, where and why when something went wrong or
+    was done differently, and press <b class="ui">Save note</b>. See part 5.</li>
+<li>For the person who looks after the system: test recordings are cleared with one step,
+    START-A-NEW-RECORDING-LOG.cmd, instead of deleting them by hand. See part 6.</li>
+<li>Drives: the list <b class="ui">Drives plugged in</b> no longer offers <b class="ui">Safely remove…</b> for
+    an archive drive that Sentinel is using. That button could not take such a drive out and answered with
+    code M-007. The button for it is <b class="ui">Swap and safely remove</b>, as before, and the line under
+    the list now says so.</li>
+<li>Code M-007 no longer says to close open files when that is not the reason. The line under the code says
+    why the drive was not removed and what to do.</li>
+<li>For the person who looks after the system: a drive that was taken out with
+    <b class="ui">Swap and safely remove</b> and plugged in again can be taken out again with
+    <b class="ui">Safely remove…</b>. Every removal that did not happen is now in the recording log and in the
+    diagnostic report, with its reason.</li>
+</ul>
 <h3>0.3.26</h3>
 <ul>
 <li>The computer makes room earlier: recordings already on an archive drive that has been taken out are

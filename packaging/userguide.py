@@ -67,7 +67,7 @@ td.code { font-weight: bold; }
 ul.never li { color: #7a1616; }
 """
 LAYOUT = {"page": "Letter", "margins_mm": [18, 16, 18, 14], "resolution": 144, "font": ["Segoe UI", 10],
-          "footer_inch": 0.34}
+          "footer_inch": 0.34, "keep_headings": True}
 
 
 def version() -> str:
@@ -182,7 +182,59 @@ def _document(body: str, device: object, width: float, height: float):  # noqa: 
     doc.documentLayout().setPaintDevice(device)
     doc.setHtml(f"<html><body>{body}</body></html>")
     doc.setPageSize(QSizeF(width, height))
+    if LAYOUT.get("keep_headings"):
+        # A heading left at the foot of a page while what it heads starts the next page goes to the next page
+        # too. 0.3.27: every new entry under "What changed" moves all that follows it, and "0.3.21" ended up
+        # alone at the foot of a page ("Z  Test system" in the list of messages had been since 0.3.23). Qt's
+        # text layout has no "keep with next", so that heading gets a page break before it and the guide is
+        # laid out afresh: one heading a pass, because moving one moves everything after it.
+        for _ in range(40):
+            k = _stranded_heading(doc)
+            if k is None:
+                break
+            body = _break_before_heading(body, k)
+            doc = QTextDocument()
+            doc.setDocumentMargin(0)
+            doc.setDefaultFont(QFont(*LAYOUT["font"]))
+            doc.setDefaultStyleSheet(CSS)
+            doc.documentLayout().setPaintDevice(device)
+            doc.setHtml(f"<html><body>{body}</body></html>")
+            doc.setPageSize(QSizeF(width, height))
     return doc
+
+
+HEADING_TAG = re.compile(r"<h[1-6]\b[^>]*>", re.I)
+
+
+def _stranded_heading(doc: object) -> int | None:
+    """Which heading (0 = the first in the guide) ends a page with its text starting on the next one, or None.
+    Measured by lines: a block that does not fit keeps its place on the old page and only its lines move."""
+    layout, height = doc.documentLayout(), doc.pageSize().height()
+    doc.pageCount()                                   # lays the whole guide out
+    k, block = -1, doc.begin()
+    while block.isValid():
+        nxt = block.next()
+        if block.blockFormat().headingLevel():
+            k += 1
+            if nxt.isValid() and block.layout().lineCount() and nxt.layout().lineCount():
+                last = block.layout().lineAt(block.layout().lineCount() - 1)
+                foot = layout.blockBoundingRect(block).top() + last.y() + last.height() - 1
+                # + 1: a line moved to the next page starts exactly at its top, which rounds either way
+                start = layout.blockBoundingRect(nxt).top() + nxt.layout().lineAt(0).y() + 1
+                if int(foot // height) != int(start // height):
+                    return k
+        block = nxt
+    return None
+
+
+def _break_before_heading(body: str, k: int) -> str:
+    m = list(HEADING_TAG.finditer(body))[k]
+    tag = m[0]
+    if "page-break-before" in tag:        # it starts a page already; nothing more can be done for it
+        raise SystemExit(f"the guide's heading {tag} does not fit on a page with the text under it")
+    tag = (tag[:-1] + ' style="page-break-before: always">') if "style=" not in tag else \
+        re.sub(r'style="', 'style="page-break-before: always; ', tag, count=1)
+    return body[:m.start()] + tag + body[m.end():]
 
 
 def _paint_page(painter: object, doc: object, i: int, pages: int, footer: float, for_version: str) -> None:

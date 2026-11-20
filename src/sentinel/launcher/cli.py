@@ -444,6 +444,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out", help="file to save the report to (default: the Sentinel log folder)")
     p = add("diagnostics", "write a diagnostic report for support")
     p.add_argument("--out")
+    p = add("new-recording-log", "after testing, before real use: set the recording log aside, delete the test "
+                                 "recordings, empty the archive drives plugged in, start a new log (administrator)")
+    p.add_argument("--who", help="your name, for the record (asked for when not given)")
+    p.add_argument("--reason", help="why (default: testing finished; start of real recording)")
+    p.add_argument("--keep-drives", action="store_true", help="do not empty the archive drives that are plugged in")
+    p.add_argument("--no-start", action="store_true", help="do not start recording again afterwards")
+    p.add_argument("--dry-run", action="store_true", help="only show what would be set aside and removed")
+    p.add_argument("--yes", action="store_true", help="do not ask; needs --confirm \"NEW LOG\"")
+    p.add_argument("--confirm", help="the confirmation words, with --yes")
     sub.add_parser("update", help="apply a version update file, go back, or show update status (administrator)")
     p = add("about", "version, folders, bundled tools and build manifest")
     p.add_argument("--verify", action="store_true", help="check installed files against the build manifest")
@@ -493,6 +502,12 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_ledger(list(args.ledger_args))
     if args.cmd == "stop":
         return cmd_stop(args)
+    if args.cmd == "new-recording-log":
+        from .. import newlog
+
+        return newlog.main(_resolve(args.config), who=args.who, reason=args.reason, yes=args.yes,
+                           confirm=args.confirm, keep_drives=args.keep_drives, no_start=args.no_start,
+                           dry_run=args.dry_run)
     if args.cmd == "about":
         return cmd_about(args)
     if args.cmd == "motion-test":

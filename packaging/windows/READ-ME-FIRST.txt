@@ -49,5 +49,12 @@ For the installing technician
   drives list|prepare|eject, archive ..., export run|status,
   ledger head|verify (recording-log chain head for the custody form at every
   drive swap; Command Prompt as administrator).
+* After testing, before real use: "Sentinel.exe new-recording-log" (Command
+  Prompt as administrator, every Sentinel window closed, every archive drive
+  plugged in). It sets the recording log aside (kept, never deleted), deletes
+  the test recordings from this computer, empties the archive drives that are
+  plugged in and starts a new, empty log. Settings stay as they are. Do NOT
+  delete recordings by hand: Sentinel then reports every one as missing.
+  "--dry-run" only shows what would be removed.
 * licences\ contains the third-party licences and SOURCE-OFFER.txt.
 * ffmpeg\ contains FFmpeg and its licence; see ffmpeg\FFMPEG-LICENCE-NOTE.txt.

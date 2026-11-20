@@ -175,8 +175,10 @@ def safe_remove_windows(disk: DiskInfo, all_disks: list[DiskInfo], protected: Pr
                   "veto_name": veto_name})
     if cr != CR_SUCCESS or veto != 0:
         vt = PNP_VETO_NAMES.get(veto, str(veto))
-        return SafeRemoveResult(False, "The drive is still in use and cannot be removed yet. Close any open files "
-                                "on it and try again.", needs_admin=(veto == 13) or None, steps=steps, veto=vt)
+        # 0.3.27: says what "open files" are for the people at the recorder (the general M-007 line no longer does).
+        return SafeRemoveResult(False, "The drive is still in use and cannot be removed yet. Close anything that is "
+                                "open from it (a video playing from it, a folder window showing it) and try again.",
+                                needs_admin=(veto == 13) or None, steps=steps, veto=vt)
     deadline = time.monotonic() + wait_s
     while time.monotonic() < deadline:
         if not any(_is_this_disk(disk, d) for d in enumerate_fn()):
@@ -199,8 +201,9 @@ def safe_remove_linux(disk: DiskInfo, protected: ProtectedStorage) -> SafeRemove
                                capture_output=True, timeout=120, check=False)
             steps.append({"step": "unmount", "device": v.dev_path, "ok": p.returncode == 0})
             if p.returncode != 0:
-                return SafeRemoveResult(False, "The drive is still in use and cannot be removed yet. Close any open "
-                                        "files on it and try again.", needs_admin=None, steps=steps)
+                return SafeRemoveResult(False, "The drive is still in use and cannot be removed yet. Close anything "
+                                        "that is open from it (a video playing from it, a folder window showing "
+                                        "it) and try again.", needs_admin=None, steps=steps)
     p = subprocess.run(["udisksctl", "power-off", "--block-device", str(disk.device_path), "--no-user-interaction"],
                        capture_output=True, timeout=120, check=False)
     steps.append({"step": "power_off", "ok": p.returncode == 0})

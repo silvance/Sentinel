@@ -295,29 +295,78 @@ def _default_who() -> str:
     return _os_user()
 
 
-def _copier_running(env: _Env) -> bool:
+def _archive_doc(env: _Env) -> dict[str, Any]:
+    """The archive copier's own status document; empty when there is none or it cannot be read."""
     if env.cfg is None:
-        return False
-    from ..archive.status import STATUS_FILE, copier_running, read_archive_status
+        return {}
+    from ..archive.status import STATUS_FILE, read_archive_status
 
-    return copier_running(read_archive_status(env.cfg.data_path / STATUS_FILE) or {})
+    doc = read_archive_status(env.cfg.data_path / STATUS_FILE)
+    return doc if isinstance(doc, dict) else {}
 
 
-def _prepared_by_swap(env: _Env, marker: dict[str, Any]) -> bool:
-    """The running copier finished with this drive for a swap and waits for it to be taken out (field report
-    2026-11-13: the swap said to remove it with Windows when its own eject failed, and Safely remove refused it
-    because copying was running). Nothing is written to it any more and the swap is already recorded."""
-    if env.cfg is None:
-        return False
-    from ..archive.status import STATUS_FILE, copier_running, read_archive_status
+SWAPPED, WAITING = "swap", "awaiting_return"
 
-    doc = read_archive_status(env.cfg.data_path / STATUS_FILE) or {}
+
+def _done_with(doc: dict[str, Any], marker: dict[str, Any]) -> str | None:
+    """Why the running copier does not write to this archive drive, or None when it may be writing to it.
+
+    ``SWAPPED``: it finished with the drive for a swap and waits for it to be taken out (field report 2026-11-13:
+    the swap said to remove it with Windows when its own eject failed, and Safely remove refused it because
+    copying was running).
+    ``WAITING``: the drive was taken out with a swap before and is plugged in again; the copier does not copy to
+    it until it is returned to service (0.3.27: Safely remove refused it and told the person to press Swap, and
+    Swap prepares nothing for a drive that is not in use, so neither button took it out).
+
+    In both cases the swap is already recorded, so nothing is recorded a second time."""
+    from ..archive.status import copier_running
+
+    if not copier_running(doc):
+        return None
+    key = f"drive_uuid:{marker.get('drive_uuid')}"
     rem = doc.get("removal")
-    return (copier_running(doc) and isinstance(rem, dict)
-            and rem.get("drive_id") == f"drive_uuid:{marker.get('drive_uuid')}")
+    if isinstance(rem, dict) and rem.get("drive_id") == key:
+        return SWAPPED
+    waiting = doc.get("awaiting_return")
+    if isinstance(waiting, list) and any(isinstance(w, dict) and w.get("drive_id") == key for w in waiting):
+        return WAITING
+    return None
+
+
+def _not_removed(env: _Env, disk: DiskInfo, marker: dict[str, Any] | None, reason: str, text: str, *,
+                 code: str | None = "M-007", detail: dict[str, Any] | None = None) -> None:
+    """Say why a drive was not removed, then write it into the recording log (0.3.27: nothing recorded which
+    M-007 a person had seen, so it could not be found out afterwards). The record is for technical support: it
+    never changes what the person is told or the command's result."""
+    head = _alert_line(code)
+    print(f"{head}\n{text}" if head else text, flush=True)
+    if env.cfg is None:
+        return
+    from ..db import Ledger
+
+    db = env.cfg.data_path / "sentinel.db"
+    try:
+        present, _why = _installed.path_state(db)
+        if not present:
+            return
+        ledger = Ledger(db)
+    except Exception:  # noqa: BLE001 - no access (the operator's window), locked, damaged: nothing to record in
+        return
+    try:
+        vol_label = next((v.label for v in disk.volumes if v.label), None)
+        ledger.add_event("warning", "drives", "drive_not_removed", "A drive was not removed with Safely remove",
+                         {"disk": disk.disk_id, "label": (marker or {}).get("label") or vol_label,
+                          "drive_id": f"drive_uuid:{marker['drive_uuid']}" if marker else None,
+                          "model": disk.model, "size_bytes": disk.size_bytes, "code": code, "reason": reason,
+                          "text": text[:600], **({"detail": detail} if detail else {}), "via": "drives_eject"})
+    except Exception:  # noqa: BLE001 - see above
+        pass
+    finally:
+        ledger.close()
 
 
 def cmd_eject(env: _Env, args: argparse.Namespace) -> int:
+    from ..archive.status import copier_running
     from .eject import archive_marker, record_archive_removal, safe_remove
 
     disks = env.enumerate()
@@ -327,32 +376,44 @@ def cmd_eject(env: _Env, args: argparse.Namespace) -> int:
     # Review 2026-11-12: bind the removal to the drive the person was shown (disk numbers are reused).
     seen_fp = (getattr(args, "fingerprint", None) or "").strip()
     if seen_fp and seen_fp != d.identity.fingerprint():
-        print(f"{_alert_line('M-007')}\nDisk {args.disk} is not the drive that was shown when you chose Safely "
-              "remove: it was replaced or has changed. Nothing was removed. Select the drive in the list again and try again.")
+        _not_removed(env, d, None, "not_the_drive_shown",
+                     f"Disk {args.disk} is not the drive that was shown when you chose Safely remove: it was "
+                     "replaced or has changed. Nothing was removed. Select the drive in the list again and try again.")
         return EXIT_REFUSED
     arc = archive_marker(d, getattr(env, "inspector", None))
-    prepared = arc is not None and _prepared_by_swap(env, arc)
-    if arc is not None and _copier_running(env) and not prepared:
+    doc = _archive_doc(env) if arc is not None else {}
+    done = _done_with(doc, arc) if arc is not None else None
+    name = (arc or {}).get("label") or "This drive"
+    if arc is not None and copier_running(doc) and done is None:
         # Review 2026-11-12: the copier may be writing to it; Swap finishes the copy and records the removal.
-        print(f"{_alert_line('M-007')}\n{arc.get('label') or 'This drive'} is an archive drive and archive copying "
-              "is running. Press Swap and safely remove instead: it finishes the copying and records the drive as "
-              "taken out. Nothing was removed.")
+        # 0.3.27: the Drives page no longer offers Safely remove… for such a drive (the owner pressed it for the
+        # drive in use and got this refusal); it is still refused here for the command line.
+        _not_removed(env, d, arc, "archive_drive_in_use",
+                     f"{name} is an archive drive and archive copying is running, so it was not removed. Do not "
+                     "unplug it. To take an archive drive out, press Swap and safely remove at the top of the "
+                     "Drives page: it finishes the copying, records the drive as taken out and says when it is "
+                     "safe to remove.")
         return EXIT_REFUSED
     try:
         res = safe_remove(d, disks, env.protected, enumerate_fn=env.enumerate)
     except DriveError as exc:
-        if prepared and exc.reason == "shared_device":
+        if done == SWAPPED and exc.reason == "shared_device":
             # 2026-11-17: a drive the swap prepared, in a dock whose bays share one USB device. Switching it off
             # would stop the drive copying continues on; nothing is written to this one any more.
-            print(f"{arc.get('label') or 'This drive'} shares its dock with the archive drive in use, so it cannot "  # type: ignore[union-attr]
-                  "be switched off by itself. Sentinel has finished writing to it: take out only that drive and "
-                  "leave the other one in.")
+            _not_removed(env, d, arc, "shared_device_after_swap",
+                         f"{name} shares its dock with the archive drive in use, so it cannot be switched off by "
+                         "itself. Sentinel has finished writing to it: take out only that drive and leave the other "
+                         "one in.", code=None, detail=exc.detail)
             return EXIT_REFUSED
-        print(f"{_alert_line(exc.code)}\n{exc}")
+        _not_removed(env, d, arc, exc.reason, str(exc), code=exc.code, detail=exc.detail)
         return EXIT_REFUSED
-    print(res.message if res.ok else f"{_alert_line('M-007')}\n{res.message}")
-    if res.ok and arc is not None and not prepared:      # a swap already recorded the drive as taken out
-        print(_record_removal(env, arc, record_archive_removal))
+    if res.ok:
+        print(res.message)
+        if arc is not None and done is None:     # otherwise a swap already recorded the drive as taken out
+            print(_record_removal(env, arc, record_archive_removal))
+    else:
+        _not_removed(env, d, arc, "refused_by_windows" if res.veto else "not_disconnected", res.message,
+                     detail={"veto": res.veto, "steps": res.steps})
     if args.verbose:
         print(json.dumps(res.steps, indent=2))
     return EXIT_OK if res.ok else EXIT_FAILED

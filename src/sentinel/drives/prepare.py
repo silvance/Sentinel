@@ -217,9 +217,11 @@ def next_label(policy: DrivePolicy, audit: AuditSink, disks: list[DiskInfo]) -> 
     used: list[int] = []
     pending: dict[str, str] = {}
     ended: set[str] = set()
+    # 'drive_name_carried_over' (0.3.27): names given before a new recording log was started (sentinel.newlog).
     for row in audit.query("SELECT code, detail FROM events WHERE category=? AND code IN ('drive_prepared', "
                            "'drive_renamed', 'drive_rename_authorized', 'drive_prepare_authorized', "
-                           "'drive_prepare_failed', 'drive_prepare_refused')", (AUDIT_CATEGORY,)):
+                           "'drive_prepare_failed', 'drive_prepare_refused', 'drive_name_carried_over')",
+                           (AUDIT_CATEGORY,)):
         try:
             d = json.loads(row[1] or "{}")
         except ValueError:

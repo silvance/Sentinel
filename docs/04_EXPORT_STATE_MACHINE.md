@@ -126,6 +126,34 @@ event Swap writes (with the drive's last copy id), so the drive can be returned 
 copies it. `drives eject --fingerprint` refuses when the disk number now belongs to another drive, and success is
 judged by the disk's Plug-and-Play instance ID (a lookalike in another enclosure no longer makes it look failed).
 
+**Safely remove and what the copier is doing with the drive (0.3.27, field report 2026-11-20).** While archive
+copying runs, `drives eject` decides by the copier's own status (`archive_status.json`):
+
+| The archive drive is | `drives eject` | Recorded |
+|---|---|---|
+| in use, standing by, or full and not yet swapped | refused (M-007): press Swap and safely remove | `drive_not_removed` |
+| prepared by a swap (`removal`) | ejected | nothing more: the swap recorded it |
+| taken out with a swap earlier and plugged in again (`awaiting_return`) | ejected (0.3.27) | nothing more: the swap recorded it, and the drive stays on the copier's list of drives waiting for their return |
+
+The third row was a dead end until 0.3.27: Safely remove refused the drive and said to press Swap, and Swap
+prepares nothing for a drive the copier does not use (`_select` leaves a waiting drive out; `_no_drive` drops
+the request). The ways out were Cancel swap, which puts the drive back in use, or Windows' own Safely Remove
+Hardware. The copier writes to a waiting drive only while it is returned to service, which takes it off that
+list first.
+
+The Drives page no longer offers **Safely remove…** in the drive list for a drive of the first row (the laptop's
+owner pressed it for the drive in use and got the refusal; docs/branches/req-operator-gui.md section 12). The
+refusal stays in the command for the command line and for a list that is a few seconds old.
+
+M-007's general sentence no longer says "Close any open files on it and try again": that fits one cause only
+(Windows refused because something on the drive is open, where the reason line now says what to close) and stood
+above every other reason. Every removal that does not happen is written to the recording log as
+`drive_not_removed` (category `drives`, warning) with the reason token (`archive_drive_in_use`,
+`not_the_drive_shown`, `refused_by_windows`, `not_disconnected`, or the removal's own: `protected`,
+`not_removable`, `shared_device`, ...), the sentence the person was shown, and Windows' veto. It is in the
+diagnostic report with the other events. The record is best effort: where the recording log cannot be written
+(no administrator rights), the answer to the person is the same and nothing is recorded.
+
 ## 4. Automatic drive detection and one-button preparation
 
 On insertion the drive is **classified automatically** (UDisks2/udev: partition table, filesystem

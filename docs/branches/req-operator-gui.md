@@ -327,3 +327,102 @@ the laptop; with the real camera; with the Windows service installed (the contro
 
 **Not changed, and worth a decision.** The recording log holds the stop (`graceful_stop`, `service_stop`) but
 not who asked for it or from where; a stop from the window is not told apart from Windows shutting down.
+
+## 12. Field report 2026-11-20: Safely remove… was offered for the archive drive in use (0.3.27)
+
+**Report (owner, training the agents at the laptop, window in administrator mode, no camera connected).**
+"When I tried to Safely Remove Drive, I got an error, error M-007." The screen: SSD_1 "In use", selected in
+Drives plugged in, with **Rename…** and **Safely remove…** under the list; the output pane read "Error M-007:
+The drive could not be safely removed. Do not unplug the drive yet. Close any open files on it and try again.
+If this continues, contact technical support." and under it "SSD_1 is an archive drive and archive copying is
+running. Press Swap and safely remove instead: ...".
+
+**Cause.** Not the missing camera. The page has two buttons with nearly the same name. **Swap and safely remove**
+(archive box) is the one that takes an archive drive out. **Safely remove…** (drive list) runs `drives eject`,
+which has refused an archive drive while copying runs since the review of 2026-11-12 (the copier may be writing
+to it). So for the drive in use the second button could never work, and the page offered it all the same. Its
+answer then looked like a fault: an error code, advice about open files that had nothing to do with it, and
+"contact technical support", with the one useful sentence last.
+
+**Since 0.3.27.**
+
+| Selected drive | Safely remove… in the list | The line under the list ends with |
+|---|---|---|
+| archive drive the copier reports as in use | not offered | "Archive copying is using it now. To take it out, press Swap and safely remove." |
+| standing by, or full and not yet swapped | not offered | as before (full: "press Swap and safely remove before taking it out") |
+| prepared by a swap | offered (and the page's own "Safely remove SSD_1" above) | |
+| taken out with a swap and plugged in again | offered, and now works (docs/04, section 3) | "Sentinel is not copying to it. Safely remove… takes it out again." (administrator window) |
+| any other drive; any drive while copying is not running | offered, as before | |
+
+It is the rule Return to service… has followed since 2026-11-17 (`ACTIVE_USES`). The command still refuses a
+drive in use (command line; a list that is a few seconds old), now with the reason first: M-007's general
+sentence no longer mentions open files (docs/04, section 3), and what the person was told is written to the
+recording log (`drive_not_removed`).
+
+**The state the laptop was in.** The screen also showed "Some recordings could not be copied to the archive
+drive. Not yet archived: 15 h." (A-008, with V-001 and A-006). A swap does not wait for what cannot be copied:
+`_step` runs `_do_swap` before it looks for the next recording. `tests/unit/test_safely_remove_archive_drive.py`
+puts the real copier into that state (a recording that no longer matches its sealed hash), presses Swap and
+then runs the page's removal.
+
+**What the laptop's diagnostic report showed (same day).** V-001, A-006 and A-008 were not from the missing
+camera either. 324 of the 327 recordings in the log were gone from the storage folder: the owner had deleted the
+test recordings by hand ("there's no other way to do so"), and the swap of 09:23 that morning had come from a
+read-only window. Sections 13 and 14 are the two things asked for after that.
+
+**Not changed.** In a read-only window (no administrator rights) both Safely remove buttons are greyed out, as
+before: after a swap such a person is sent to the button and cannot press it, and is left with Windows' own
+Safely Remove Hardware, which the copier's message also names. Whether the agents' window is in administrator
+mode on the laptop is not known here.
+
+## 13. A new recording log: clearing test recordings before real use (0.3.27)
+
+**Need (owner, 2026-11-20, hours before the recorder went into real use).** "I have to clear the folder to
+remove test recordings before the real recordings start and there's no other way to do so. All motion recording
+schedules, Camera IP addresses, etc. must be left in place but the history needs to be cleared." Deleting the
+files by hand leaves a log that lists every one of them; the recorder then reports each as missing for good.
+
+**`Sentinel.exe new-recording-log`** (`sentinel.newlog`; administrator; `START-A-NEW-RECORDING-LOG.cmd` in the
+hand-carry folder runs it). In order: stop the recorder and the copier and hold both instance locks; write
+`recording_log_closed` into the log in use; copy that log to `<data>/previous-recording-logs/<UTC>/`, compare
+the copy by SHA-256, and only then empty the log file in place; move the copier's state and the diagnostic
+reports there too; delete the storage folder's contents; empty Sentinel's own folders on every archive drive
+that is plugged in (the marker, and so the drive's name, stays); start the new log with `recording_log_started`
+(who, why, what was removed, the earlier log's folder and chain head) and one `drive_name_carried_over` per
+drive name used so far, which `next_label` reads; remove the stale `status.json` and ledger snapshot. Settings,
+the camera's sign-in and the installed versions are not touched.
+
+Decisions and why:
+
+* **The earlier log is never deleted.** A step that clears an evidence recorder's history has to leave a trace
+  that it happened and of what existed before. The folder holds the whole log; the new log's first entry names
+  it and its fingerprint.
+* **Emptied in place, not replaced.** An empty file is a new database to SQLite and keeps the file's owner and
+  permissions. A log created afresh by the administrator command could be unwritable for a recorder that runs
+  without administrator rights (the laptop starts the recorder from the window).
+* **Nothing is removed unless the log could be set aside.** A Sentinel window that is still open has the log
+  open: the command then writes `recording_log_close_abandoned`, starts recording again and stops. Checked by
+  an open that shares nothing (Windows) and by leftover `-wal`/`-shm` files.
+* **Typed confirmation** (`NEW LOG`) after a listing of what will be set aside and removed; `--dry-run` shows
+  the listing only. No button in the window: it is done once, by the administrator.
+* **The script uses `--no-start`** and tells the person to open Sentinel: the recorder is then started as it is
+  every day, not from the administrator's command prompt.
+
+A drive that is not plugged in keeps its test recordings; the listing says so before the confirmation.
+Tests: `tests/unit/test_new_recording_log.py` (the real log, copier and a folder as drive).
+
+## 14. Notes (0.3.27)
+
+**Request (owner, 2026-11-20).** "Add a Notes tab. I'll explain to the agents that if they mess up or do
+something wrong, to just notate the 5 Ws in that tab and save it so there's a stored reason for things."
+
+A seventh section, **Notes**, after Drives (`gui/app/notes_page.py`): five fields (Who, What, When, Where, Why;
+Who and What are required), **Save note**, and the saved notes below, newest first. A note is an entry of the
+recording log (`operator_note`, category `notes`, severity audit): it carries the time it was saved and the
+Windows account, cannot be edited or deleted, is covered by the log's chain like every other entry and is in the
+diagnostic report (`events.csv`). It needs no administrator rights where the window's account can write the log
+(recorder started from the window, as on the laptop). Where it cannot (recorder installed as a Windows service),
+the page says the note was NOT stored and keeps the text in the form; a request-folder route for that set-up is
+not built.
+
+A new recording log sets the notes aside with the rest of the earlier log.
