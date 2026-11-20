@@ -180,5 +180,14 @@ taking storage settings.
 
 Full suite on the second development machine, 2026-11-20: 1715 passed, 2 skipped, none failed.
 
+**The built 0.3.26 (commit eb3651a), same day:** recorder and window from the build, simulated camera,
+settings with archive copy and removal on and no level set, on a drive of 999 GB with 770 GB free. The
+status: `retention.floor_bytes` 150 000 000 000, `target_bytes` 160 737 418 240, `reclaimable_bytes` 0, last
+pass removed nothing and was not blocked, no L-002. Read through UI Automation: Status > Details "Kept on this
+computer: recordings since 2026-11-20; archived recordings are deleted when less than 150 GB is free";
+Settings > Storage "Start deleting when free space is below 150.0" with "The recording drive holds 999 GB;
+770 GB are free now. This is the built-in level for a drive of this size; nothing is set in the settings
+file." (The script could not open the Storage tab by itself; the window was started on that page.)
+
 **Not tried:** on a drive that is really full (free space is simulated, as in section 6); on the laptop;
 over days. The warning on the old level was not watched on a real recorder, only derived and simulated.
