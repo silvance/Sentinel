@@ -372,6 +372,8 @@ def run(cfg_path: Path, cfg: AppConfig, *, who: str, reason: str, empty_drives: 
     try:
         if plan.log_exists:
             say("Closing the recording log and setting it aside...")
+            # Counted again now that nothing writes to it: the recorder finished its last file while stopping.
+            _old_log_facts(db, plan)
             led = Ledger(db)
             try:
                 led.add_event("audit", "service", "recording_log_closed",
