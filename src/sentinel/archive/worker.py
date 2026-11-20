@@ -188,6 +188,7 @@ class ArchiveWorker:
         self.stats = Stats()
         # conditions shown to the operator
         self.removed_unexpectedly = False
+        self._wrong_pulled: str | None = None       # name of the drive pulled while another waits to be taken out
         self.after_swap = False
         self.full = False
         self.unusable_reason: str | None = None
@@ -553,6 +554,10 @@ class ArchiveWorker:
                 # whichever drive is attached next.
                 self._drop_swap("the archive drive in use was removed without preparing it")
             self.removed_unexpectedly = True
+            if self._swapped_drive is not None:
+                # 0.3.28 (owner's question 2026-11-20): after a swap another drive waits to be taken out, and the
+                # person pulled this one instead. The page said nothing and went on asking for the other drive.
+                self._wrong_pulled = att.target.label or "The other archive drive"
             self._event("warning", "archive_drive_removed", "Archive drive removed without preparing it",
                         {"drive_id": att.drive_id, "copies_this_attach": att.copies_this_attach})
             log.warning("archive drive %s removed without preparing", att.drive_id)
@@ -609,6 +614,7 @@ class ArchiveWorker:
         if self._last_swapped == drive_id:      # in use again: a later removal is not that swap
             self._last_swapped = None
         self.removed_unexpectedly = self.after_swap = False
+        self._wrong_pulled = None
         self.unusable_reason = None
         self.full = full
         if full:
@@ -1311,7 +1317,20 @@ class ArchiveWorker:
         return (f"{idle.label or 'One archive drive'} is full; copying continues on "
                 f"{self.att.target.label or 'the other drive'}. Press Swap and safely remove to take the full drive out.")
 
+    def _wrong_drive_text(self) -> str | None:
+        """The drive in use was pulled while another one waits to be taken out."""
+        if not self._wrong_pulled or self._swapped_drive is None:
+            return None
+        pulled, wanted = self._wrong_pulled, self._swapped_label or "the other archive drive"
+        return (f"{pulled} was unplugged, but the drive to take out is {wanted}. Plug {pulled} back in: Sentinel "
+                f"carries on copying to it. Nothing is lost; the recordings are on this computer meanwhile. "
+                f"Then take out {wanted} as this page says.")
+
     def _waiting_for_removal(self) -> None:
+        wrong = self._wrong_drive_text()
+        if wrong is not None:
+            self._set(ST_REMOVE_MANUALLY, wrong)
+            return
         ejected = bool(self._swap_result and self._swap_result[0])
         if ejected:
             self._set(ST_SAFE, "SAFE TO REMOVE ARCHIVE DRIVE.")
@@ -1739,7 +1758,8 @@ class ArchiveWorker:
                          removed_unexpectedly=self.removed_unexpectedly, after_swap=self.after_swap, full=self.full,
                          unusable=self.state == ST_UNUSABLE, verify_failed=bool(problems),
                          source_unreadable=bool(self.source_failed), software_errors=self.errors,
-                         capacity_low=self._capacity_low())
+                         capacity_low=self._capacity_low(),
+                         wrong_drive_removed=self._wrong_drive_text() is not None)
         return cond, risk, queue, problems
 
     def _capacity_low(self) -> bool:

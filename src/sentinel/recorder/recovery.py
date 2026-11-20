@@ -8,6 +8,7 @@ queue so ordering guarantees (segments before the gap that follows them) still h
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import time
@@ -21,7 +22,8 @@ from ..db import Ledger
 from ..models import RunEndReason, SegmentState
 from .ffmpeg_cmd import SEGMENT_LIST_NAME
 from .finalizer import Finalizer, GapJob, SegmentJob
-from .segment_list import SegmentListReader
+from .segment_list import SegmentListReader, on_one_timeline
+from .timebase import RELABEL_EVENT, StreamRelabel
 
 log = logging.getLogger(__name__)
 _SEG_RE = re.compile(r"^seg_(\d{6,})\.ts$")
@@ -110,7 +112,10 @@ class Recovery:
 
         # Files FFmpeg listed as closed before the crash can be finalised normally.
         entries = SegmentListReader(run_dir / SEGMENT_LIST_NAME).read_all()
-        listed = {e.filename: e for e in entries}
+        # 0.3.28: if the camera's time labels leapt ahead during this run, the recorder kept its stream times on
+        # one timeline and logged the leap; FFmpeg's list has to be read the same way.
+        relabel = self._run_relabel(run_id)
+        listed = {e.filename: on_one_timeline(e, relabel) for e in entries}
         anchor = run["anchor_utc"]
         from ..clock import add_seconds_iso
 
@@ -139,6 +144,23 @@ class Recovery:
                 prev_end = seg["stream_end_s"]
         rep.runs_closed += 1
         log.warning("recovery: run %s was interrupted by a service failure", run_id)
+
+    def _run_relabel(self, run_id: str) -> StreamRelabel | None:
+        """The leap of the camera's time labels the recorder logged for this run, if any."""
+        try:
+            rows = self.ledger.query("SELECT detail FROM events WHERE code=? ORDER BY event_id DESC LIMIT 200",
+                                     (RELABEL_EVENT,))
+        except Exception:  # noqa: BLE001 - recovery goes on without it; the finaliser has its own check
+            return None
+        for r in rows:
+            try:
+                d = json.loads(r[0] or "{}")
+            except ValueError:
+                continue
+            if isinstance(d, dict) and d.get("run_id") == run_id:
+                rl = StreamRelabel.from_detail(d)
+                return rl if rl.active else None
+        return None
 
     def _register_files(self, run_id: str, run_dir: Path, known: dict, rep: RecoveryReport) -> None:
         if not run_dir.exists():

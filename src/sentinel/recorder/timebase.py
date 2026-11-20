@@ -105,6 +105,84 @@ class RunTimebase:
         return None if e is None else iso_utc(e)
 
 
+# A jump of the camera's time labels smaller than this is not told apart from ordinary catching up (a camera
+# hands a new connection the pictures since its last key picture at once, which looks the same for a few
+# seconds) and is left as it is.
+RELABEL_MIN_S = 60.0
+RELABEL_EVENT = "camera_time_jump"       # the log entry for a leap; startup recovery reads it back
+
+
+@dataclass
+class StreamRelabel:
+    """Stream time as one timeline when the camera's time labels jump ahead (0.3.28).
+
+    Field report 2026-11-20 (KTNC KNC-HMSS347, two recordings brought from the laptop): about 7 s after every
+    new connection the timestamps in the stream leap forward once, by up to 13 hours, and run on smoothly from
+    there. No picture is missing: the pictures either side are 1/30 s apart. The size of the leap over 31 hours
+    fits ``(C - 82000/90000 * t) mod 2^32/90000`` to within 3 s: the camera's RTCP sender reports count 8,000
+    ticks a second where its video counts 90,000, and FFmpeg re-bases the timestamps on the first report.
+
+    The run's anchor is the smallest ``m - t`` seen, because a report can be late but never early. A leap of
+    the labels breaks that: every later report looks hours early, the anchor moves hours into the past, and
+    what was recorded before the leap is timed hours before the recorder was even started, with a gap logged
+    that never happened.
+
+    A leap is recognised by reception: between two consecutive advancing reports the stream time grew by at
+    least ``min_jump_s`` more than the monotonic time that passed. From then on ``norm`` takes that excess off
+    every later stream time (progress reports and FFmpeg's segment list alike), so everything downstream sees
+    one continuous timeline on the run's first labels. One leap a run, which is what the camera does; a second
+    one is left alone and shows as before.
+
+    The file itself keeps the timestamps the camera sent (it is never rewritten); the finaliser recognises
+    the leap inside it by comparing the file's own span with the listed, normalised one."""
+    min_jump_s: float = RELABEL_MIN_S
+    after_raw_s: float | None = None      # raw stream times above this are on the new labels
+    shift_s: float = 0.0                  # how far the labels leapt beyond the real time that passed
+    at_stream_s: float | None = None      # last stream time seen on the old labels
+    _last: tuple[float, float] | None = None      # (raw stream time, mono) of the last advancing report
+
+    def observe(self, raw_s: float, mono: float) -> float | None:
+        """Feed every progress report. Returns the size of a leap this report revealed, else None."""
+        if self._last is not None and raw_s <= self._last[0]:
+            return None                    # not advancing: says nothing
+        leapt = None
+        if self._last is not None and self.after_raw_s is None:
+            t1, m1 = self._last
+            excess = (raw_s - t1) - (mono - m1)
+            if excess >= self.min_jump_s:
+                self.after_raw_s = t1 + (raw_s - t1) / 2      # anywhere between the two labellings
+                self.shift_s = excess
+                self.at_stream_s = t1
+                leapt = excess
+        self._last = (raw_s, mono)
+        return leapt
+
+    @property
+    def active(self) -> bool:
+        return self.after_raw_s is not None
+
+    def norm(self, raw_s: float | None) -> float | None:
+        if raw_s is None or self.after_raw_s is None or raw_s <= self.after_raw_s:
+            return raw_s
+        return raw_s - self.shift_s
+
+    def detail(self) -> dict[str, Any]:
+        """For the recording log; ``from_detail`` rebuilds the relabel from it (startup recovery)."""
+        return {"after_raw_stream_s": self.after_raw_s, "labels_ahead_s": round(self.shift_s, 6),
+                "at_stream_s": self.at_stream_s}
+
+    @classmethod
+    def from_detail(cls, d: dict[str, Any] | None) -> "StreamRelabel":
+        r = cls()
+        try:
+            if d and d.get("after_raw_stream_s") is not None:
+                r.after_raw_s, r.shift_s = float(d["after_raw_stream_s"]), float(d["labels_ahead_s"])
+                r.at_stream_s = d.get("at_stream_s")
+        except (TypeError, ValueError, KeyError):
+            return cls()
+        return r
+
+
 @dataclass(frozen=True)
 class TimeKnot:
     """The correction fixed at one segment boundary (stream time ``stream_s``)."""

@@ -194,6 +194,60 @@ excluded, positive = wall faster), `drift_measured_over_s, time_correction_limit
 time_correction_limited, time_correction_detail` (JSON: measured, camera and PC components,
 number of reports). Drift figures are reported once measured over ≥ 60 s.
 
+#### 4.2.1 A camera whose time labels leap ahead (0.3.28)
+
+**Found** on the deployed camera (KTNC KNC-HMSS347, firmware 3.1.3.344; field report 2026-11-20, two
+recordings and a diagnostic report brought from the laptop). About 7 s after every new connection the
+timestamps in the stream leap forward once, by between 25 minutes and 12.7 hours in the runs seen, and run on
+smoothly from there. No picture is missing: the pictures either side of the leap are 1/30 s apart, and a 16 s
+run holds 483 of them. It happened in 11 of the 17 recording runs made with the camera from 18 Nov on.
+
+**Cause.** The size of the leap in every run fits `(C − 82000/90000 · t) mod (2³²/90000 s)` to within 3 s over
+31 hours, with one reset when the camera was restarted. So the camera's RTCP sender reports for the video
+stream count 8,000 ticks a second where its video packets count 90,000, and FFmpeg re-bases the timestamps on
+the first report it receives. That is a fault of the camera's firmware.
+
+**What it did until 0.3.28.** The run anchor is the smallest "reception minus stream time" seen (a report can be
+late, never early). After the leap every report looks hours early, so the anchor moved hours into the past:
+the first seconds of the recording were timed hours before the recorder had been started, the segment's start
+(and its archive file name) with them, and a `within_segment` gap of hours was logged that never happened. The
+rest of the run was timed correctly. Had the run's first file been closed before the leap (a start within 7 s
+of a top-of-hour cut), the anchor would already have been fixed, and everything after the leap would have been
+timed hours late instead.
+
+**Since 0.3.28** (`recorder.timebase.StreamRelabel`):
+
+1. *The recorder keeps one timeline.* Between two consecutive advancing progress reports, stream time that
+   grew by at least 60 s more than the monotonic time that passed is a leap of the labels. Nothing honest looks
+   like that: a stream cannot get ahead of real time. (Catching up after a stall, or a camera handing over the
+   pictures since its last key picture, moves stream time forward by at most the real time those pictures
+   took.) From then on the excess is taken off every later stream time: progress reports, and FFmpeg's segment
+   list each time an entry is used. The anchor, the drift tracker and the lost-time check all see a continuous
+   timeline on the run's first labels. One leap a run; the camera does one. The leap is logged
+   (`camera_time_jump`, with its size and the raw stream time it applies from); the run goes on.
+2. *The file keeps what the camera sent.* It is never rewritten, so its own timestamps still contain the
+   leap. When it is sealed, a break in the file that the listed span has no room for is recognised as that
+   leap: the pictures either side are one ordinary step apart, so no gap is recorded, and `duration_s` is the
+   real length of the footage (the file's own span stays in `validation_detail`). The segment carries the
+   warnings `internal_timestamp_gap` (true of the file) and `camera_time_jump`.
+3. *Safety net.* Footage cannot have been received before its run was launched. Where a file would start more
+   than 60 s before `launched_utc`, and a break in it accounts for that, the part before the break is moved
+   up by the size of the break (`camera_time_jump_in_file`). This covers a recorder that was killed before it
+   saw the leap (the file is then timed from its last write and its real length) and files of runs made
+   before 0.3.28 that are sealed later.
+4. *Startup recovery* reads the logged leap back and reads the crashed run's segment list on the same timeline.
+
+Not handled: a leap of less than 60 s (it cannot be told from catching up; about 1 run in 800 with this
+camera), and a second leap in one run. Both show as before: a break in the camera video. A file that holds
+the leap plays, but a player that goes by the file's own timestamps may show it as hours long.
+
+Tests: `tests/unit/test_camera_time_jump.py` (the numbers of the recording of 20 Nov 03:07 UTC),
+`tests/integration/test_camera_time_jump_recorder.py` (the real recorder and FFmpeg against
+`sentinel.sim.leap_camera`, which sends NUT over TCP with the leap added; FFmpeg passes a leap through from a
+NUT input as it does from RTSP, and smooths it out of MPEG-TS). The new sealing step was also run on the two
+recordings themselves: the 16 s run starts 0.10 s after its launch instead of 3 h 20 min before, 15.97 s long,
+no gap; the 7 s run 0.22 s after its launch instead of 12 h 41 min before.
+
 ### 4.3 Alternatives considered
 
 | Alternative | Why not chosen |

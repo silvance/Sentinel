@@ -308,7 +308,7 @@ def _seg0_case(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seg0_first_pts: 
         out = fin._timestamps(led.get_segment(s0), led.get_run("r"), res, False, warnings)
     finally:
         led.close()
-    return out, warnings
+    return out[:5], warnings        # since 0.3.28 a sixth item says what the file's footage is (camera time leaps)
 
 
 def test_seg0_timestamp_jump_at_end_is_not_hidden_as_lead_in(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

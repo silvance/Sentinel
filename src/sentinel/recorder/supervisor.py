@@ -46,8 +46,9 @@ from . import audio as audio_mod
 from .ffmpeg_cmd import SEGMENT_LIST_NAME, build_record_argv, redacted_command
 from .finalizer import Finalizer, GapJob, SegmentJob
 from .progress import ProgressParser
-from .segment_list import SegmentEntry, SegmentListReader
-from .timebase import TIME_METHOD, ClockStepDetector, DriftTracker, RunTimebase, TimeKnot, read_clock_pair
+from .segment_list import SegmentEntry, SegmentListReader, on_one_timeline
+from .timebase import (RELABEL_EVENT, TIME_METHOD, ClockStepDetector, DriftTracker, RunTimebase, StreamRelabel,
+                       TimeKnot, read_clock_pair)
 
 log = logging.getLogger(__name__)
 _SEG_RE = re.compile(r"^seg_(\d{6,})\.ts$")
@@ -58,6 +59,8 @@ def segment_ready(entry: SegmentEntry, newest_out_time_s: float | None) -> bool:
     """A listed segment may be timed once a progress report beyond its end has been seen (and
     passed through the lost-time check); see the supervisor loop."""
     return newest_out_time_s is not None and newest_out_time_s > entry.end_s
+
+
 
 
 class Backoff:
@@ -101,6 +104,7 @@ class LiveState:
     drift_lag_at_start: float = 0.0          # lowest lag (by > 0.5 s steps) since the drift started
     drift_low_mono: float | None = None       # when that lowest lag was last lowered (still catching up)
     last_ok_out_time_s: float | None = None
+    relabel_note: dict | None = None          # a leap of the camera's time labels, waiting to be logged
     internal_errors: int = 0
     # time accuracy (docs/03 §4.2): measured drift of the current run and the correction applied
     camera_drift_ppm: float | None = None
@@ -151,6 +155,7 @@ class RecordingSupervisor:
         self.current_proc: subprocess.Popen[bytes] | None = None
         self._open_run: str | None = None
         self._open_run_dir: Path = self.cam_dir
+        self._open_relabel: StreamRelabel | None = None
         self.backoff = Backoff(cfg.recording.backoff_initial_s, cfg.recording.backoff_max_s,
                                cfg.recording.backoff_reset_after_s)
         self.audio_guard = audio_mod.AudioGuard(audio_mod.wanted_action(cfg))
@@ -526,6 +531,7 @@ class RecordingSupervisor:
         timebase = RunTimebase(wall0, mono0)
         drift = DriftTracker(rec.max_clock_drift_ppm)
         steps = ClockStepDetector(wall0, mono0, rec.clock_step_tolerance_s)
+        relabel = self._open_relabel = StreamRelabel()
         with self.live.lock:
             lv = self.live
             lv.run_id, lv.run_launched_utc = run_id, iso_utc(wall0)
@@ -533,6 +539,7 @@ class RecordingSupervisor:
             lv.media_since_mono = None
             lv.lag_s, lv.drift_since_mono, lv.drift_break_stream_s, lv.last_ok_out_time_s = 0.0, None, None, None
             lv.lag_baseline_s = None
+            lv.relabel_note = None
             lv.camera_drift_ppm, lv.host_clock_drift_ppm, lv.time_correction_s = None, None, None
             lv.clock_slew_run = False
             lv.attempts += 1
@@ -552,7 +559,7 @@ class RecordingSupervisor:
             self.live.ffmpeg_running = True
 
         stderr_tail: deque[str] = deque(maxlen=40)
-        t_out = threading.Thread(target=self._read_progress, args=(proc, timebase, drift), daemon=True,
+        t_out = threading.Thread(target=self._read_progress, args=(proc, timebase, drift, relabel), daemon=True,
                                  name=f"progress-{run_id}")
         t_err = threading.Thread(target=self._read_stderr, args=(proc, stderr_tail, run_id), daemon=True,
                                  name=f"stderr-{run_id}")
@@ -588,15 +595,19 @@ class RecordingSupervisor:
                     anchored = timebase.has_anchor
                     drift_suspected = self.live.drift_since_mono is not None
                     newest_t = self.live.last_out_time_s
+                    leapt, self.live.relabel_note = self.live.relabel_note, None
+                if leapt is not None:
+                    self._record_relabel(run_id, leapt)
                 # While stream time is suspected of having lost real time, hold closed segments:
                 # if confirmed, the break must be recorded before they are sealed. A segment is
                 # also held until a progress report *newer than its end* has been checked for
                 # lost time: FFmpeg can list a segment (closed by the first packet after a freeze)
                 # before reporting the stream time that reveals the freeze.
                 if anchored and not drift_suspected:
-                    while pending and segment_ready(pending[0][0], newest_t):
+                    while pending and segment_ready(on_one_timeline(pending[0][0], relabel), newest_t):
                         entry, seen_at = pending.pop(0)
-                        self._on_closed(run_id, run_dir, entry, known, timebase, drift, steps, seen_at)
+                        self._on_closed(run_id, run_dir, on_one_timeline(entry, relabel), known, timebase, drift,
+                                        steps, seen_at)
 
                 with self.live.lock:
                     lv = self.live
@@ -695,8 +706,12 @@ class RecordingSupervisor:
         self._register_new_files(run_id, run_dir, known)
         seen = iso_utc(self.clock.wall())
         pending.extend((e, seen) for e in seglist.read_new())
+        with self.live.lock:            # a leap revealed by FFmpeg's last report, after the loop's last look
+            leapt, self.live.relabel_note = self.live.relabel_note, None
+        if leapt is not None:
+            self._record_relabel(run_id, leapt)
         for entry, seen_at in pending:  # without an anchor, the finaliser falls back to file times (flagged)
-            self._on_closed(run_id, run_dir, entry, known, timebase, drift, steps, seen_at)
+            self._on_closed(run_id, run_dir, on_one_timeline(entry, relabel), known, timebase, drift, steps, seen_at)
         if seglist.bad_lines:
             log.error("run %s: unparseable segment list lines: %r", run_id, seglist.bad_lines[:5])
 
@@ -818,7 +833,9 @@ class RecordingSupervisor:
         recovery already does this)."""
         from ..clock import add_seconds_iso
 
-        listed = {e.filename: e for e in SegmentListReader(self._open_run_dir / SEGMENT_LIST_NAME).read_all()}
+        relabel = getattr(self, "_open_relabel", None)
+        listed = {e.filename: on_one_timeline(e, relabel)
+                  for e in SegmentListReader(self._open_run_dir / SEGMENT_LIST_NAME).read_all()}
         for seg in self.ledger.run_segments(run_id):
             e = listed.get(Path(seg["rel_path"]).name)
             if e is None or seg["state"] != str(SegmentState.ACTIVE):
@@ -946,9 +963,24 @@ class RecordingSupervisor:
             with self.live.lock:
                 self.live.clock_slew_run = True                               # surfaces T-001 in status
 
-    def _read_progress(self, proc: subprocess.Popen[bytes], timebase: RunTimebase, drift: DriftTracker) -> None:
+    def _record_relabel(self, run_id: str, note: dict) -> None:
+        """The camera's time labels leapt ahead (StreamRelabel): say so in the log, once a run. Startup recovery
+        reads this entry to put FFmpeg's segment list on the same timeline after a crash."""
+        log.warning("run %s: the camera's time labels leapt ahead by %.1f s at stream time %.2f s; no time passed "
+                    "there, and the run's times are kept on one timeline", run_id, note.get("labels_ahead_s") or 0.0,
+                    note.get("at_stream_s") or 0.0)
+        try:
+            self.ledger.add_event("warning", "recorder", RELABEL_EVENT,
+                                  "The camera's time labels jumped ahead during a recording; no footage is missing "
+                                  "and the recording's times were kept right", {"run_id": run_id, **note})
+        except Exception:
+            log.exception("could not record the leap of the camera's time labels")
+
+    def _read_progress(self, proc: subprocess.Popen[bytes], timebase: RunTimebase, drift: DriftTracker,
+                       relabel: StreamRelabel | None = None) -> None:
         parser = ProgressParser()
         tol = self.cfg.recording.timeline_drift_tolerance_s
+        relabel = relabel if relabel is not None else StreamRelabel()
         assert proc.stdout is not None
         for raw in proc.stdout:
             snap = parser.feed(raw.decode("utf-8", "replace"))
@@ -957,30 +989,35 @@ class RecordingSupervisor:
             mono = self.clock.mono()
             with self.live.lock:
                 lv = self.live
+                # 0.3.28: stream time on one timeline. A camera whose time labels leap ahead (hours, a few
+                # seconds after it is connected to) would otherwise drag the run's anchor into the past.
+                if relabel.observe(snap.out_time_s, mono) is not None:
+                    lv.relabel_note = relabel.detail()
+                out_time_s = relabel.norm(snap.out_time_s)
                 prev = lv.last_out_time_s
-                if prev is None or snap.out_time_s > prev:
-                    lv.last_out_time_s = snap.out_time_s
+                if prev is None or out_time_s > prev:
+                    lv.last_out_time_s = out_time_s
                     lv.last_advance_mono = mono
-                    if snap.out_time_s > 0:
+                    if out_time_s > 0:
                         if not lv.media_seen:
                             lv.media_since_mono = mono
                         lv.media_seen = True
                         lv.last_media_mono_any = mono
-                        timebase.observe(snap.out_time_s, mono)
-                        drift.observe(snap.out_time_s, mono)
+                        timebase.observe(out_time_s, mono)
+                        drift.observe(out_time_s, mono)
                     if timebase.anchor_mono is not None:
                         # How far stream time is behind elapsed real time since the anchor,
                         # relative to a baseline that follows slow clock drift (camera vs host,
                         # or an undisciplined monotonic clock). Only a sudden excess means real
                         # time passed that is missing from the stream.
-                        lag = (mono - snap.out_time_s) - timebase.anchor_mono
+                        lag = (mono - out_time_s) - timebase.anchor_mono
                         lv.lag_s = lag
                         if lv.lag_baseline_s is None:
                             lv.lag_baseline_s = lag
                         excess = lag - lv.lag_baseline_s
                         if excess <= tol:
                             lv.lag_baseline_s += 0.05 * (lag - lv.lag_baseline_s)
-                            lv.last_ok_out_time_s = snap.out_time_s
+                            lv.last_ok_out_time_s = out_time_s
                             lv.drift_since_mono = None
                         elif lv.drift_since_mono is None:
                             lv.drift_since_mono = mono

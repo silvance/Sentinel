@@ -94,8 +94,9 @@ has to be pressed for that, and recording is not interrupted.</p>
 </ul>
 <h3>If something went differently</h3>
 <ul>
-<li><b>You unplugged a drive too early.</b> Plug it in again and tell the person who looks after the system.
-    Nothing is lost: the recordings are still on the computer.</li>
+<li><b>You unplugged a drive too early, or the wrong one.</b> Plug it in again. Nothing is lost: the
+    recordings are still on the computer, and copying carries on by itself. If the page names two drives, the
+    one to take out is the one it says is ready. Then write a note (part 5).</li>
 <li><b>A drive came back from the office.</b> Plug it in. Its line reads <b class="ui">Back from the office:
     return it to service before it is used again</b>. That step (<b class="ui">Return to service…</b>) is for
     the person who looks after the system, after the office has copied the drive and checked the copy.</li>
@@ -216,6 +217,15 @@ versions.</p>
 
 <h2 style="page-break-before: always">8. What changed</h2>
 <p>Changes that matter to the people who use the recorder, newest first.</p>
+<h3>0.3.28</h3>
+<ul>
+<li>Recordings: a recording no longer shows a start time from before the recorder was started, or a gap of
+    hours inside it that never happened. The camera changes its own time labels a few seconds after it is
+    connected to; Sentinel now keeps the true times. No picture was ever missing.</li>
+<li>Drives: if the wrong drive is unplugged after <b class="ui">Swap and safely remove</b>, the page now says
+    which drive was unplugged, which one should have been, and to plug the first one back in. It used to show
+    nothing.</li>
+</ul>
 <h3>0.3.27</h3>
 <ul>
 <li>New page <b class="ui">Notes</b>: write down who, what, when, where and why when something went wrong or

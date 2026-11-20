@@ -154,6 +154,20 @@ above every other reason. Every removal that does not happen is written to the r
 diagnostic report with the other events. The record is best effort: where the recording log cannot be written
 (no administrator rights), the answer to the person is the same and nothing is recorded.
 
+**The wrong drive pulled after a swap (0.3.28, owner's question 2026-11-20).** With two drives, Swap prepares
+drive 1 and copying moves to drive 2. If drive 2 is then pulled instead of drive 1:
+
+| What the person does next | What happens |
+|---|---|
+| nothing yet | Recording continues on the computer; nothing is copied. **Until 0.3.28 the page showed no alert** and went on asking for drive 1 to be taken out; only the log had `archive_drive_removed`. Since 0.3.28 the message reads "SSD_2 was unplugged, but the drive to take out is SSD_1. Plug SSD_2 back in: ...", with A-003, and the recordings that wait are counted |
+| plugs drive 2 back in | The copier attaches it at the next scan, checks every copy recorded on it (size; missing ones are marked lost and copied again, A-006), copies what was recorded meanwhile, and the page again names drive 1 as ready to be taken out. The warning clears |
+| takes drive 1 out as well | No drive: A-003 as before ("removed without preparing it. No recordings were lost") |
+| later plugs drive 1 back in (drive 2 is at the office) | Drive 1 was swapped and not returned, so nothing is copied to it; the message says so and names Cancel swap, which an operator can press and which puts drive 1 back in use |
+
+Drive 2, pulled without a swap, is not locked: plugged in again it is used as it is. Return to service refuses
+it (no swap since it was set up or last returned), and its index may not list its newest copies (the journal
+does). `tests/unit/test_archive_two_drives.py::test_the_wrong_drive_pulled_after_a_swap_is_said_on_the_screen`.
+
 ## 4. Automatic drive detection and one-button preparation
 
 On insertion the drive is **classified automatically** (UDisks2/udev: partition table, filesystem

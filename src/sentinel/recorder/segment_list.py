@@ -10,6 +10,7 @@ import csv
 import io
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -17,6 +18,15 @@ class SegmentEntry:
     filename: str
     start_s: float
     end_s: float
+
+
+def on_one_timeline(entry: SegmentEntry, relabel: Any) -> SegmentEntry:
+    """FFmpeg's listed times on the run's one timeline (recorder.timebase.StreamRelabel). Taken afresh each
+    time it is used: a segment can be listed a moment before the progress report that reveals the leap of the
+    camera's time labels."""
+    if relabel is None or not relabel.active:
+        return entry
+    return SegmentEntry(entry.filename, relabel.norm(entry.start_s), relabel.norm(entry.end_s))
 
 
 class SegmentListReader:

@@ -30,11 +30,15 @@ from ..media.probe import ProbeResult, first_video_pts, probe_segment
 from ..models import TERMINAL_STATES, GapKind, RunEndReason, SegmentState
 from ..platform.base import Platform
 from ..storage.monitor import StorageMonitor
-from .timebase import interpolate_correction
+from .timebase import RELABEL_MIN_S, interpolate_correction
 
 log = logging.getLogger(__name__)
 
 MAX_FINALIZE_ATTEMPTS = 5
+# How far a file's own span may exceed its listed span, beyond a leap of the camera's time labels, and the leap
+# still be recognised: the lead-in before the first key picture and the fraction of a second by which the
+# recorder's measure of the leap (taken from when progress reports arrived) differs from the file's.
+LEAP_TOL_S = 12.0
 
 
 @dataclass(frozen=True)
@@ -186,13 +190,25 @@ class Finalizer:
         self.platform.seal_read_only(path)
         self.platform.fsync_dir(path.parent)
 
-        start_utc, end_utc, time_source, gaps, time_cols = self._timestamps(seg, run, res, interrupted, warnings)
+        start_utc, end_utc, time_source, gaps, time_cols, footage = self._timestamps(seg, run, res, interrupted,
+                                                                                     warnings)
+        # The real length of what the file holds. It differs from the file's own span only where the camera's
+        # time labels leapt ahead inside it (0.3.28); the file's span stays in validation_detail.
+        duration_s = footage["duration_s"]
         if res.playable:
             new_state = SegmentState.INTERRUPTED if interrupted else SegmentState.FINALIZED
         else:
             new_state = SegmentState.CORRUPT
 
         events: list[EventSpec] = []
+        if footage["leaps"] and footage["rule"] == "launch":
+            # The recorder itself logs a leap it sees (camera_time_jump). This one it did not see.
+            events.append(EventSpec("warning", "recorder", "camera_time_jump_in_file",
+                                    "The camera's time labels jump ahead inside a recording file; the part before "
+                                    "the jump was timed from when its run started, and no footage is missing",
+                                    {"segment_id": segment_id, "run_id": seg["run_id"],
+                                     "labels_ahead_s": round(footage["leaps"][0][2], 3),
+                                     "pts_offset_before_s": footage["leaps"][0][0]}))
         if new_state is SegmentState.CORRUPT:
             dur = None
             if start_utc and end_utc:
@@ -209,7 +225,7 @@ class Finalizer:
 
         closed = self.ledger.seal(
             segment_id, new_state,
-            dict(sha256=sha, size_bytes=size, duration_s=res.duration_s,
+            dict(sha256=sha, size_bytes=size, duration_s=duration_s,
                  pix_fmt=res.pix_fmt, video_codec=res.codec, width=res.width, height=res.height,
                  packet_count=res.packet_count, keyframe_count=res.keyframe_count, max_pts_gap_s=res.max_pts_gap_s,
                  start_utc=start_utc, end_utc=end_utc, time_source=time_source, interrupted=int(interrupted),
@@ -224,10 +240,10 @@ class Finalizer:
             self.last_corrupt_mono = time.monotonic()
         else:
             self.last_good_seal_mono = time.monotonic()
-            self.storage.record_segment(size, res.duration_s)
+            self.storage.record_segment(size, duration_s)
         self.sealed_count += 1
         log.info("sealed %s state=%s dur=%.2fs size=%d sha256=%s", seg["rel_path"], new_state,
-                 res.duration_s or 0, size, sha[:16])
+                 duration_s or 0, size, sha[:16])
         if self.on_sealed is not None and res.playable:
             self.on_sealed(segment_id)
         return new_state
@@ -274,21 +290,72 @@ class Finalizer:
             held, c1, k1 = True, c0, None
         return k0, float(c0), k1, float(c1), held
 
+    @staticmethod
+    def _frame_step(res: ProbeResult) -> float:
+        """The ordinary time between two pictures in the file, the breaks left out."""
+        n = res.packet_count - 1 - len(res.pts_gaps)
+        if n <= 0 or res.first_pts_s is None or res.last_pts_s is None:
+            return 0.0
+        return max(0.0, ((res.last_pts_s - res.first_pts_s) - sum(a - b for b, a in res.pts_gaps)) / n)
+
+    def _label_leaps(self, res: ProbeResult, surplus_s: float, tol_s: float, single: bool = False
+                     ) -> list[tuple[float, float, float]]:
+        """Breaks in the file's timestamps that are leaps of the camera's time labels, not time that passed
+        (recorder.timebase.StreamRelabel). ``surplus_s``: how much longer the file's own timestamps make the
+        footage than the real time there was for it. Returns [(before, after, labels ahead s)] in file order;
+        the pictures either side of such a break are one ordinary step apart.
+
+        ``single``: at most one, the break that fits the surplus best (within ``tol_s``); used where the
+        surplus is only known roughly. Otherwise the largest breaks the surplus accounts for."""
+        step = self._frame_step(res)
+        cands = sorted(((after - before - step, before, after) for before, after in res.pts_gaps), reverse=True)
+        cands = [c for c in cands if c[0] >= RELABEL_MIN_S - 1.0]
+        out: list[tuple[float, float, float]] = []
+        if single:
+            fit = [(abs(u - surplus_s), before, after, u) for u, before, after in cands if abs(u - surplus_s) <= tol_s]
+            if fit:
+                _, before, after, u = min(fit)
+                out.append((before, after, u))
+        else:
+            left = surplus_s
+            for u, before, after in cands:
+                if u <= left + tol_s:
+                    out.append((before, after, u))
+                    left -= u
+        return sorted(out)
+
     def _timestamps(self, seg: Any, run: Any, res: ProbeResult, interrupted: bool, warnings: list[str]
-                    ) -> tuple[str | None, str | None, str | None, list[InternalGap], dict[str, Any]]:
-        """Derive (start_utc, end_utc, time_source, internal gaps, time-correction columns).
-        See docs/03 §4."""
+                    ) -> tuple[str | None, str | None, str | None, list[InternalGap], dict[str, Any], dict[str, Any]]:
+        """Derive (start_utc, end_utc, time_source, internal gaps, time-correction columns, footage).
+        ``footage``: ``duration_s`` (real length of what the file holds), ``leaps`` (leaps of the camera's time
+        labels found in it) and ``rule`` (how they were recognised). See docs/03 §4."""
         rec = self.cfg.recording
-        dur = res.duration_s or 0.0
+        dur_file = res.duration_s or 0.0             # by the file's own timestamps
+        dur = dur_file
+        leaps: list[tuple[float, float, float]] = []
+        rule: str | None = None
         anchor = run["anchor_utc"] if run is not None else None
+        launched = parse_iso_utc(run["launched_utc"]) if run is not None and run["launched_utc"] else None
         gaps: list[InternalGap] = []
         s0 = s1 = None
         source = "run_anchor"
         boundary: tuple[float, float] | None = None
 
+        def footage() -> dict[str, Any]:
+            return {"duration_s": dur if leaps else res.duration_s, "leaps": leaps, "rule": rule}
+
         if not interrupted and seg["stream_end_s"] is not None:
             s0, s1 = seg["stream_start_s"], seg["stream_end_s"]
             listed = s1 - s0
+            if res.pts_gaps and dur_file - listed >= RELABEL_MIN_S - LEAP_TOL_S:
+                # 0.3.28: the listed times are on the run's one timeline (the recorder took a leap of the
+                # camera's time labels out of them by reception time); the file still carries the labels as
+                # sent. A break in the file that the listed span has no room for is such a leap: no time
+                # passed there, so it is no gap, and the footage is that much shorter than the file says.
+                leaps = self._label_leaps(res, dur_file - listed, LEAP_TOL_S)
+                if leaps:
+                    rule = "listed"
+                    dur = dur_file - sum(u for _b, _a, u in leaps)
             shortfall = listed - dur                 # stream time the list claims but no video covers
             gop = (dur / res.keyframe_count) if res.keyframe_count else None
             lead_in_limit = (1.5 * gop + 0.5) if gop else 10.0
@@ -326,12 +393,28 @@ class Finalizer:
                 s0 = s1 - dur
                 source = "run_anchor_end"
 
+        def before_launch(start_epoch: float) -> float:
+            """A leap of the labels that explains footage starting before its run was launched, which cannot
+            be (the safety net where the recorder did not see the leap itself: it was killed before it could,
+            or the run is older than 0.3.28). 0.0 when there is none."""
+            nonlocal leaps, rule, dur
+            if leaps or launched is None or not res.pts_gaps or launched - start_epoch < RELABEL_MIN_S:
+                return 0.0
+            found = self._label_leaps(res, launched - start_epoch, rec.connect_timeout_s + RELABEL_MIN_S, single=True)
+            if not found:
+                return 0.0
+            leaps, rule = found, "launch"
+            dur = dur_file - found[0][2]
+            return found[0][2]
+
         if anchor is None or s0 is None or s1 is None:
             # No usable stream timing (no anchor, or the service died and progress was not
             # persisted recently). The file's last write time is the best remaining evidence.
             mtime = (self.cfg.spool_path / seg["rel_path"]).stat().st_mtime
             warnings.append("time_from_file_mtime")
-            return iso_utc(mtime - dur), iso_utc(mtime), "file_mtime", gaps, {}
+            if before_launch(mtime - dur_file):
+                warnings.append("camera_time_jump")
+            return iso_utc(mtime - dur), iso_utc(mtime), "file_mtime", gaps, {}, footage()
 
         from ..clock import add_seconds_iso
 
@@ -366,16 +449,29 @@ class Finalizer:
                 warnings.append("timeline_discontinuity")
         start_utc = add_seconds_iso(to_utc(s0), start_shift)
         end_utc = add_seconds_iso(to_utc(s1), end_shift)
+        # Footage cannot have been received before its run was launched. Where it seems to have been, a leap
+        # of the labels in the file puts what came before it too early by the size of the leap.
+        ahead = before_launch(parse_iso_utc(start_utc))
+        if ahead:
+            start_utc = add_seconds_iso(start_utc, ahead)
+        if leaps:
+            warnings.append("camera_time_jump")
 
+        taken_out = 0.0                             # leaps of the labels before this point in the file
         for before, after in res.pts_gaps:
-            gaps.append(InternalGap(add_seconds_iso(start_utc, before), add_seconds_iso(start_utc, after),
+            leap = next((u for b, _a, u in leaps if b == before), None)
+            if leap is not None:
+                taken_out += leap                   # no time passed: not a gap
+                continue
+            gaps.append(InternalGap(add_seconds_iso(start_utc, before - taken_out),
+                                    add_seconds_iso(start_utc, after - taken_out),
                                     after - before, "timestamp_discontinuity",
                                     {"pts_offset_before_s": before, "pts_offset_after_s": after}))
         if boundary is not None:
             gaps.append(InternalGap(add_seconds_iso(to_utc(boundary[0]), end_shift),
                                     add_seconds_iso(to_utc(boundary[1]), end_shift),
                                     boundary[1] - boundary[0], "timestamp_discontinuity_at_boundary"))
-        return start_utc, end_utc, source, gaps, time_cols
+        return start_utc, end_utc, source, gaps, time_cols, footage()
 
     # ------------------------------------------------------------------ gaps
     def process_gap(self, job: GapJob) -> None:

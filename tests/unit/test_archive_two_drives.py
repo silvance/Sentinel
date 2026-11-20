@@ -457,3 +457,55 @@ def test_one_file_that_cannot_be_read_back_does_not_stop_all_copying(env: Env) -
     assert copied[0][0] == 2                                      # the other two recordings were copied
     probs = env.ledger.query("SELECT kind FROM archive_problems")
     assert [r[0] for r in probs] == ["verify_failed"]             # A-006 names the file
+
+
+def test_the_wrong_drive_pulled_after_a_swap_is_said_on_the_screen(env: Env) -> None:
+    """Owner's question 2026-11-20: an agent presses Swap and safely remove for drive 1, then pulls drive 2 by
+    mistake. Until 0.3.28 the page showed no alert and went on asking for drive 1 to be taken out; only the log
+    had "removed without preparing it". Nothing is lost either way: recordings wait on the computer."""
+    add_synthetic_run(env.ledger, env.cfg, 3, SEG, sidecars=True)
+    a, b = sorted([make_drive(env.tmp, "A"), make_drive(env.tmp, "B")], key=lambda t: t.drive_key)
+    bays = Bays(a, b)
+    w = env.worker(bays, ArchiveIO(read_chunk=1024 * 1024))
+    assert drain(w)[-1] == "idle"
+    one = a if env.status()["drive_label"] == a.label else b        # drive 1: in use, the one to be swapped
+    two = b if one is a else a
+
+    def look() -> dict[str, Any]:
+        w._last_publish = float("-inf")         # the copier writes its status once a second; the test is faster
+        w.step()
+        return env.status()
+
+    w.request_swap()
+    assert w.step() == "swapped"
+    st = look()
+    assert st["alerts"] == [] and f"{one.label} is ready to be taken out" in st["message"]
+    assert [(d["label"], d["use"]) for d in st["drives"]] == [(two.label, "in_use"), (one.label, "take_out")]
+
+    bays.targets.remove(two)                    # THE MISTAKE
+    w.step()
+    add_synthetic_run(env.ledger, env.cfg, 2, SEG, sidecars=True)   # recording goes on meanwhile
+    st = look()
+    assert st["state"] == "REMOVE_MANUALLY"
+    assert st["message"].startswith(f"{two.label} was unplugged, but the drive to take out is {one.label}. "
+                                    f"Plug {two.label} back in")
+    assert "Nothing is lost" in st["message"]
+    assert [(x["code"], x["severity"]) for x in st["alerts"]] == [("A-003", 2)]
+    assert st["backlog"]["segments"] == 2       # and what waits to be copied is counted
+    assert len(_events(env, "archive_drive_removed")) == 1
+
+    bays.targets.append(two)                    # plugged back in: copying carries on by itself
+    assert drain(w)[-1] == "idle"
+    st = look()
+    assert st["alerts"] == [] and st["backlog"]["segments"] == 0
+    assert f"{one.label} is ready to be taken out" in st["message"] and "was unplugged" not in st["message"]
+    assert [(d["label"], d["use"]) for d in st["drives"]] == [(two.label, "in_use"), (one.label, "take_out")]
+
+    # Pulled again, and this time the prepared drive is taken out as well: no drive at all, as before 0.3.28.
+    bays.targets.remove(two)
+    look()
+    bays.targets.remove(one)
+    look()
+    st = look()
+    assert st["state"] == "ABSENT" and [x["code"] for x in st["alerts"]] == ["A-003"]
+    assert "was unplugged, but" not in st["message"]

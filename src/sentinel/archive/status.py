@@ -65,6 +65,8 @@ class Condition:
     source_unreadable: bool = False
     software_errors: int = 0
     capacity_low: bool = False              # attached drive holds less than N days at the measured rate
+    # 0.3.28: the drive in use was pulled while another one, prepared by a swap, still waits to be taken out.
+    wrong_drive_removed: bool = False
 
 
 def evaluate_alerts(c: Condition) -> list[Alert]:
@@ -77,6 +79,9 @@ def evaluate_alerts(c: Condition) -> list[Alert]:
             alerts.append(make_alert("A-003", Severity.WARNING))
         else:
             alerts.append(make_alert("A-001", Severity.NOTICE if c.after_swap else Severity.WARNING))
+    elif c.wrong_drive_removed:
+        # Not "no drive": the prepared one is still plugged in. Until 0.3.28 nothing was shown in this state.
+        alerts.append(make_alert("A-003", Severity.WARNING))
     if c.full:
         alerts.append(make_alert("A-002", Severity.CRITICAL if over else Severity.WARNING))
     if c.unusable:

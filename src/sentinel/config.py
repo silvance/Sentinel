@@ -35,7 +35,9 @@ PRODUCTION_SCHEMES = ("rtsp", "rtsps")
 # Development/test only (simulated camera, recorded files). Never accepted unless the config
 # explicitly says development_source = true, and then every status report says SIMULATED.
 DEVELOPMENT_SCHEMES = ("tcp", "file")
-ALLOWED_INPUT_FORMATS = (None, "mpegts")
+# "nut" (0.3.28): the development source that reproduces a camera whose time labels leap ahead
+# (sentinel.sim.leap_camera). MPEG-TS cannot carry that: FFmpeg smooths such a leap out of an MPEG-TS input.
+ALLOWED_INPUT_FORMATS = (None, "mpegts", "nut")
 # Credentials must come from credentials_file; reject OEM-style credentials in path/query.
 _CRED_KEYS = re.compile(r"(?i)(?:^|[/?&;])(user|username|usr|password|passwd|pass|pwd|token|auth|key)=")
 
@@ -305,7 +307,7 @@ def _validate_camera_url(cam: CameraConfig) -> None:
     if port is not None and not 1 <= port <= 65535:
         raise ConfigError("[camera] url port must be a number from 1 to 65535")
     if cam.input_format not in ALLOWED_INPUT_FORMATS:
-        raise ConfigError("[camera] input_format must be omitted (or \"mpegts\" for the simulator)")
+        raise ConfigError("[camera] input_format must be omitted (or \"mpegts\" / \"nut\" for the simulators)")
     if cam.input_format and not cam.development_source:
         raise ConfigError("[camera] input_format is only allowed with development_source = true")
 
