@@ -140,7 +140,8 @@ def build_report(cfg: AppConfig, reason: str = "requested", out_dir: Path | None
         else:
             chain_head_line = "none (this recording log has no tamper-evidence chain)"
 
-    for name in ("recorder.log", "recorder.log.1", "archive.log", "archive.log.1"):   # archive: own log
+    # archive: its own log. new-recording-log.log: every run of the clean start, also one that changed nothing.
+    for name in ("recorder.log", "recorder.log.1", "archive.log", "archive.log.1", "new-recording-log.log"):
         p = cfg.log_path / name
         if p.exists():
             files[f"logs/{name}"] = redact(_tail(p, LOG_TAIL_BYTES)).encode("utf-8")

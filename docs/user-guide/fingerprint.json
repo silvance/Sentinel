@@ -1,7 +1,7 @@
 {
   "what": "what 'Sentinel User Guide.pdf' was made from; python packaging/userguide.py --check compares",
-  "version": "0.3.28",
-  "inputs_sha256": "d46adaae1020b921cb49875aa0a226b9607387a42c35b8453ea4d763204bee19",
-  "pdf_sha256": "28efe6db71c85f49091ca6ea86881cc3074aeb1dd74704df84a316f505a58242",
+  "version": "0.3.29",
+  "inputs_sha256": "0ef7daffa947217fa3564017fba63d16d304936aea1ce9cdc09991b2d08cc990",
+  "pdf_sha256": "dc10bac3a26467fe8ee6d5d811a880833bfbf19d0c6e72ea659a0db89f173731",
   "pages": 12
 }

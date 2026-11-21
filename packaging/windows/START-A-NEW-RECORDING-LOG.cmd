@@ -13,10 +13,19 @@ rem
 rem Use:   close the Sentinel window, plug in every archive drive, then
 rem        right-click this file, Run as administrator.
 rem   or:  START-A-NEW-RECORDING-LOG.cmd "installed program folder"
+rem
+rem The window never closes by itself: whatever happened stays on the screen until CLOSE is typed
+rem (field report 2026-11-20: a first run ended with its window gone and nothing to read).
 rem ------------------------------------------------------------------------------------------------
 set "APP=%~1"
 set "SYS=%SystemRoot%\System32"
 cd /d "%SystemRoot%"
+
+rem Is there a keyboard? timeout.exe refuses input that comes from a file or another program.
+rem Without a keyboard nothing waits at the end.
+set "KEYBOARD=1"
+"%SYS%\timeout.exe" /t 0 /nobreak >nul 2>&1
+if errorlevel 1 set "KEYBOARD=0"
 
 echo.
 echo  Sentinel - start a new recording log
@@ -49,7 +58,12 @@ echo    1. CLOSE the Sentinel window (every Sentinel window on this computer).
 echo    2. PLUG IN every archive drive (SSD_1 and SSD_2). A drive that is not plugged in
 echo       keeps its test recordings.
 echo.
+echo  Then press a key ONCE. Nothing is removed yet: Sentinel first shows what it would do
+echo  and asks you to type NEW LOG. Until that question is on the screen, press nothing more.
+echo.
 pause
+echo.
+echo  One moment ...
 echo.
 
 "%APP%\Sentinel.exe" new-recording-log
@@ -57,8 +71,11 @@ set "RC=%ERRORLEVEL%"
 echo.
 if "%RC%"=="0" goto done
 if "%RC%"=="4" goto done_with_notes
-echo  NOT DONE (see the lines above). Nothing was removed unless the lines above say so.
-echo  Open Sentinel from its usual icon and check that it is recording.
+echo  ==========================================================================
+echo   NOT DONE. Nothing was removed unless the lines above say so.
+echo  ==========================================================================
+echo  The lines above say why. To try again: close this window and start this file again.
+echo  Then open Sentinel from its usual icon and check that it is recording.
 goto end
 
 :done_with_notes
@@ -70,8 +87,11 @@ echo  Drives shows the archive drive as "In use".
 goto end
 
 :not_admin
-echo  This needs administrator rights.
-echo  Right-click START-A-NEW-RECORDING-LOG.cmd and choose "Run as administrator".
+echo  ==========================================================================
+echo   NOT STARTED: this needs administrator rights. Nothing was changed.
+echo  ==========================================================================
+echo  Close this window. Then RIGHT-click START-A-NEW-RECORDING-LOG.cmd and choose
+echo  "Run as administrator".
 goto end
 
 :no_app
@@ -86,5 +106,15 @@ goto end
 
 :end
 echo.
-pause
+if "%KEYBOARD%"=="0" goto closed
+echo  This window stays open so that the lines above can be read.
+:wait_close
+set "ANS="
+set /p "ANS= To close it, type CLOSE and press Enter: "
+if not defined ANS goto wait_close
+set "ANS=%ANS:"=%"
+if not defined ANS goto wait_close
+if /i "%ANS%"=="CLOSE" goto closed
+goto wait_close
+:closed
 endlocal

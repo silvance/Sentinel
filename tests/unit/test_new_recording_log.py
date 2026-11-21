@@ -295,3 +295,77 @@ def test_the_command_does_it_when_confirmed(site: Site, monkeypatch, capsys) -> 
 
 
 _run = newlog.run
+
+
+# ---------------------------------------------------------------------- 0.3.29: a run that cannot end unseen
+def _attempts(site: Site) -> list[str]:
+    f = site.cfg.log_path / newlog.ATTEMPT_LOG
+    return f.read_text("utf-8").splitlines() if f.exists() else []
+
+
+def test_an_empty_answer_is_asked_again_and_every_run_leaves_a_line(site: Site, monkeypatch, capsys) -> None:
+    """Field report 2026-11-20, minutes before real use: the first run on the laptop "did absolutely nothing",
+    its window was gone, and nothing anywhere said why. Whatever it was, Enter pressed once too often used to be
+    enough: it answered the question with an empty line, which cancelled, and the next key closed the window.
+    Now an empty line is asked again, and every run - done or not - writes what became of it into the log
+    folder, which the diagnostic report carries."""
+    monkeypatch.setattr(newlog, "run", lambda *a, **k: _run(*a, **{**k, "same_volume_ok": True, "sleep": lambda _s: None}))
+    site.cfg.log_path.mkdir(parents=True, exist_ok=True)
+    spool, prompts = site.spool_files(), []
+
+    def enter_only(prompt: str) -> str:
+        prompts.append(prompt)
+        return ""
+
+    code, out = _main(site, monkeypatch, capsys, admin=lambda: True, interactive=True, reader=enter_only)
+    assert code == newlog.EXIT_REFUSED and len(prompts) == newlog.ASK_TIMES == 3
+    assert "type NEW LOG and press Enter. To cancel, type NO" in prompts[0]
+    assert out.count("Nothing was typed.") == 3 and "Not confirmed. Nothing was changed." in out
+    assert site.spool_files() == spool and site.control.calls == []
+    assert out.index("Looking at the recording log") < out.index("START A NEW RECORDING LOG")     # never a silent wait
+
+    answers = iter(["", "new log", "A. Agent"])          # the key pressed too early, then the words
+    code, out = _main(site, monkeypatch, capsys, admin=lambda: True, interactive=True, reader=lambda _p: next(answers))
+    assert code == newlog.EXIT_OK, out
+    assert out.count("Nothing was typed.") == 1 and "DONE: a new recording log was started." in out
+
+    code, out = _main(site, monkeypatch, capsys, admin=lambda: False, interactive=True, reader=lambda _p: "NEW LOG")
+    assert code == newlog.EXIT_REFUSED
+    code, out = _main(site, monkeypatch, capsys, admin=lambda: True, interactive=True, reader=lambda _p: "yes")
+    assert code == newlog.EXIT_REFUSED
+
+    lines = _attempts(site)
+    said = [ln.split(" user=", 1)[1].split(" ", 1)[1] for ln in lines]
+    assert all(ln.endswith("Z") for ln in (x.split(" ", 1)[0] for x in lines)) and f"Sentinel {newlog.__version__}" in lines[0]
+    assert said[0] == "started: administrator=yes keyboard=yes"
+    assert said[1] == "ended: not confirmed, nothing changed (nothing was typed)"
+    assert said[3] == "confirmed by 'A. Agent'; stopping the recorder and setting the log aside"
+    assert said[4].startswith("ended: DONE; earlier log in ") and said[4].endswith("recording started again: True")
+    assert said[5:7] == ["started: administrator=NO keyboard=yes", "ended: no administrator rights, nothing changed"]
+    assert said[8] == "ended: not confirmed, nothing changed (something other than NEW LOG was typed)"
+    assert len(said) == 9
+
+
+def test_keys_pressed_before_the_question_are_dropped_each_time_it_is_asked() -> None:
+    order: list[str] = []
+    answers = iter(["", "NEW LOG"])
+
+    def reader(_prompt: str) -> str:
+        order.append("ask")
+        return next(answers)
+
+    assert newlog.ask_to_confirm(reader, lambda: order.append("drop")) == "NEW LOG"
+    assert order == ["drop", "ask", "drop", "ask"]
+
+    def gone(_prompt: str) -> str:
+        raise EOFError
+
+    assert newlog.ask_to_confirm(gone) == ""              # the window was closed: not asked again
+
+
+def test_the_line_for_the_log_folder_never_creates_that_folder(site: Site) -> None:
+    import shutil
+
+    shutil.rmtree(site.cfg.log_path, ignore_errors=True)
+    newlog.note_attempt(site.cfg, "started")              # as administrator the folder would get the wrong owner
+    assert not site.cfg.log_path.exists()

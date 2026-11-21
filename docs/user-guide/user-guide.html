@@ -200,14 +200,19 @@ it. To remove test recordings there is one step, done once:</p>
 <ol>
 <li>Close the Sentinel window. Plug in every archive drive.</li>
 <li>Right-click <b>START-A-NEW-RECORDING-LOG.cmd</b> (in the folder the program came in), choose
-    "Run as administrator". It shows what will be set aside and removed.</li>
-<li>Type NEW LOG and your name when it asks.</li>
+    "Run as administrator".</li>
+<li>Press a key <b>once</b> when it asks, then wait. For up to a minute little happens: Sentinel is counting
+    what is on the computer and on the drives. Keys pressed while you wait are ignored.</li>
+<li>It shows what will be set aside and removed, and asks. Type NEW LOG, then your name. Nothing is removed
+    before that.</li>
+<li>Read the last lines: DONE, or NOT DONE and why. The window stays open until you type CLOSE.</li>
 <li>Open Sentinel again. Opening it starts recording.</li>
 </ol>
 <p>The step sets the recording log aside (it is kept, never deleted), deletes the recordings on the computer,
 empties the archive drives that are plugged in (they keep their names) and starts a new, empty log whose first
-entry records the step. Settings are not changed. Without the file, the same is done by the command
-"Sentinel.exe new-recording-log" in a Command Prompt opened as administrator.</p>
+entry records the step. Settings are not changed. Every run, done or not, is written to the file
+new-recording-log.log in Sentinel's log folder and is in the diagnostic report. Without the file, the same is
+done by the command "Sentinel.exe new-recording-log" in a Command Prompt opened as administrator.</p>
 <p class="small">The file READ-ME-FIRST.txt beside the program lists the commands for technical support.</p>
 
 <h2 style="page-break-before: always">7. Messages and their codes</h2>
@@ -217,6 +222,13 @@ versions.</p>
 
 <h2 style="page-break-before: always">8. What changed</h2>
 <p>Changes that matter to the people who use the recorder, newest first.</p>
+<h3>0.3.29</h3>
+<ul>
+<li>For the person who looks after the system: START-A-NEW-RECORDING-LOG.cmd can no longer end without being
+    read. A key pressed before its question is on the screen is ignored; Enter alone is asked again instead of
+    cancelling; its window stays open until CLOSE is typed; and every run is written to new-recording-log.log
+    in Sentinel's log folder. See part 6.</li>
+</ul>
 <h3>0.3.28</h3>
 <ul>
 <li>Recordings: a recording no longer shows a start time from before the recorder was started, or a gap of

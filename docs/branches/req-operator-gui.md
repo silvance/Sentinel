@@ -413,6 +413,56 @@ Decisions and why:
 A drive that is not plugged in keeps its test recordings; the listing says so before the confirmation.
 Tests: `tests/unit/test_new_recording_log.py` (the real log, copier and a folder as drive).
 
+### 13.1 A run that cannot end unseen (0.3.29)
+
+**Field report (owner, 2026-11-20, on the laptop, minutes before real use).** "We have minutes remaining and the
+new log command did absolutely nothing and there was no indication whether it actually was doing anything or
+not. All the errors and alerts are still there, everything." Then: "The command did nothing the first time. It
+popped up with instructions, then said press any key to continue. The window closed and nothing else. The second
+time when the window closed a new one popped up asking me to type NEW LOG. That worked."
+
+**What is known and what is not.** The second run did the step. The first run changed nothing and left no trace
+anywhere, so its cause **is not known**; nor is why the question appeared to be in a new window the second time
+(in the trials here it is asked in the script's own window). One way to get exactly the first run's result was
+reproduced on the 0.3.27 code in a real console: between the key at "Press any key" and the first line of the
+listing nothing is shown (the program starts and counts what is on the computer and on the archive drives). A
+key pressed again in that stretch stays in the keyboard buffer, answers "type NEW LOG" with an empty line,
+which cancelled ("Not confirmed. Nothing was changed."), and one more key ended the script's last
+`pause`, and with it the window. Whether that is what happened on the laptop cannot be told.
+
+So the script and the command are held to this instead: **whatever happened is still on the screen when the
+person looks, a key pressed too early or too often changes nothing, and every run leaves a line.**
+
+* `newlog.main` says "Looking at the recording log ... This can take a minute. Do not press anything until a
+  question is on the screen." before it looks, not after.
+* Keys pressed before the question are dropped (`discard_typed_ahead`: `FlushConsoleInputBuffer`, each time the
+  question is asked). An empty line is not an answer: "Nothing was typed." and the question again, three times
+  (`ask_to_confirm`). Anything else that is not the words still cancels.
+* Every run writes what became of it to `<log folder>/new-recording-log.log` (`note_attempt`): started (with
+  administrator rights or not, with a keyboard or not), not confirmed and why, confirmed by whom, done, refused.
+  The diagnostic report carries the file. The folder is never created by this command (as administrator it
+  would get the wrong owner).
+* `START-A-NEW-RECORDING-LOG.cmd`: one `pause` only, before anything is looked at, with "press a key ONCE ...
+  press nothing more"; NOT DONE and NOT STARTED (no administrator rights) in a box; and every way out ends in a
+  question that only the word CLOSE answers, so no key closes the window by accident. With no keyboard (input
+  from a file: `timeout.exe` refuses it, which is the test) the script does not wait.
+
+Tests: `tests/unit/test_new_recording_log.py` (asked again, the lines written, keys dropped before each ask) and
+`tests/unit/test_new_recording_log_script.py` (the script run as it is against a stand-in program).
+
+**Tried (2026-11-20, development PC),** each in a real console of its own, hidden, keys put into its input
+buffer as a keyboard does: the question from the source, Enter twice during a four-second look: 0.3.27 code
+cancels at once; 0.3.29 code shows the question once and waits, asks again after Enter alone, goes on after
+NEW LOG and a name. The script with the built 0.3.29 and with the built 0.3.28, without administrator rights:
+NOT STARTED in its box, the window still there after Enter three times and "x", gone after "close"; with the
+administrator check taken out: waits at "Press any key" (6 s, no key), then one key and two more Enters at
+once: the listing, the program's refusal (no administrator rights), NOT DONE in its box, the window still there
+after more Enters and "q", gone after CLOSE; the lines in `new-recording-log.log`.
+**Not tried:** with administrator rights in a window on the desktop (the trials here had none, so the program
+stopped before its question; the question was tried from the source); in Windows Terminal with nobody at the
+PC (console windows opened on the desktop there took the key presses of the person using it, which is how the
+first trials misled: their "Press any key" seemed to go on by itself); the laptop.
+
 ## 14. Notes (0.3.27)
 
 **Request (owner, 2026-11-20).** "Add a Notes tab. I'll explain to the agents that if they mess up or do

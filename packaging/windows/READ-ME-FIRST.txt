@@ -55,6 +55,7 @@ For the installing technician
   the test recordings from this computer, empties the archive drives that are
   plugged in and starts a new, empty log. Settings stay as they are. Do NOT
   delete recordings by hand: Sentinel then reports every one as missing.
-  "--dry-run" only shows what would be removed.
+  "--dry-run" only shows what would be removed. Every run, done or not,
+  leaves a line in new-recording-log.log in the Sentinel log folder.
 * licences\ contains the third-party licences and SOURCE-OFFER.txt.
 * ffmpeg\ contains FFmpeg and its licence; see ffmpeg\FFMPEG-LICENCE-NOTE.txt.

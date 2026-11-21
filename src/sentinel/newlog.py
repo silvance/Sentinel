@@ -49,6 +49,8 @@ STATE_FILES = ("chain_heads.log", "archive_status.json")
 STATE_DIRS = ("archive_control", "diagnostics")
 DRIVE_ENTRIES = (layout.ROOT, layout.WATCH_DIR, layout.START_HERE)     # Sentinel's own things on an archive drive
 NAME_CARRIED = "drive_name_carried_over"       # read by sentinel.drives.prepare.next_label
+ATTEMPT_LOG = "new-recording-log.log"          # in the log folder: one line per step of every run, done or not
+ASK_TIMES = 3                                  # an empty answer is asked again this often
 EXIT_OK, EXIT_CONFIG, EXIT_REFUSED, EXIT_FAILED = 0, 2, 3, 4
 
 
@@ -593,6 +595,52 @@ def _about_file(dest: Path, who: str, user: str, reason: str, plan: Plan, when: 
         pass
 
 
+def note_attempt(cfg: AppConfig, text: str, *, clock: Callable[[], float] = time.time) -> None:
+    """One line per step of a run, in the Sentinel log folder. Field report 2026-11-20: the first run on the
+    laptop "did absolutely nothing", its window was gone, and a run that changes nothing left no trace anywhere,
+    so there was nothing to tell from afterwards why. Best effort: the log folder is never created here (as
+    administrator it would get the wrong owner) and a failure to write is not the person's problem."""
+    try:
+        if not cfg.log_path.is_dir():
+            return
+        with open(cfg.log_path / ATTEMPT_LOG, "a", encoding="utf-8") as fh:
+            fh.write(f"{iso_utc(clock())} Sentinel {__version__} pid={os.getpid()} user={_windows_user()} {text}\n")
+    except OSError:
+        pass
+
+
+def discard_typed_ahead() -> None:
+    """Forget the keys pressed before a question is on the screen. Without this a second, impatient key press
+    at the script's "Press any key" (nothing is shown while the drives are looked at) answers the question
+    with an empty line: the step is cancelled, and the next key closes the window."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        k32 = ctypes.WinDLL("kernel32")
+        k32.GetStdHandle.restype = ctypes.c_void_p
+        k32.FlushConsoleInputBuffer(ctypes.c_void_p(k32.GetStdHandle(-10)))       # STD_INPUT_HANDLE
+    except (OSError, AttributeError):
+        pass
+
+
+def ask_to_confirm(reader: Callable[[str], str], discard: Callable[[], None] = lambda: None) -> str:
+    """What the person typed. An empty line is not an answer: it is asked again (Enter pressed to "continue"
+    must not cancel the step unnoticed). Anything else that is not the words cancels, as it always did."""
+    prompt = f"To go on, type {CONFIRM_WORDS} and press Enter. To cancel, type NO and press Enter: "
+    for _ in range(ASK_TIMES):
+        discard()
+        try:
+            typed = reader(prompt).strip()
+        except EOFError:
+            return ""
+        if typed:
+            return typed
+        print("Nothing was typed.", flush=True)
+    return ""
+
+
 def main(cfg_path: Path | None, *, who: str | None = None, reason: str | None = None, yes: bool = False,
          confirm: str | None = None, keep_drives: bool = False, no_start: bool = False, dry_run: bool = False,
          reader: Callable[[str], str] = input, admin: Callable[[], bool] = is_administrator,
@@ -608,28 +656,39 @@ def main(cfg_path: Path | None, *, who: str | None = None, reason: str | None = 
     except (ConfigError, OSError) as exc:
         print(f"The settings cannot be read ({exc}). Nothing was changed.")
         return EXIT_CONFIG
+    is_admin = admin()
+    if interactive is None:
+        interactive = sys.stdin is not None and sys.stdin.isatty()
+    note_attempt(cfg, f"started: administrator={'yes' if is_admin else 'NO'} keyboard={'yes' if interactive else 'no'}"
+                      f"{' --yes' if yes else ''}{' --dry-run' if dry_run else ''}")
+    # Said before the look, not after: counting what is on two archive drives takes a while, and a window that
+    # shows nothing gets its key pressed again.
+    print("Looking at the recording log, the recordings on this computer and the archive drives.\n"
+          "This can take a minute. Do not press anything until a question is on the screen.\n", flush=True)
     plan = survey(cfg, locator=locator, empty_drives=not keep_drives)
     for line in describe(plan, cfg):
         print(line)
     print(flush=True)
     if dry_run:
         print("DRY RUN: nothing was changed.")
+        note_attempt(cfg, "ended: dry run, nothing changed")
         return EXIT_OK
-    if not admin():
+    if not is_admin:
         print("This needs Windows administrator rights (right-click, \"Run as administrator\"). Nothing was changed.")
+        note_attempt(cfg, "ended: no administrator rights, nothing changed")
         return EXIT_REFUSED
-    interactive = sys.stdin.isatty() if interactive is None else interactive
     if yes:
         typed = (confirm or "").strip()
     elif interactive:
-        try:
-            typed = reader(f"To go on, type {CONFIRM_WORDS} and press Enter (anything else cancels): ").strip()
-        except EOFError:
-            typed = ""
+        typed = ask_to_confirm(reader, discard_typed_ahead if reader is input else (lambda: None))
     else:
         typed = ""
     if typed.upper() != CONFIRM_WORDS:
         print("Not confirmed. Nothing was changed.")
+        note_attempt(cfg, "ended: not confirmed, nothing changed ("
+                          + ("nobody to ask" if not (yes or interactive) else
+                             "nothing was typed" if not typed else f"something other than {CONFIRM_WORDS} was typed")
+                          + ")")
         return EXIT_REFUSED
     if not who and interactive and not yes:
         try:
@@ -638,12 +697,14 @@ def main(cfg_path: Path | None, *, who: str | None = None, reason: str | None = 
             who = ""
     who = (who or "").strip() or _windows_user()
     reason = (reason or "").strip() or "testing finished; start of real recording"
+    note_attempt(cfg, f"confirmed by {who!r}; stopping the recorder and setting the log aside")
     print()
     try:
         res = run(Path(cfg_path), cfg, who=who, reason=reason, empty_drives=not keep_drives, start=not no_start,
                   control=control, locator=locator, say=lambda s: print(s, flush=True))
     except NewLogRefused as exc:
         print(f"\nNOT DONE. {exc}")
+        note_attempt(cfg, f"ended: NOT DONE: {exc}")
         return EXIT_REFUSED
     except Exception as exc:  # noqa: BLE001 - the person must be told where things stand, not shown a traceback
         aside = cfg.data_path / SET_ASIDE_DIR
@@ -651,7 +712,11 @@ def main(cfg_path: Path | None, *, who: str | None = None, reason: str | None = 
         if aside.is_dir():
             print(f"  A recording log that was set aside is kept in {aside}")
         print("  Open Sentinel: opening it starts recording. Then send a diagnostic report to technical support.")
+        note_attempt(cfg, f"ended: STOPPED by an unexpected problem: {type(exc).__name__}: {exc}")
         return EXIT_FAILED
+    note_attempt(cfg, f"ended: DONE; earlier log in {res.set_aside}; {res.removed_files} file(s) deleted from this "
+                      f"computer; drives emptied: {', '.join(d.label for d in res.drives) or 'none'}; "
+                      f"recording started again: {res.started}")
     print()
     print("DONE: a new recording log was started.")
     if res.set_aside:
