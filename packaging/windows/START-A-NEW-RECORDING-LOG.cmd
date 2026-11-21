@@ -59,7 +59,8 @@ echo    2. PLUG IN every archive drive (SSD_1 and SSD_2). A drive that is not pl
 echo       keeps its test recordings.
 echo.
 echo  Then press a key ONCE. Nothing is removed yet: Sentinel first shows what it would do
-echo  and asks you to type NEW LOG. Until that question is on the screen, press nothing more.
+echo  and asks you to type words to confirm.
+echo  Until that question is on the screen, press nothing more.
 echo.
 pause
 echo.

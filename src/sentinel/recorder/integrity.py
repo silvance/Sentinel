@@ -159,9 +159,31 @@ class IntegrityWorker:
         self.ledger.update_segment(segment_id, content_sha256=ch.sha256, content_hash_method=ch.method,
                                    decoded_frame_count=ch.frame_count, framehash_rel_path=fh_rel,
                                    framehash_sha256=fh_sha)
+        self._note_undecodable(seg, ch)
         self.hashed += 1
         log.info("content hash %s frames=%d sha256=%s", seg["rel_path"], ch.frame_count, ch.sha256[:16])
         return True
+
+    def _note_undecodable(self, seg, ch) -> None:  # noqa: ANN001
+        """Say it in the log when a sealed recording does not decode in full (0.3.29): fewer pictures came out
+        than the file has packets, or the decoder complained. The sealed row is not changed; the log entry is
+        the trace. Found 2026-11-20: corrupted camera data could leave neither a gap nor a warning."""
+        try:
+            packets = seg["packet_count"]
+        except (KeyError, IndexError):
+            packets = None
+        short = packets - ch.frame_count if isinstance(packets, int) and packets > ch.frame_count else 0
+        if not short and not ch.messages:
+            return
+        what = (f"{short} of {packets} picture(s) in {seg['rel_path']} could not be decoded" if short else
+                f"The decoder reported errors in {seg['rel_path']}")
+        try:
+            self.ledger.add_event("warning", "integrity", "pictures_not_decodable", what,
+                                  {"segment_id": seg["segment_id"], "packet_count": packets,
+                                   "decoded_frame_count": ch.frame_count, "decoder_said": list(ch.messages[:10])})
+        except Exception:  # noqa: BLE001 - a note about the pictures must not undo the fingerprint just stored
+            log.exception("could not record that %s does not decode in full", seg["rel_path"])
+        log.warning("%s", what)
 
     # ------------------------------------------------------------------ audit
     def audit_once(self) -> list[dict]:

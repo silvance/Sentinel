@@ -450,6 +450,16 @@ person looks, a key pressed too early or too often changes nothing, and every ru
 Tests: `tests/unit/test_new_recording_log.py` (asked again, the lines written, keys dropped before each ask) and
 `tests/unit/test_new_recording_log_script.py` (the script run as it is against a stand-in program).
 
+**Not twice by habit (0.3.29).** The step is meant for once, before real use. Run again on a computer in real
+use it deletes real recordings (the log is kept, the files are not), and NEW LOG is what was typed the first
+time and what every sheet says. So `survey` now notes whether a new recording log was started here before: the
+log in use begins with `recording_log_started` (when, who), or `previous-recording-logs` holds a log. If so and
+there is anything to lose (`done_before`), the listing opens with lines marked `!!` that say when and by whom
+it was done and that what was recorded since is most likely real; the words to type become
+`DELETE <n> RECORDINGS` with the number the listing shows (`confirm_words`; `--yes --confirm` needs the same
+words); NEW LOG is answered with "is not enough here"; and the new log's first entry carries
+`done_before_on_this_computer`. With nothing recorded since, nothing more is asked than the first time.
+
 **Tried (2026-11-20, development PC),** each in a real console of its own, hidden, keys put into its input
 buffer as a keyboard does: the question from the source, Enter twice during a four-second look: 0.3.27 code
 cancels at once; 0.3.29 code shows the question once and waits, asks again after Enter alone, goes on after

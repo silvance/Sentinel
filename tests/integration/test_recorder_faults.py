@@ -227,6 +227,40 @@ def test_corrupted_stream_data_does_not_stop_recording(tmp_path: Path, cam: Simu
     assert segs[-1]["state"] == "FINALIZED", "recording should continue cleanly after the corrupt burst"
 
 
+def test_corrupted_stream_leaves_a_trace_at_the_default_check(tmp_path: Path, cam: SimulatedCamera) -> None:
+    """0.3.29. The test above asks for a full decode of every file at sealing, which the site's laptop does not
+    do (``validation = "packets"`` is the default). And even with it, 1 run in 10 left nothing in the log
+    (found 2026-11-20): the burst took 11 of a file's 30 pictures, the hole was shorter than a gap, and the
+    decoder happened not to complain. Now the file's own rhythm says it, at every level: three or more pictures
+    in a row that are not there. Tried with the burst at 21 points across a file's length: marked every time."""
+    h = Harness(tmp_path, cam.url).start()
+    try:
+        h.wait_sealed(2)
+        n = h.sealed_count()
+        cam.corrupt(400)
+        h.wait_sealed(n + 3, timeout=40)
+        wait_for(lambda: all(s["content_sha256"] for s in h.segments()[:n + 3]), 40, what="fingerprints of the files hit")
+    finally:
+        h.stop()
+    segs = h.segments()
+    marked = [s for s in segs if "pictures_missing" in json.loads(s["warnings"] or "[]")]
+    assert len(marked) == 1, [(s["seq"], s["warnings"]) for s in segs]
+    detail = json.loads(marked[0]["validation_detail"])
+    assert 8 <= detail["pictures_missing"] <= 14 and len(detail["picture_holes"]) == 1
+    assert 0.5 < detail["picture_holes"][0][1] < 1.0 < h.cfg.recording.max_internal_gap_s      # a hole, not a gap
+    assert h.gaps("within_segment") == []
+    (said,) = h.events("pictures_missing")
+    assert json.loads(said["detail"])["segment_id"] == marked[0]["segment_id"]
+    assert f"{detail['pictures_missing']} picture(s) are missing from {marked[0]['rel_path']}" in said["message"]
+    # The fingerprint pass decodes the file in full; where pictures do not come out, it says so too.
+    for e in h.events("pictures_not_decodable"):
+        d = json.loads(e["detail"])
+        assert d["segment_id"] == marked[0]["segment_id"] and d["decoded_frame_count"] < d["packet_count"]
+    # Every other file is as clean as on a healthy stream.
+    assert all("pictures_missing" not in json.loads(s["validation_detail"] or "{}") for s in segs if s is not marked[0])
+    assert segs[-1]["state"] == "FINALIZED", "recording should continue cleanly after the corrupt burst"
+
+
 # ------------------------------------------------------------------ storage
 def test_storage_warning_then_full_then_recovery(tmp_path: Path, cam: SimulatedCamera) -> None:
     disk = FakeDisk(free_gb=500)

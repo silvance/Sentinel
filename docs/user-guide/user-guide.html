@@ -203,8 +203,8 @@ it. To remove test recordings there is one step, done once:</p>
     "Run as administrator".</li>
 <li>Press a key <b>once</b> when it asks, then wait. For up to a minute little happens: Sentinel is counting
     what is on the computer and on the drives. Keys pressed while you wait are ignored.</li>
-<li>It shows what will be set aside and removed, and asks. Type NEW LOG, then your name. Nothing is removed
-    before that.</li>
+<li>It shows what will be set aside and removed, and asks. Type the words it names (NEW LOG), then your
+    name. Nothing is removed before that.</li>
 <li>Read the last lines: DONE, or NOT DONE and why. The window stays open until you type CLOSE.</li>
 <li>Open Sentinel again. Opening it starts recording.</li>
 </ol>
@@ -213,6 +213,9 @@ empties the archive drives that are plugged in (they keep their names) and start
 entry records the step. Settings are not changed. Every run, done or not, is written to the file
 new-recording-log.log in Sentinel's log folder and is in the diagnostic report. Without the file, the same is
 done by the command "Sentinel.exe new-recording-log" in a Command Prompt opened as administrator.</p>
+<p><b>Once only.</b> If the step was done on this computer before, what has been recorded since is most likely
+real. Sentinel then says so in lines marked !!, and NEW LOG is no longer enough: it asks for words that name the
+number of recordings that would be deleted. If any of them may be needed, type NO.</p>
 <p class="small">The file READ-ME-FIRST.txt beside the program lists the commands for technical support.</p>
 
 <h2 style="page-break-before: always">7. Messages and their codes</h2>
@@ -228,6 +231,11 @@ versions.</p>
     read. A key pressed before its question is on the screen is ignored; Enter alone is asked again instead of
     cancelling; its window stays open until CLOSE is typed; and every run is written to new-recording-log.log
     in Sentinel's log folder. See part 6.</li>
+<li>The same step cannot be repeated by habit: on a computer where it was done before, it warns that the
+    recordings are most likely real and asks for different words. See part 6.</li>
+<li>For technical support: a recording that lost pictures because the camera's data arrived damaged is now
+    marked in the recording log, also when the loss is too short to count as a break. Nothing changes on the
+    screen; the marks are in the diagnostic report.</li>
 </ul>
 <h3>0.3.28</h3>
 <ul>

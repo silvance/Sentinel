@@ -19,6 +19,45 @@ class ProbeError(RuntimeError):
     pass
 
 
+# Pictures missing inside a file, judged by the file's own rhythm (0.3.29). A step between two pictures of at
+# least HOLE_STEPS picture intervals means three or more pictures in a row are not there. Steps longer than
+# ``max_internal_gap_s`` are not counted here: those are gaps (or a leap of the camera's time labels) and are
+# recorded as such. The site camera's own recordings step by exactly one interval throughout, so this says
+# nothing about a healthy stream.
+HOLE_STEPS = 4
+RHYTHM_MIN_PACKETS = 8          # fewer pictures than this have no rhythm to judge by
+
+
+def picture_holes(ordered_pts: list[float], frame_interval_s: float,
+                  max_internal_gap_s: float) -> tuple[int, list[tuple[float, float]]]:
+    """(pictures missing, [(seconds into the file, length of the hole in seconds), ...])."""
+    if frame_interval_s <= 0 or len(ordered_pts) < RHYTHM_MIN_PACKETS:
+        return 0, []
+    missing, holes = 0, []
+    for a, b in zip(ordered_pts, ordered_pts[1:]):
+        step = b - a
+        if step > max_internal_gap_s:
+            continue
+        n = round(step / frame_interval_s) - 1
+        if n >= HOLE_STEPS - 1:
+            missing += n
+            holes.append((round(a - ordered_pts[0], 6), round(step, 6)))
+    return missing, holes
+
+
+def hole_before(first_pts_s: float | None, previous_last_pts_s: float | None, frame_interval_s: float | None,
+                max_internal_gap_s: float) -> tuple[int, float]:
+    """Pictures missing between the last picture of the file before (same run, same timeline) and the first of
+    this one: (pictures, seconds). (0, 0.0) when there is no hole, or when it is long enough to be a gap."""
+    if first_pts_s is None or previous_last_pts_s is None or not frame_interval_s or frame_interval_s <= 0:
+        return 0, 0.0
+    step = first_pts_s - previous_last_pts_s
+    if step <= 0 or step > max_internal_gap_s:
+        return 0, 0.0
+    n = round(step / frame_interval_s) - 1
+    return (n, round(step, 6)) if n >= HOLE_STEPS - 1 else (0, 0.0)
+
+
 @dataclass
 class ProbeResult:
     playable: bool
@@ -39,12 +78,24 @@ class ProbeResult:
     warnings: list[str] = field(default_factory=list)
     reason: str | None = None
     audio: dict[str, Any] | None = None     # the sound stream, looked for only while sound recording is on
+    frame_interval_s: float | None = None   # the usual step between two pictures (the median)
+    pictures_missing: int = 0               # pictures that are not there, by that rhythm (see picture_holes)
+    picture_holes: list[tuple[float, float]] = field(default_factory=list)   # (seconds into the file, length)
+    missing_before_start: int = 0           # ... between the file before and this one (set by the finaliser)
+    hole_before_start_s: float = 0.0
 
     def detail(self) -> dict[str, Any]:
         d = self._detail()
         if self.audio and (self.audio.get("codec") or self.audio.get("other")):
             # Only when there is something to say: records made without sound keep their exact form.
             d["audio"] = {k: v for k, v in self.audio.items() if k != "video"}
+        if self.pictures_missing or self.missing_before_start:      # likewise: only when pictures are missing
+            d["pictures_missing"] = self.pictures_missing + self.missing_before_start
+            d["frame_interval_s"] = self.frame_interval_s
+            if self.picture_holes:
+                d["picture_holes"] = self.picture_holes[:50]
+            if self.missing_before_start:
+                d["hole_before_start_s"] = self.hole_before_start_s
         return d
 
     def _detail(self) -> dict[str, Any]:
@@ -158,12 +209,16 @@ def _probe_video(path: Path, ffprobe: str, ffmpeg: str, level: str, max_internal
         res.max_pts_gap_s = max(res.max_pts_gap_s, gap)
         if gap > max_internal_gap_s:
             res.pts_gaps.append((round(a - ordered[0], 6), round(b - ordered[0], 6)))
+    res.frame_interval_s = frame_dur or None
+    res.pictures_missing, res.picture_holes = picture_holes(ordered, frame_dur, max_internal_gap_s)
     fmt_dur = data.get("format", {}).get("duration")
     span = (ordered[-1] - ordered[0]) + frame_dur
     res.duration_s = float(fmt_dur) if fmt_dur not in (None, "N/A") else span
 
     if res.pts_gaps:
         res.warnings.append("internal_timestamp_gap")
+    if res.pictures_missing:
+        res.warnings.append("pictures_missing")
     if res.non_monotonic_dts:
         res.warnings.append("non_monotonic_dts")
     if not res.starts_with_keyframe:

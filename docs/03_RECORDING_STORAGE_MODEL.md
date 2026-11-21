@@ -73,7 +73,7 @@ State transitions are enforced in `sentinel.db` (illegal transitions raise).
 A `FINALIZED` segment may still carry a **warning** (e.g. internal timestamp gap > `max_internal_gap_s`,
 clock-step during recording); warnings are columns, not states.
 
-**A known limit: pictures lost to corrupted camera data can leave no warning (found 2026-11-20).**
+**Pictures lost to damaged camera data (0.3.29).** Until 0.3.29 they could leave no trace (found 2026-11-20):
 `test_corrupted_stream_data_does_not_stop_recording` overwrites 400 transport packets of the simulated camera
 with random bytes and expects a trace in the log. In 5 of 47 runs on 0.3.29 and in 1 of 30 on unchanged 0.3.27
 there was none (in the two batches of 24 that were run alike: 1 each). In the three such runs written down in
@@ -81,10 +81,30 @@ detail the same thing: the 2 s file held 19 of its 30 pictures, 16 of them decod
 no error, so no `decoder_errors`; and the 0.73 s that is missing is shorter than `max_internal_gap_s` (2 s),
 so no gap either. Whether the decoder complains depends on the random bytes: files of the same size, from a
 burst begun at the same moment, were flagged in other runs. Both numbers are in the log (`packet_count`,
-`decoded_frame_count`), but nothing compares them with each other or with the frame rate. Not built: a warning
-for a file that holds fewer pictures than its length and frame rate imply, or fewer decodable pictures than
-packets. Until then that test fails now and then for this reason, on every version. Seen with the simulated
-camera only.
+`decoded_frame_count`), but nothing compared them with each other or with the frame rate. Seen with the
+simulated camera only.
+
+Since 0.3.29 three things say it, none of them a gap (each hole is shorter than `max_internal_gap_s`):
+
+1. *The file's own rhythm* (`media.probe.picture_holes`, at every validation level). The usual step between
+   two pictures is the median step. A step of at least `HOLE_STEPS` (4) intervals means three or more pictures
+   in a row are not there: warning `pictures_missing`, the count and the holes (seconds into the file, length)
+   in `validation_detail`, and a log entry `pictures_missing`. One or two dropped pictures are not reported.
+   Steps longer than `max_internal_gap_s` are left to the gap rules and to the leap of section 4.2.1.
+2. *Across the cut between two files* (`Finalizer._hole_before_start`). A burst that falls on a cut leaves no
+   hole inside either file. One run's files share one timeline, so this file's first picture is compared with
+   the last picture of the file before (`hole_before_start_s`).
+3. *The fingerprint pass* (`recorder.integrity`), which decodes every recording once and is the only full
+   decode where `validation = "packets"` (the default, and the laptop's setting). Fewer pictures decoded than
+   the file has packets, or anything the decoder complains about (which used to be thrown away), is a log
+   entry `pictures_not_decodable`. The sealed row is not changed.
+
+Why the rhythm and not a fixed frame rate: the rule must say nothing about a healthy stream. The site camera's
+own recordings (the three that were brought back) step by exactly one interval, 33 to 40 ms, apart from the
+leap. A camera that changes its frame rate by four times or more inside a file would be reported; none is
+known. Nothing is shown in the window: the marks are in the recording log, the diagnostic report and the
+export's list of recordings. Tests: `tests/unit/test_pictures_missing.py`, and
+`test_corrupted_stream_leaves_a_trace_at_the_default_check` beside the test above.
 
 **Missing intervals** are first-class rows in `recording_gaps`, never inferred later by subtraction.
 

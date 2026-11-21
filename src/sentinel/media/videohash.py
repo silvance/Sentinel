@@ -58,6 +58,7 @@ class ContentHash:
     sha256: str          # content hash (over per-frame digests)
     method: str          # how it was computed (needed to reproduce it)
     frame_count: int     # frames actually decoded and hashed
+    messages: tuple[str, ...] = ()   # what the decoder complained about while it decoded (error level), if anything
 
 
 @dataclass(frozen=True)
@@ -96,7 +97,10 @@ def compute_content_hash(path: Path, ffmpeg: str = "ffmpeg", ffmpeg_version: str
         frames_out.parent.mkdir(parents=True, exist_ok=True)
         frames_out.write_text(text, encoding="ascii", newline="\n")
     method = f"{METHOD_PREFIX};pix_fmt={pix_fmt or 'decoder-native'};ffmpeg={short_version(ffmpeg_version)}"
-    return ContentHash(sha256=aggregate(frames), method=method, frame_count=len(frames))
+    # Where files are checked by their packets only (the default), this is the one time a recording is decoded
+    # in full. Until 0.3.29 what the decoder said about it was thrown away.
+    said = tuple(ln.strip() for ln in cp.stderr.decode("utf-8", "replace").splitlines() if ln.strip())
+    return ContentHash(sha256=aggregate(frames), method=method, frame_count=len(frames), messages=said)
 
 
 def parse_framehash(text: str) -> list[FrameHash]:

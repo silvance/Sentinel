@@ -369,3 +369,66 @@ def test_the_line_for_the_log_folder_never_creates_that_folder(site: Site) -> No
     shutil.rmtree(site.cfg.log_path, ignore_errors=True)
     newlog.note_attempt(site.cfg, "started")              # as administrator the folder would get the wrong owner
     assert not site.cfg.log_path.exists()
+
+
+# ---------------------------------------------------------------------- 0.3.29: not twice by habit
+def test_a_second_new_log_on_the_same_computer_needs_words_that_name_what_is_lost(site: Site, monkeypatch,
+                                                                                  capsys) -> None:
+    """The step is meant to be done once, before real use. Done again on a computer in real use it deletes real
+    recordings, and NEW LOG is what the person typed the first time and what every sheet says. So once it has
+    been done, the words are "DELETE <n> RECORDINGS" with the number the listing shows, the listing says so in
+    lines that cannot be overlooked, and NEW LOG is told it is not enough."""
+    monkeypatch.setattr(newlog, "run", lambda *a, **k: _run(*a, **{**k, "same_volume_ok": True, "sleep": lambda _s: None}))
+    site.cfg.log_path.mkdir(parents=True, exist_ok=True)
+    first = iter(["NEW LOG", "J. Laney"])
+    code, out = _main(site, monkeypatch, capsys, admin=lambda: True, interactive=True, reader=lambda _p: next(first))
+    assert code == newlog.EXIT_OK and "ALREADY DONE" not in out          # the first time: as it always was
+
+    # Nothing recorded since: nothing to lose, so nothing more is asked than the first time.
+    plan = _survey(site.cfg, locator=site.locator, same_volume_ok=True)
+    assert plan.earlier_start_utc and plan.earlier_start_who == "J. Laney" and plan.earlier_logs_set_aside == 1
+    assert plan.recordings == 0 and not newlog.done_before(plan) and newlog.confirm_words(plan) == "NEW LOG"
+
+    # Real use: recordings again, copied to the drive.
+    led = Ledger(site.db)
+    try:
+        add_synthetic_run(led, site.cfg, 4, MIB)
+        site.copy(led)
+    finally:
+        led.close()
+    spool, on_drive = site.spool_files(), site.drive_files()
+    assert len(spool) >= 4 and on_drive
+
+    prompts: list[str] = []
+
+    def habit(prompt: str) -> str:
+        prompts.append(prompt)
+        return "NEW LOG"
+
+    code, out = _main(site, monkeypatch, capsys, admin=lambda: True, interactive=True, reader=habit)
+    assert code == newlog.EXIT_REFUSED
+    assert "THIS WAS ALREADY DONE ON THIS COMPUTER on " in out and " by J. Laney." in out and "REAL" in out
+    assert "type DELETE 4 RECORDINGS and press Enter" in prompts[0]
+    assert "NEW LOG is not enough here" in out and "Not confirmed. Nothing was changed." in out
+    assert site.spool_files() == spool and site.drive_files() == on_drive and site.control.calls[-1] == "start"
+    code, out = _main(site, monkeypatch, capsys, admin=lambda: True, yes=True, confirm="NEW LOG")    # nor a script's
+    assert code == newlog.EXIT_REFUSED and site.spool_files() == spool
+
+    again = iter(["delete 4  recordings", "J. Laney"])                  # case and spacing do not matter
+    code, out = _main(site, monkeypatch, capsys, admin=lambda: True, interactive=True, reader=lambda _p: next(again))
+    assert code == newlog.EXIT_OK, out
+    assert site.spool_files() == []
+    started = site.events(site.db, "recording_log_started")[0]
+    assert started["done_before_on_this_computer"]["earlier_start_who"] == "J. Laney"
+    assert started["done_before_on_this_computer"]["earlier_logs_set_aside"] == 1
+    said = "\n".join(_attempts(site))
+    assert "a new recording log was started here before" in said and "asking for 'DELETE 4 RECORDINGS'" in said
+    assert "something other than DELETE 4 RECORDINGS was typed" in said
+
+
+def test_the_first_new_log_says_nothing_about_an_earlier_one(site: Site) -> None:
+    plan = _survey(site.cfg, locator=site.locator, same_volume_ok=True)
+    assert plan.recordings == 3 and not newlog.done_before(plan) and newlog.confirm_words(plan) == "NEW LOG"
+    assert not any("ALREADY DONE" in ln for ln in newlog.describe(plan, site.cfg))
+    assert site.new_log().set_aside
+    assert site.events(site.db, "recording_log_started")[0]["done_before_on_this_computer"] is None

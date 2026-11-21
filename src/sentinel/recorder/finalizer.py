@@ -26,7 +26,7 @@ from ..clock import iso_utc, parse_iso_utc
 from ..config import AppConfig
 from ..db import EventSpec, InternalGap, Ledger
 from ..hashing import sha256_file
-from ..media.probe import ProbeResult, first_video_pts, probe_segment
+from ..media.probe import ProbeResult, first_video_pts, hole_before, probe_segment
 from ..models import TERMINAL_STATES, GapKind, RunEndReason, SegmentState
 from ..platform.base import Platform
 from ..storage.monitor import StorageMonitor
@@ -158,6 +158,31 @@ class Finalizer:
         return any(t >= cutoff for t, _ in self.recent_errors)
 
     # ------------------------------------------------------------------ segments
+    def _hole_before_start(self, seg, res, warnings: list[str]) -> None:  # noqa: ANN001
+        """Pictures missing between the file before and this one (0.3.29). A burst of corrupted camera data that
+        falls on a cut leaves no hole inside either file; the two files' own time labels show it, because one
+        run's files share one timeline. A step long enough to be a gap is left to the gap rules."""
+        try:
+            seq = int(seg["seq"])
+        except (TypeError, ValueError, KeyError, IndexError):
+            return
+        if seq <= 0 or res.first_pts_s is None or not res.frame_interval_s:
+            return
+        try:
+            rows = self.ledger.query("SELECT validation_detail FROM segments WHERE run_id=? AND seq=?",
+                                     (seg["run_id"], seq - 1))
+            before = json.loads(rows[0][0] or "{}") if rows else {}
+        except (ValueError, TypeError, IndexError):
+            return
+        last = before.get("last_pts_s") if isinstance(before, dict) else None
+        if not isinstance(last, (int, float)):
+            return
+        n, length = hole_before(res.first_pts_s, float(last), res.frame_interval_s, self.cfg.recording.max_internal_gap_s)
+        if n:
+            res.missing_before_start, res.hole_before_start_s = n, length
+            if "pictures_missing" not in warnings:
+                warnings.append("pictures_missing")
+
     def process_segment(self, segment_id: str, kind: str) -> SegmentState | None:
         seg = self.ledger.get_segment(segment_id)
         if seg is None:
@@ -183,6 +208,7 @@ class Finalizer:
         res = probe_segment(path, self.cfg.tools.ffprobe, self.cfg.tools.ffmpeg, rec.validation,
                             rec.max_internal_gap_s, audio=self.cfg.camera.include_audio)
         warnings: list[str] = list(res.warnings)
+        self._hole_before_start(seg, res, warnings)
 
         # The writer has finished with this file (listed by FFmpeg, or FFmpeg has exited).
         self.platform.fsync_file(path)
@@ -201,6 +227,16 @@ class Finalizer:
             new_state = SegmentState.CORRUPT
 
         events: list[EventSpec] = []
+        lost = res.pictures_missing + res.missing_before_start
+        if lost:
+            # Not a gap (each hole is shorter than max_internal_gap_s), so said in the log by itself.
+            events.append(EventSpec("warning", "recorder", "pictures_missing",
+                                    f"{lost} picture(s) are missing from {seg['rel_path']}: the camera's data "
+                                    "arrived damaged or incomplete",
+                                    {"segment_id": segment_id, "run_id": seg["run_id"], "pictures_missing": lost,
+                                     "holes": res.picture_holes[:20],
+                                     "hole_before_start_s": res.hole_before_start_s,
+                                     "frame_interval_s": res.frame_interval_s}))
         if footage["leaps"] and footage["rule"] == "launch":
             # The recorder itself logs a leap it sees (camera_time_jump). This one it did not see.
             events.append(EventSpec("warning", "recorder", "camera_time_jump_in_file",

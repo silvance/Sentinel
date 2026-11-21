@@ -78,6 +78,11 @@ class Plan:
     chain_seq: int | None = None
     chain_hash: str | None = None
     drive_names: list[str] = field(default_factory=list)      # names given to drives so far (kept in use)
+    # 0.3.29: a new recording log was started on this computer before (the log in use began with that step, or
+    # a log set aside is in the data folder). What is listed now is then, most likely, real.
+    earlier_start_utc: str | None = None
+    earlier_start_who: str | None = None
+    earlier_logs_set_aside: int = 0
     spool_files: int = 0
     spool_bytes: int = 0
     drives: list[DrivePlan] = field(default_factory=list)
@@ -173,6 +178,14 @@ def _old_log_facts(db: Path, plan: Plan) -> None:
                 if isinstance(d, dict) and d.get(key) and str(d[key]) not in names:
                     names.append(str(d[key]))
         plan.drive_names = names
+        for r in led.query("SELECT ts_utc, detail FROM events WHERE code='recording_log_started' "
+                           "ORDER BY event_id LIMIT 1"):
+            plan.earlier_start_utc = str(r[0])
+            try:
+                d = json.loads(r[1] or "{}")
+                plan.earlier_start_who = str(d.get("who") or "") or None if isinstance(d, dict) else None
+            except ValueError:
+                pass
     finally:
         led.close()
 
@@ -192,6 +205,10 @@ def survey(cfg: AppConfig, *, locator: Any = None, empty_drives: bool = True,
 
     plan = Plan()
     _old_log_facts(cfg.data_path / "sentinel.db", plan)
+    try:
+        plan.earlier_logs_set_aside = sum(1 for p in (cfg.data_path / SET_ASIDE_DIR).iterdir() if p.is_dir())
+    except OSError:
+        pass
     if cfg.spool_path.is_dir():
         plan.spool_files, plan.spool_bytes = _tree(cfg.spool_path)
     if not empty_drives or not cfg.archive.enabled:
@@ -233,10 +250,32 @@ def _day(iso: str | None) -> str:
     return (iso or "?")[:10]
 
 
+def done_before(plan: Plan) -> bool:
+    """A new recording log was started on this computer before, and there is something to lose since."""
+    return bool(plan.earlier_start_utc or plan.earlier_logs_set_aside) and bool(plan.recordings or plan.spool_files)
+
+
+def confirm_words(plan: Plan) -> str:
+    """What has to be typed. The first time: NEW LOG. Once this step has been done on the computer, the
+    recordings since then are most likely real, so the words name what is lost and how much of it: they cannot
+    be typed by habit or from the sheet of the first time."""
+    return f"DELETE {plan.recordings} RECORDINGS" if done_before(plan) else CONFIRM_WORDS
+
+
 def describe(plan: Plan, cfg: AppConfig) -> list[str]:
     """What will happen, for the person to read before confirming."""
     out = ["START A NEW RECORDING LOG", "",
            "Use this once, when testing is over and before the real recordings start.", ""]
+    if done_before(plan):
+        when = (f"on {_day(plan.earlier_start_utc)} (UTC)" if plan.earlier_start_utc else
+                f"before ({plan.earlier_logs_set_aside} earlier log(s) are set aside on this computer)")
+        who = f" by {plan.earlier_start_who}" if plan.earlier_start_who else ""
+        out += ["!" * 98,
+                f"!!  THIS WAS ALREADY DONE ON THIS COMPUTER {when}{who}.",
+                "!!  What has been recorded since then is, most likely, REAL. This step would DELETE it from this",
+                "!!  computer and from every archive drive that is plugged in. Only the recording log is kept.",
+                "!!  If any of it may be needed, type NO now and send the diagnostic report to technical support.",
+                "!" * 98, ""]
     if plan.log_exists:
         span = (f", {_day(plan.first_start_utc)} to {_day(plan.last_end_utc)}" if plan.recordings else "")
         out += [f"1. The recording log in use lists {plan.recordings} recording(s){span} and {plan.entries} "
@@ -478,7 +517,12 @@ def run(cfg_path: Path, cfg: AppConfig, *, who: str, reason: str, empty_drives: 
                                                        "not_removed": d.not_removed[:50],
                                                        "not_removed_count": len(d.not_removed)}
                                                       for d in plan.drives],
-                           "archive_drives_not_emptied": plan.skipped_drives, "left_in_place": left})
+                           "archive_drives_not_emptied": plan.skipped_drives, "left_in_place": left,
+                           # 0.3.29: said in so many words when this was not the first time on this computer
+                           "done_before_on_this_computer": (
+                               {"earlier_start_utc": plan.earlier_start_utc, "earlier_start_who": plan.earlier_start_who,
+                                "earlier_logs_set_aside": plan.earlier_logs_set_aside}
+                               if (plan.earlier_start_utc or plan.earlier_logs_set_aside) else None)})
             # Drive names stay taken: the next new drive is not given the name of one that already exists.
             for name in plan.drive_names:
                 led.add_event("audit", "drives", NAME_CARRIED,
@@ -625,10 +669,11 @@ def discard_typed_ahead() -> None:
         pass
 
 
-def ask_to_confirm(reader: Callable[[str], str], discard: Callable[[], None] = lambda: None) -> str:
+def ask_to_confirm(reader: Callable[[str], str], discard: Callable[[], None] = lambda: None,
+                   words: str = CONFIRM_WORDS) -> str:
     """What the person typed. An empty line is not an answer: it is asked again (Enter pressed to "continue"
     must not cancel the step unnoticed). Anything else that is not the words cancels, as it always did."""
-    prompt = f"To go on, type {CONFIRM_WORDS} and press Enter. To cancel, type NO and press Enter: "
+    prompt = f"To go on, type {words} and press Enter. To cancel, type NO and press Enter: "
     for _ in range(ASK_TIMES):
         discard()
         try:
@@ -677,17 +722,24 @@ def main(cfg_path: Path | None, *, who: str | None = None, reason: str | None = 
         print("This needs Windows administrator rights (right-click, \"Run as administrator\"). Nothing was changed.")
         note_attempt(cfg, "ended: no administrator rights, nothing changed")
         return EXIT_REFUSED
+    words = confirm_words(plan)
+    if words != CONFIRM_WORDS:
+        note_attempt(cfg, f"a new recording log was started here before ({plan.earlier_start_utc or 'log set aside'}); "
+                          f"asking for {words!r}")
     if yes:
         typed = (confirm or "").strip()
     elif interactive:
-        typed = ask_to_confirm(reader, discard_typed_ahead if reader is input else (lambda: None))
+        typed = ask_to_confirm(reader, discard_typed_ahead if reader is input else (lambda: None), words)
     else:
         typed = ""
-    if typed.upper() != CONFIRM_WORDS:
+    if " ".join(typed.upper().split()) != words:
+        if words != CONFIRM_WORDS and typed.upper() == CONFIRM_WORDS:
+            print(f"{CONFIRM_WORDS} is not enough here: this step was already done on this computer (see the lines "
+                  "marked !! above).")
         print("Not confirmed. Nothing was changed.")
         note_attempt(cfg, "ended: not confirmed, nothing changed ("
                           + ("nobody to ask" if not (yes or interactive) else
-                             "nothing was typed" if not typed else f"something other than {CONFIRM_WORDS} was typed")
+                             "nothing was typed" if not typed else f"something other than {words} was typed")
                           + ")")
         return EXIT_REFUSED
     if not who and interactive and not yes:
