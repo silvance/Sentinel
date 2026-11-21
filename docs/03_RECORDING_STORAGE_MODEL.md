@@ -106,6 +106,23 @@ known. Nothing is shown in the window: the marks are in the recording log, the d
 export's list of recordings. Tests: `tests/unit/test_pictures_missing.py`, and
 `test_corrupted_stream_leaves_a_trace_at_the_default_check` beside the test above.
 
+**Tried (2026-11-20, development PC).** The real recorder from the source, files checked by their packets
+only, the burst begun at 21 points 0.1 s apart across a 2 s file's length: the damaged file was marked
+`pictures_missing` every time (10 to 12 pictures, a hole of 0.73 to 0.87 s), one log entry each, no other file
+marked; `pictures_not_decodable` in 20 of the 21 (in one, every remaining picture decoded). Where the burst
+reached a planned cut the file was simply longer and held the hole, so the rule for a hole across a cut was
+never needed there; it is covered by its unit test only. The built 0.3.29 (commit 0c7f8a2), its own recorder
+with 10 s files against the simulated camera, one burst 14 s after connecting: the second file sealed with 139
+of 150 pictures, warning `pictures_missing` (11, a hole of 0.8 s at 3.9 s), log entries `pictures_missing` and
+`pictures_not_decodable` (3 of 139), no gap inside, the other files clean, and the program's own check of the
+log: intact. Full suite on that commit (the PC in use meanwhile): 1766 passed, 2 skipped, 2 failed, both on
+the recorder's time correction being held back (`time_correction_limited`), which that PC does on some
+evenings whatever the version: the timing test `test_absorbed_freeze_is_still_a_gap_under_drift`, and
+`test_continuous_recording_segments_are_contiguous_hashed_sealed`, which wants no warning at all on a healthy
+stream and got that one. Run in turn straight afterwards the second failed 6 times of 6 on the commit before
+this change (9e9ded2) as on this one; `pictures_missing` appeared in none of those runs. **Not tried:** damaged
+data from the real camera (none has been seen from it); a camera that changes its frame rate inside a file.
+
 **Missing intervals** are first-class rows in `recording_gaps`, never inferred later by subtraction.
 
 ## 4. Timestamps

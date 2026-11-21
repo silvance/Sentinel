@@ -459,6 +459,10 @@ it was done and that what was recorded since is most likely real; the words to t
 `DELETE <n> RECORDINGS` with the number the listing shows (`confirm_words`; `--yes --confirm` needs the same
 words); NEW LOG is answered with "is not enough here"; and the new log's first entry carries
 `done_before_on_this_computer`. With nothing recorded since, nothing more is asked than the first time.
+Tried 2026-11-20 with the built 0.3.29 (commit 0c7f8a2) on a trial folder where the step had been done and five
+recordings made since: `--dry-run` opens with the `!!` lines (date, name); and the question from the source in
+a real console: NEW LOG typed, "NEW LOG is not enough here", nothing changed; `delete 5 recordings` typed, it
+goes on to the name. Not tried with administrator rights through the script, nor on the laptop.
 
 **Tried (2026-11-20, development PC),** each in a real console of its own, hidden, keys put into its input
 buffer as a keyboard does: the question from the source, Enter twice during a four-second look: 0.3.27 code
