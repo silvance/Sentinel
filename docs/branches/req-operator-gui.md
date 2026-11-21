@@ -457,7 +457,13 @@ NEW LOG and a name. The script with the built 0.3.29 and with the built 0.3.28, 
 NOT STARTED in its box, the window still there after Enter three times and "x", gone after "close"; with the
 administrator check taken out: waits at "Press any key" (6 s, no key), then one key and two more Enters at
 once: the listing, the program's refusal (no administrator rights), NOT DONE in its box, the window still there
-after more Enters and "q", gone after CLOSE; the lines in `new-recording-log.log`.
+after more Enters and "q", gone after CLOSE; the lines in `new-recording-log.log`. The helper used for this is
+`tests/tools/console_probe.py`.
+Full suite on 0.3.29 (commit a52c5d4, the PC in use meanwhile): 1755 passed, 2 skipped, 2 failed. Both are tests
+of the recorder, which 0.3.29 does not touch, and both fail on unchanged 0.3.27 as well: the timing test
+`test_absorbed_freeze_is_still_a_gap_under_drift` (run in turn straight afterwards: 0.3.27 failed, passed,
+failed; 0.3.29 passed, passed, failed), and `test_corrupted_stream_data_does_not_stop_recording`, whose cause is
+a limit of the recorder itself (docs/03_RECORDING_STORAGE_MODEL.md section 3, "A known limit").
 **Not tried:** with administrator rights in a window on the desktop (the trials here had none, so the program
 stopped before its question; the question was tried from the source); in Windows Terminal with nobody at the
 PC (console windows opened on the desktop there took the key presses of the person using it, which is how the

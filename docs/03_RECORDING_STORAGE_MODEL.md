@@ -73,6 +73,19 @@ State transitions are enforced in `sentinel.db` (illegal transitions raise).
 A `FINALIZED` segment may still carry a **warning** (e.g. internal timestamp gap > `max_internal_gap_s`,
 clock-step during recording); warnings are columns, not states.
 
+**A known limit: pictures lost to corrupted camera data can leave no warning (found 2026-11-20).**
+`test_corrupted_stream_data_does_not_stop_recording` overwrites 400 transport packets of the simulated camera
+with random bytes and expects a trace in the log. In 5 of 47 runs on 0.3.29 and in 1 of 30 on unchanged 0.3.27
+there was none (in the two batches of 24 that were run alike: 1 each). In the three such runs written down in
+detail the same thing: the 2 s file held 19 of its 30 pictures, 16 of them decodable; the decode pass printed
+no error, so no `decoder_errors`; and the 0.73 s that is missing is shorter than `max_internal_gap_s` (2 s),
+so no gap either. Whether the decoder complains depends on the random bytes: files of the same size, from a
+burst begun at the same moment, were flagged in other runs. Both numbers are in the log (`packet_count`,
+`decoded_frame_count`), but nothing compares them with each other or with the frame rate. Not built: a warning
+for a file that holds fewer pictures than its length and frame rate imply, or fewer decodable pictures than
+packets. Until then that test fails now and then for this reason, on every version. Seen with the simulated
+camera only.
+
 **Missing intervals** are first-class rows in `recording_gaps`, never inferred later by subtraction.
 
 ## 4. Timestamps
@@ -247,6 +260,11 @@ Tests: `tests/unit/test_camera_time_jump.py` (the numbers of the recording of 20
 NUT input as it does from RTSP, and smooths it out of MPEG-TS). The new sealing step was also run on the two
 recordings themselves: the 16 s run starts 0.10 s after its launch instead of 3 h 20 min before, 15.97 s long,
 no gap; the 7 s run 0.22 s after its launch instead of 12 h 41 min before.
+
+**With the real camera (owner, 2026-11-20).** 0.3.28 was installed on the laptop that evening, before it went
+into real use. The check on its install sheet (restart the recorder; the newest recording starts at the time of
+the restart, not hours earlier, and shows no gap inside; done twice) passed, by the owner's answer "Yes, it
+passed". No recording or diagnostic report made there with 0.3.28 has been looked at here.
 
 ### 4.3 Alternatives considered
 
